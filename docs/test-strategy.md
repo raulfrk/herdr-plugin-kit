@@ -94,3 +94,117 @@ it with zero generated cases. Gremlins produced parseable JSON for killed and
 deliberately surviving mutants and restored source bytes exactly. The run also
 reproduced the --test-cpu and native-threshold defects above, and proved the
 empty-tree ancestor-commit workaround.
+
+## Runtime foundation hypotheses
+
+The Herdr host fixtures below were derived on 2026-09-02 from installed Herdr
+0.8.2 command help, generated completion metadata, its bundled API schema, and
+read-only `plugin action list`, `plugin log list`, and `session list --json`
+output. Tests use injected runners and do not create, invoke, stop, or delete
+live Herdr resources.
+
+## HYP-MANIFEST-01 — Valid declarations are stable and unambiguous
+
+- Claim: a manifest accepts only bounded stable plugin/action/capability IDs,
+  display metadata, executable arguments, and unique versioned interface
+  declarations with an explicit provides/requires direction.
+- Fault model: permissive IDs, duplicate declarations, zero interface versions,
+  unknown JSON fields, trailing JSON, or unbounded collections are accepted.
+- Setup or generator: canonical fixtures plus Rapid-generated identifier parts
+  and argument counts around the declared limit.
+- Independent oracle: the documented identifier grammar, collection constants,
+  and duplicate keys formed independently in the test fixture.
+- Falsified when: a valid generated declaration is rejected or any malformed or
+  over-limit declaration validates.
+- Diagnostics: Rapid seed and minimized ID/count; offending field and index in
+  the validation error. No manifest secrets are logged.
+
+## HYP-PROCESS-01 — Subprocess output and exit state are deterministic
+
+- Claim: stdout and stderr never exceed their independent limits, truncation is
+  explicit, and a normal nonzero exit retains its exact exit code.
+- Fault model: buffers grow without bound, short writes alter the child, output
+  truncation is silent, or wait errors erase the process exit status.
+- Setup or generator: local `sh` commands emit known byte sequences and exit 7.
+- Independent oracle: literal expected byte prefixes, truncation flags, typed
+  runner error category, and shell exit code.
+- Falsified when: captured bytes exceed/differ from the prefix, truncation is
+  unreported, or the result does not contain exit code 7.
+- Diagnostics: command fixture, result fields, and captured bounded streams.
+
+## HYP-PROCESS-02 — Cancellation reaps the complete Linux process group
+
+- Claim: cancellation sends TERM, escalates after the configured grace period,
+  waits for the leader, and leaves no surviving descendant process.
+- Fault model: only the leader is signaled, KILL is not bounded, `Wait` is
+  abandoned, or a descendant/goroutine leaks.
+- Setup or generator: a shell and child both ignore TERM; a short context and
+  grace period force process-group KILL.
+- Independent oracle: canceled/killed result flags and Linux signal-0 lookup of
+  the emitted child PID after runner return; the race suite checks shared state.
+- Falsified when: Run does not return promptly, the child PID remains alive, or
+  cancellation is reported as an ordinary exit.
+- Diagnostics: bounded child PID, elapsed state, result flags, and race report.
+
+## HYP-ACTION-01 — Action identity and receipts remain caller-stable
+
+- Claim: list/invoke commands preserve `(plugin_id, action_id)`, invocation
+  returns Herdr's exact opaque `log_id`, and polling selects that exact receipt.
+- Fault model: IDs are normalized or substituted, the newest unrelated log is
+  returned, or unknown/oversized JSON is accepted.
+- Setup or generator: strict Herdr 0.8.2 response fixtures and scripted command
+  results containing stable and mismatched identities.
+- Independent oracle: literal requested IDs and opaque receipt ID held by the
+  test, independent of host parsing.
+- Falsified when: command arguments or returned IDs differ, a mismatched log is
+  selected, or strict decoding accepts an unknown field.
+- Diagnostics: scripted argv and bounded fixture/result; command output is not
+  emitted outside the test failure.
+
+## HYP-ACTION-02 — Receipt polling follows the finite lifecycle
+
+- Claim: the receipt model remains `running` until the first `succeeded` or
+  `failed` state, preserves the initial receipt identity, then stops polling.
+- Fault model: a terminal state is skipped, polling continues after terminal,
+  identity changes, or context cancellation is ignored.
+- Setup or generator: Rapid state model with 0–5 running transitions followed
+  by a generated succeeded/failed transition; explicit canceled-context case.
+- Independent oracle: model transition count, selected terminal state, and the
+  initial plugin/action/log tuple.
+- Falsified when: returned state/identity differs, runner call count exceeds the
+  model trace, or cancellation does not end the wait.
+- Diagnostics: Rapid seed, minimized transition trace, argv history, and state.
+
+## HYP-SESSION-01 — Session operations compose only supported commands
+
+- Claim: list/stop/delete map to their documented Herdr 0.8.2 argv, while open
+  at a directory executes exactly `--session NAME` followed by a session-routed
+  `workspace create --cwd ABSOLUTE_CLEAN_PATH`.
+- Fault model: a nonexistent one-command cwd operation is claimed, the second
+  command targets the default session, unsafe path/name input reaches the
+  runner, or shortcut binding is advertised.
+- Setup or generator: injected response fixtures, exact argv snapshots, unsafe
+  name/path table, and the exported capability description.
+- Independent oracle: installed CLI help/completion evidence and literal
+  two-command expected sequence.
+- Falsified when: argv/order differs, execution occurs for invalid input, or
+  one-command cwd/shortcut support is true.
+- Diagnostics: argv history, validated name/path, and bounded JSON error. No
+  live session or workspace is created.
+
+## HYP-INTEROP-01 — Versioned envelopes are bounded and cancelable
+
+- Claim: requests explicitly identify target plugin/interface/version/method,
+  correlation ID and deadline; request/response JSON payloads are capped at
+  1 MiB; caller/handler contracts carry context cancellation and typed errors.
+- Fault model: an expired or canceled call proceeds, an oversized/invalid JSON
+  payload validates, response payload and error coexist, or an unknown error
+  category crosses the boundary.
+- Setup or generator: Rapid payload sizes around 1 MiB, fixed expired/canceled
+  contexts, invalid JSON, and representative invalid response error shapes.
+- Independent oracle: raw payload length, `json.Valid`, context state, and the
+  closed category set declared by the contract.
+- Falsified when: acceptance differs from the independent boundary predicate,
+  cancellation is not visible to a handler, or an invalid response validates.
+- Diagnostics: Rapid seed/minimized size, category, correlation ID, and context
+  error; payload content is omitted.
