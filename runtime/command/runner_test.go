@@ -35,6 +35,81 @@ func TestRunnerBoundsOutputAndReportsTruncation(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsEitherOutputStreamTruncating(t *testing.T) {
+	tests := []struct {
+		name            string
+		script          string
+		stdoutTruncated bool
+		stderrTruncated bool
+	}{
+		{name: "stdout", script: "printf abcde", stdoutTruncated: true},
+		{name: "stderr", script: "printf abcde >&2", stderrTruncated: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := (ExecRunner{StdoutLimit: 4, StderrLimit: 4}).Run(context.Background(), "sh", []string{"-c", test.script})
+			var runErr *RunError
+			if !errors.As(err, &runErr) || runErr.Kind != ErrorTruncated {
+				t.Fatalf("error = %v", err)
+			}
+			if result.StdoutTruncated != test.stdoutTruncated || result.StderrTruncated != test.stderrTruncated {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestRunErrorDescribesKindAndCause(t *testing.T) {
+	cause := errors.New("permission denied")
+	withCause := &RunError{Kind: ErrorStart, Cause: cause}
+	if got, want := withCause.Error(), "command start: permission denied"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(withCause, cause) {
+		t.Fatalf("errors.Is(%v, cause) = false", withCause)
+	}
+
+	withoutCause := &RunError{Kind: ErrorTruncated}
+	if got, want := withoutCause.Error(), "command output_truncated"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestRunnerRejectsCanceledContextBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := (ExecRunner{}).Run(ctx, "sh", []string{"-c", "exit 0"})
+	var runErr *RunError
+	if !errors.As(err, &runErr) || runErr.Kind != ErrorCanceled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	if result.ExitCode != -1 || !result.Canceled {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunnerRejectsEmptyExecutable(t *testing.T) {
+	result, err := (ExecRunner{}).Run(context.Background(), "", nil)
+	var runErr *RunError
+	if !errors.As(err, &runErr) || runErr.Kind != ErrorStart || runErr.Cause == nil {
+		t.Fatalf("error = %v", err)
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunnerReportsStartFailureWithoutExitCode(t *testing.T) {
+	result, err := (ExecRunner{}).Run(context.Background(), filepath.Join(t.TempDir(), "missing"), nil)
+	var runErr *RunError
+	if !errors.As(err, &runErr) || runErr.Kind != ErrorStart || runErr.Cause == nil {
+		t.Fatalf("error = %v", err)
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestRunnerReturnsDeterministicExit(t *testing.T) {
 	result, err := (ExecRunner{}).Run(context.Background(), "sh", []string{"-c", "exit 7"})
 	var runErr *RunError
@@ -65,6 +140,70 @@ func TestPropertyBoundedBuffer(t *testing.T) {
 			t.Fatalf("limit=%d length=%d got=%d truncated=%v", limit, length, len(got), truncated)
 		}
 	})
+}
+
+func TestBoundedBufferPreservesPrefixAcrossWrites(t *testing.T) {
+	buffer := newCapBuffer(5)
+	for _, input := range []string{"ab", "cde", "fg"} {
+		written, err := buffer.Write([]byte(input))
+		if err != nil || written != len(input) {
+			t.Fatalf("Write(%q) = (%d, %v)", input, written, err)
+		}
+	}
+	got, truncated := buffer.snapshot()
+	if string(got) != "abcde" || !truncated {
+		t.Fatalf("snapshot = (%q, %v)", got, truncated)
+	}
+}
+
+func TestBoundedBufferExactLimitIsNotTruncated(t *testing.T) {
+	buffer := newCapBuffer(5)
+	if _, err := buffer.Write([]byte("abcde")); err != nil {
+		t.Fatal(err)
+	}
+	got, truncated := buffer.snapshot()
+	if string(got) != "abcde" || truncated {
+		t.Fatalf("snapshot = (%q, %v)", got, truncated)
+	}
+}
+
+func TestRunnerDefaults(t *testing.T) {
+	if got := limit(0); got != DefaultOutputLimit {
+		t.Fatalf("limit(0) = %d", got)
+	}
+	if DefaultOutputLimit != 1<<20 {
+		t.Fatalf("DefaultOutputLimit = %d", DefaultOutputLimit)
+	}
+	if got := limit(-1); got != DefaultOutputLimit {
+		t.Fatalf("limit(-1) = %d", got)
+	}
+	if got := limit(17); got != 17 {
+		t.Fatalf("limit(17) = %d", got)
+	}
+	if got := grace(0); got != DefaultTermGrace {
+		t.Fatalf("grace(0) = %v", got)
+	}
+	if DefaultTermGrace != 2*time.Second {
+		t.Fatalf("DefaultTermGrace = %v", DefaultTermGrace)
+	}
+	if got := grace(-1); got != DefaultTermGrace {
+		t.Fatalf("grace(-1) = %v", got)
+	}
+	if got := grace(17 * time.Millisecond); got != 17*time.Millisecond {
+		t.Fatalf("grace(custom) = %v", got)
+	}
+	if got := killWait(0); got != DefaultKillWait {
+		t.Fatalf("killWait(0) = %v", got)
+	}
+	if DefaultKillWait != 2*time.Second {
+		t.Fatalf("DefaultKillWait = %v", DefaultKillWait)
+	}
+	if got := killWait(-1); got != DefaultKillWait {
+		t.Fatalf("killWait(-1) = %v", got)
+	}
+	if got := killWait(19 * time.Millisecond); got != 19*time.Millisecond {
+		t.Fatalf("killWait(custom) = %v", got)
+	}
 }
 
 func TestRunnerCancellationKillsProcessGroup(t *testing.T) {
@@ -109,6 +248,28 @@ func TestRunnerKillsDescendantAfterLeaderExitsOnTerm(t *testing.T) {
 	assertProcessGone(t, pidBytes)
 }
 
+func TestRunnerTerminatesProcessGroupGracefully(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := (ExecRunner{TermGrace: time.Second}).Run(ctx, "sh", []string{"-c", `trap 'exit 0' TERM; sh -c 'trap "exit 0" TERM; echo $$ > "$1"; while :; do :; done' child "$1" & wait`, "runner-test", pidFile})
+		done <- outcome{result, err}
+	}()
+	pidBytes := waitForPIDFile(t, pidFile)
+	cancel()
+	got := waitOutcome(t, done)
+	var runErr *RunError
+	if !errors.As(got.err, &runErr) || runErr.Kind != ErrorCanceled {
+		t.Fatalf("error = %v", got.err)
+	}
+	if !got.result.Canceled || got.result.Killed || got.result.CleanupIncomplete {
+		t.Fatalf("result = %+v", got.result)
+	}
+	assertProcessGone(t, pidBytes)
+}
+
 func TestTeardownDeadlineDoesNotRequireLeaderCompletion(t *testing.T) {
 	done := make(chan error)
 	started := time.Now()
@@ -130,6 +291,27 @@ func TestTeardownPrefersObservableLeaderCompletionAtDeadline(t *testing.T) {
 		if !errors.Is(gotErr, wantErr) || !complete || !leaderReaped {
 			t.Fatalf("iteration=%d error=%v complete=%v leaderReaped=%v", i, gotErr, complete, leaderReaped)
 		}
+	}
+}
+
+func TestTeardownCompletionRequiresReapedLeaderAndAbsentGroup(t *testing.T) {
+	tests := []struct {
+		name         string
+		leaderReaped bool
+		groupExists  bool
+		complete     bool
+	}{
+		{name: "neither", leaderReaped: false, groupExists: false, complete: false},
+		{name: "leader only", leaderReaped: true, groupExists: false, complete: true},
+		{name: "group remains", leaderReaped: true, groupExists: true, complete: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, complete, leaderReaped := finishAtDeadline(nil, test.leaderReaped, nil, func() bool { return test.groupExists })
+			if complete != test.complete || leaderReaped != test.leaderReaped {
+				t.Fatalf("complete=%v leaderReaped=%v", complete, leaderReaped)
+			}
+		})
 	}
 }
 

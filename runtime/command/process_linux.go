@@ -15,5 +15,5 @@ func terminateProcessGroup(cmd *exec.Cmd) error {
 func killProcessGroup(cmd *exec.Cmd) error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 func processGroupExists(cmd *exec.Cmd) bool {
 	err := syscall.Kill(-cmd.Process.Pid, 0)
-	return err == nil || !errors.Is(err, syscall.ESRCH)
+	return !errors.Is(err, syscall.ESRCH)
 }

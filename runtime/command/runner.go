@@ -109,7 +109,7 @@ func (r ExecRunner) Run(ctx context.Context, executable string, args []string) (
 	}
 	result.Stdout, result.StdoutTruncated = out.snapshot()
 	result.Stderr, result.StderrTruncated = errOut.snapshot()
-	if leaderReaped && cmd.ProcessState != nil {
+	if leaderReaped {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	if result.CleanupIncomplete {
