@@ -1,0 +1,20 @@
+{
+  "critical_paths": [
+    "internal/actionhost/",
+    "internal/diagnostics/",
+    "internal/documentstore/",
+    "internal/interop/",
+    "internal/manifest/",
+    "internal/process/",
+    "internal/scaffold/",
+    "internal/sessionhost/"
+  ],
+  "critical": {
+    "adjusted_efficacy": 100,
+    "mutant_coverage": 100
+  },
+  "noncritical": {
+    "adjusted_efficacy": 85,
+    "mutant_coverage": 90
+  }
+}

@@ -1,0 +1,34 @@
+unleash:
+  integration: false
+  workers: 0
+  threshold:
+    efficacy: 0
+    mutant-coverage: 0
+  exclude-files:
+    - '(^|/)vendor/'
+    - '_generated\\.go$'
+    - '\\.gen\\.go$'
+
+mutants:
+  arithmetic-base:
+    enabled: true
+  conditionals-boundary:
+    enabled: true
+  conditionals-negation:
+    enabled: true
+  increment-decrement:
+    enabled: true
+  invert-assignments:
+    enabled: false
+  invert-bitwise:
+    enabled: false
+  invert-bwassign:
+    enabled: false
+  invert-negatives:
+    enabled: true
+  invert-logical:
+    enabled: true
+  invert-loopctrl:
+    enabled: false
+  remove-self-assignments:
+    enabled: false

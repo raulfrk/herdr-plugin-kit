@@ -1,0 +1,6 @@
+/.artifacts/
+/bin/
+/dist/
+*.cover
+*.prof
+rapid.fail

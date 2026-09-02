@@ -1,0 +1,120 @@
+#!/bin/sh
+set -eu
+
+mode=${1:-}
+base=${2:-}
+case "$mode" in
+  changed|full) ;;
+  *) echo "usage: mutation-run changed <base-commit> | full" >&2; exit 2 ;;
+esac
+if [ "$mode" = changed ] && [ -z "$base" ]; then
+  echo "changed mode requires a base commit" >&2
+  exit 2
+fi
+
+repo=$(git rev-parse --show-toplevel)
+candidate=$(git rev-parse HEAD)
+if [ -n "$(git status --porcelain)" ]; then
+  echo "mutation testing requires a clean committed candidate" >&2
+  exit 2
+fi
+
+if [ "$mode" = changed ]; then
+  if [ "$base" = 4b825dc642cb6eb9a060e54bf8d69288fbee4904 ]; then
+    base=$(git -C "$repo" rev-list --max-parents=0 "$candidate")
+  fi
+  base_tree=$(git -C "$repo" show -s --format=%T "$base" 2>/dev/null || true)
+  if [ "$base_tree" = 4b825dc642cb6eb9a060e54bf8d69288fbee4904 ]; then
+    echo "empty-root changes require make mutation-full" >&2
+    exit 2
+  fi
+fi
+
+gremlins_bin=$(command -v gremlins || true)
+if [ -z "$gremlins_bin" ]; then
+  echo "gremlins v0.6.0 is required" >&2
+  exit 2
+fi
+gremlins_version=$(go version -m "$gremlins_bin" | awk \
+  '$1 == "mod" && $2 == "github.com/go-gremlins/gremlins" { print $3 }')
+if [ "$gremlins_version" != "v0.6.0" ]; then
+  echo "gremlins v0.6.0 is required; found ${gremlins_version:-unknown}" >&2
+  exit 2
+fi
+
+cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+half=$((cpu_count / 2))
+if [ "$half" -lt 1 ]; then half=1; fi
+workers=${MUTATION_WORKERS:-$half}
+case "$workers" in
+  ''|*[!0-9]*) echo "MUTATION_WORKERS must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$workers" -lt 1 ] || [ "$workers" -gt "$half" ]; then
+  echo "MUTATION_WORKERS must be between 1 and $half" >&2
+  exit 2
+fi
+
+lock=${TMPDIR:-/tmp}/herdr-plugin-kit-exclusive.lock
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "mutation or live-device testing already holds $lock" >&2
+  exit 2
+fi
+run_root=
+worktree=
+cleanup() {
+  if [ -n "$worktree" ]; then
+    git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$run_root" ]; then
+    find "$run_root" -depth -delete 2>/dev/null || true
+  fi
+  rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+run_root=$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-kit-mutation.XXXXXX")
+worktree="$run_root/worktree"
+
+git -C "$repo" worktree add --detach "$worktree" "$candidate" >/dev/null
+report="$run_root/gremlins.json"
+gate_report="$run_root/gate.json"
+gate_stderr="$run_root/gate.stderr"
+before_manifest="$run_root/source-before.sha256"
+after_manifest="$run_root/source-after.sha256"
+(cd "$worktree" && git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$before_manifest"
+
+set -- unleash --workers "$workers" --output "$report"
+if [ "$mode" = changed ]; then
+  set -- "$@" --diff "$base"
+fi
+
+(cd "$worktree" && gremlins "$@")
+(cd "$worktree" && git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$after_manifest"
+cmp "$before_manifest" "$after_manifest"
+if [ -n "$(git -C "$worktree" status --porcelain --untracked-files=all)" ]; then
+  echo "mutation run changed the candidate worktree" >&2
+  exit 1
+fi
+gate_status=0
+(cd "$worktree" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} go run ./cmd/mutationgate check \
+  --report "$report" --policy mutation-policy.json \
+  --baseline docs/mutation-baseline.md --config .gremlins.yaml \
+  --candidate "$candidate" --base "$base" --scope "$mode" \
+  --gremlins-version "$gremlins_version" --output "$gate_report" \
+  2>"$gate_stderr") || gate_status=$?
+if [ ! -f "$gate_report" ]; then
+  printf '%s\n' \
+    '{"passed":false,"violations":["mutationgate failed before producing a gate report; see gate.stderr"]}' \
+    > "$gate_report"
+fi
+
+artifact_dir="$repo/.artifacts/mutation/$candidate"
+mkdir -p "$artifact_dir"
+install -m 0644 "$report" "$artifact_dir/gremlins.json"
+install -m 0644 "$gate_report" "$artifact_dir/gate.json"
+install -m 0644 "$gate_stderr" "$artifact_dir/gate.stderr"
+install -m 0644 "$before_manifest" "$artifact_dir/source-before.sha256"
+install -m 0644 "$after_manifest" "$artifact_dir/source-after.sha256"
+(cd "$artifact_dir" && sha256sum gremlins.json gate.json gate.stderr \
+  source-before.sha256 source-after.sha256 > SHA256SUMS)
+echo "mutation artifacts: $artifact_dir"
+exit "$gate_status"
