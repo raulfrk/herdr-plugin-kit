@@ -2,6 +2,7 @@ package sessionhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -62,6 +63,106 @@ func TestListStopDeleteCommands(t *testing.T) {
 	}
 }
 
+func TestListValidatesSessionNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "valid", output: `{"sessions":[{"name":"demo"}]}`},
+		{name: "invalid", output: `{"sessions":[{"name":"demo"},{"name":"../other"}]}`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &scriptedRunner{outputs: []string{tc.output}}
+			sessions, err := (Host{Runner: runner}).List(context.Background())
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "sessions[1]: invalid session name") {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil || len(sessions) != 1 || sessions[0].Name != "demo" {
+				t.Fatalf("sessions = %+v, error = %v", sessions, err)
+			}
+		})
+	}
+}
+
+func TestStopAndDeleteRequireMatchingResponses(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(Host) error
+		output string
+	}{
+		{
+			name:   "stop status",
+			invoke: func(host Host) error { return host.Stop(context.Background(), "demo") },
+			output: `{"status":"running","session":"demo"}`,
+		},
+		{
+			name:   "stop session",
+			invoke: func(host Host) error { return host.Stop(context.Background(), "demo") },
+			output: `{"status":"stopped","session":"other"}`,
+		},
+		{
+			name:   "delete status",
+			invoke: func(host Host) error { return host.Delete(context.Background(), "demo") },
+			output: `{"status":"present","session":"demo","directory":"/tmp/demo"}`,
+		},
+		{
+			name:   "delete session",
+			invoke: func(host Host) error { return host.Delete(context.Background(), "demo") },
+			output: `{"status":"deleted","session":"other","directory":"/tmp/demo"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &scriptedRunner{outputs: []string{tc.output}}
+			if err := tc.invoke(Host{Runner: runner}); err == nil {
+				t.Fatal("mismatched response accepted")
+			}
+		})
+	}
+}
+
+func TestCommandsPropagateRunnerErrors(t *testing.T) {
+	wantErr := errors.New("runner failed")
+	runner := runnerFunc(func(context.Context, string, []string) (command.Result, error) {
+		return command.Result{}, wantErr
+	})
+	tests := []struct {
+		name   string
+		invoke func(Host) error
+	}{
+		{name: "stop", invoke: func(host Host) error { return host.Stop(context.Background(), "demo") }},
+		{name: "delete", invoke: func(host Host) error { return host.Delete(context.Background(), "demo") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.invoke(Host{Runner: runner}); !errors.Is(err, wantErr) {
+				t.Fatalf("error = %v, want wrapped %v", err, wantErr)
+			}
+		})
+	}
+}
+
+func TestOpenAtDirectoryStopsAfterStartError(t *testing.T) {
+	wantErr := errors.New("runner failed")
+	calls := 0
+	runner := runnerFunc(func(context.Context, string, []string) (command.Result, error) {
+		calls++
+		return command.Result{}, wantErr
+	})
+	_, err := (Host{Runner: runner}).OpenAtDirectory(context.Background(), "demo", "/tmp/demo")
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "start named session") {
+		t.Fatalf("error = %v, want start error wrapping %v", err, wantErr)
+	}
+	if calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", calls)
+	}
+}
+
 func TestOpenAtDirectoryUsesProvenComposition(t *testing.T) {
 	runner := &scriptedRunner{outputs: []string{"", `{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"ws-1","number":1,"label":"repo","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"tab-1","agent_status":"unknown"},"tab":{},"root_pane":{}}}`}}
 	workspace, err := (Host{Runner: runner, Herdr: "/bin/herdr"}).OpenAtDirectory(context.Background(), "named", "/tmp/project")
@@ -77,6 +178,24 @@ func TestOpenAtDirectoryUsesProvenComposition(t *testing.T) {
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %q, want %q", runner.calls, want)
+	}
+}
+
+func TestOpenAtDirectoryRequiresCreatedWorkspace(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "result type", output: `{"id":"cli:workspace:create","result":{"type":"workspace_present","workspace":{"workspace_id":"ws-1"},"tab":{},"root_pane":{}}}`},
+		{name: "workspace ID", output: `{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":""},"tab":{},"root_pane":{}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &scriptedRunner{outputs: []string{"", tc.output}}
+			if _, err := (Host{Runner: runner}).OpenAtDirectory(context.Background(), "demo", "/tmp/demo"); err == nil {
+				t.Fatal("invalid workspace response accepted")
+			}
+		})
 	}
 }
 
@@ -96,12 +215,60 @@ func TestSessionHostRejectsBoundedOutputFailures(t *testing.T) {
 	tests := []command.Result{
 		{Stdout: []byte(strings.Repeat(" ", MaxJSONBytes+1))},
 		{Stdout: []byte(`{"sessions":[]}`), StdoutTruncated: true},
+		{Stdout: []byte(`{"sessions":[]}`), StderrTruncated: true},
 	}
 	for _, result := range tests {
 		runner := runnerFunc(func(context.Context, string, []string) (command.Result, error) { return result, nil })
 		if _, err := (Host{Runner: runner}).List(context.Background()); err == nil {
 			t.Fatalf("accepted result %+v", result)
 		}
+	}
+}
+
+func TestSessionHostAcceptsJSONAtSizeLimit(t *testing.T) {
+	prefix := `{"sessions":[]}`
+	output := prefix + strings.Repeat(" ", MaxJSONBytes-len(prefix))
+	runner := &scriptedRunner{outputs: []string{output}}
+	sessions, err := (Host{Runner: runner}).List(context.Background())
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("sessions = %+v, error = %v", sessions, err)
+	}
+}
+
+func TestOpenAtDirectoryRejectsEitherTruncatedStream(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result command.Result
+	}{
+		{name: "stdout", result: command.Result{StdoutTruncated: true}},
+		{name: "stderr", result: command.Result{StderrTruncated: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			runner := runnerFunc(func(context.Context, string, []string) (command.Result, error) {
+				calls++
+				return tc.result, nil
+			})
+			_, err := (Host{Runner: runner}).OpenAtDirectory(context.Background(), "demo", "/tmp/demo")
+			if err == nil || !strings.Contains(err.Error(), "start named session") {
+				t.Fatalf("error = %v, want start error", err)
+			}
+			if calls != 1 {
+				t.Fatalf("runner calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestDirectoryLengthBoundary(t *testing.T) {
+	maximum := "/" + strings.Repeat("a", 4095)
+	if got, err := validateDirectory(maximum); err != nil || got != maximum {
+		t.Fatalf("4096-byte directory rejected: %v", err)
+	}
+
+	tooLong := maximum + "a"
+	if _, err := validateDirectory(tooLong); err == nil {
+		t.Fatal("4097-byte directory accepted")
 	}
 }
 
