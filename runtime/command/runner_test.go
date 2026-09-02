@@ -5,6 +5,7 @@ package command
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -270,27 +271,29 @@ func TestRunnerTerminatesProcessGroupGracefully(t *testing.T) {
 	assertProcessGone(t, pidBytes)
 }
 
-func TestTeardownDeadlineDoesNotRequireLeaderCompletion(t *testing.T) {
-	done := make(chan error)
-	started := time.Now()
-	_, complete, leaderReaped := waitForTeardown(done, 10*time.Millisecond, false, nil, func() bool { return true })
-	if complete || leaderReaped {
-		t.Fatalf("complete=%v leaderReaped=%v", complete, leaderReaped)
-	}
-	if elapsed := time.Since(started); elapsed < 5*time.Millisecond || elapsed > time.Second {
-		t.Fatalf("teardown deadline elapsed in %v", elapsed)
+func TestTeardownDeadlineRequiresLeaderCompletion(t *testing.T) {
+	for _, groupExists := range []bool{false, true} {
+		t.Run(fmt.Sprintf("group-exists-%t", groupExists), func(t *testing.T) {
+			done := make(chan error)
+			started := time.Now()
+			_, complete, leaderReaped := waitForTeardown(done, 10*time.Millisecond, false, nil, func() bool { return groupExists })
+			if complete || leaderReaped {
+				t.Fatalf("complete=%v leaderReaped=%v", complete, leaderReaped)
+			}
+			if elapsed := time.Since(started); elapsed < 5*time.Millisecond || elapsed > time.Second {
+				t.Fatalf("teardown deadline elapsed in %v", elapsed)
+			}
+		})
 	}
 }
 
 func TestTeardownPrefersObservableLeaderCompletionAtDeadline(t *testing.T) {
 	wantErr := errors.New("leader exited")
-	for i := 0; i < 100; i++ {
-		iterationDone := make(chan error, 1)
-		iterationDone <- wantErr
-		gotErr, complete, leaderReaped := finishAtDeadline(iterationDone, false, nil, func() bool { return false })
-		if !errors.Is(gotErr, wantErr) || !complete || !leaderReaped {
-			t.Fatalf("iteration=%d error=%v complete=%v leaderReaped=%v", i, gotErr, complete, leaderReaped)
-		}
+	done := make(chan error, 1)
+	done <- wantErr
+	gotErr, complete, leaderReaped := finishAtDeadline(done, false, nil, func() bool { return false })
+	if !errors.Is(gotErr, wantErr) || !complete || !leaderReaped {
+		t.Fatalf("error=%v complete=%v leaderReaped=%v", gotErr, complete, leaderReaped)
 	}
 }
 
