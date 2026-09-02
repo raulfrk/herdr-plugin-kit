@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	DefaultOutputLimit = 1 << 20
-	DefaultTermGrace   = 2 * time.Second
-	DefaultKillWait    = 2 * time.Second
+	DefaultOutputLimit               = 1 << 20
+	DefaultTermGrace   time.Duration = 2_000_000_000
+	DefaultKillWait    time.Duration = 2_000_000_000
 )
 
 type Result struct {
@@ -227,13 +227,9 @@ func (b *capBuffer) Write(p []byte) (int, error) {
 	defer b.mu.Unlock()
 	n := len(p)
 	remaining := b.limit - len(b.buf)
-	if remaining > 0 {
-		if remaining > n {
-			remaining = n
-		}
-		b.buf = append(b.buf, p[:remaining]...)
-	}
-	if remaining < n {
+	kept := min(n, max(remaining, 0))
+	b.buf = append(b.buf, p[:kept]...)
+	if kept < n {
 		b.truncated = true
 	}
 	return n, nil

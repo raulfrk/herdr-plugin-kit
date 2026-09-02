@@ -12,6 +12,8 @@ import (
 	"pgregory.net/rapid"
 )
 
+const workspaceCreatedJSON = `{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"ws-1","number":1,"label":"repo","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"tab-1","agent_status":"unknown"},"tab":{},"root_pane":{}}}`
+
 type scriptedRunner struct {
 	outputs []string
 	calls   [][]string
@@ -164,7 +166,7 @@ func TestOpenAtDirectoryStopsAfterStartError(t *testing.T) {
 }
 
 func TestOpenAtDirectoryUsesProvenComposition(t *testing.T) {
-	runner := &scriptedRunner{outputs: []string{"", `{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"ws-1","number":1,"label":"repo","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"tab-1","agent_status":"unknown"},"tab":{},"root_pane":{}}}`}}
+	runner := &scriptedRunner{outputs: []string{"", workspaceCreatedJSON}}
 	workspace, err := (Host{Runner: runner, Herdr: "/bin/herdr"}).OpenAtDirectory(context.Background(), "named", "/tmp/project")
 	if err != nil {
 		t.Fatal(err)
@@ -287,7 +289,7 @@ func TestPropertySessionCommandComposition(t *testing.T) {
 		name := rapid.StringMatching(`[A-Za-z][A-Za-z0-9_-]{0,12}`).Draw(t, "name")
 		component := rapid.StringMatching(`[a-z][a-z0-9_-]{0,12}`).Draw(t, "directory")
 		directory := "/tmp/" + component
-		runner := &scriptedRunner{outputs: []string{"", `{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"ws-1","number":1,"label":"repo","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"tab-1","agent_status":"unknown"},"tab":{},"root_pane":{}}}`}}
+		runner := &scriptedRunner{outputs: []string{"", workspaceCreatedJSON}}
 		_, err := (Host{Runner: runner}).OpenAtDirectory(context.Background(), name, directory)
 		if err != nil {
 			t.Fatal(err)

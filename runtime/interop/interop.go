@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	Version          = 1
-	MaxPayloadBytes  = 1 << 20
-	MaxEnvelopeBytes = MaxPayloadBytes + 16<<10
+	Version         = 1
+	MaxPayloadBytes = 1 << 20
+	// MaxEnvelopeBytes leaves 16 KiB for metadata around a maximum payload.
+	MaxEnvelopeBytes = 1_064_960
 	MaxCorrelationID = 128
 )
 

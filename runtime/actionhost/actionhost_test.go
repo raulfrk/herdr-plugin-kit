@@ -41,7 +41,7 @@ func (r *scriptedRunner) Run(_ context.Context, executable string, args []string
 }
 
 func TestListUsesStablePluginIdentity(t *testing.T) {
-	runner := &scriptedRunner{outputs: []string{`{"id":"cli:plugin","result":{"type":"plugin_action_list","actions":[{"plugin_id":"demo.plugin","action_id":"open","title":"Open","command":["bin"]}]}}`}}
+	runner := &scriptedRunner{outputs: []string{listJSON(t, validAction())}}
 	actions, err := (Host{Runner: runner, Herdr: "/bin/herdr"}).List(context.Background(), "demo.plugin")
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,9 @@ func TestListActionBoundaries(t *testing.T) {
 }
 
 func TestInvokePreservesExactLogID(t *testing.T) {
-	runner := &scriptedRunner{outputs: []string{invokeJSON("running", "opaque receipt/☃", nil)}}
+	receiptFixture := validReceipt()
+	receiptFixture.LogID = "opaque receipt/☃"
+	runner := &scriptedRunner{outputs: []string{invokeResponseJSON(t, validAction(), receiptFixture)}}
 	receipt, err := (Host{Runner: runner}).Invoke(context.Background(), "demo.plugin", "open")
 	if err != nil {
 		t.Fatal(err)
@@ -113,9 +115,13 @@ func TestInvokePreservesExactLogID(t *testing.T) {
 }
 
 func TestReceiptSelectsExactLogID(t *testing.T) {
-	wanted := receiptJSON("succeeded", "wanted receipt", intPointer(0))
-	unrelated := receiptJSON("running", "newer-unrelated", nil)
-	runner := &scriptedRunner{outputs: []string{fmt.Sprintf(`{"id":"cli:plugin","result":{"type":"plugin_log_list","logs":[%s,%s]}}`, unrelated, wanted)}}
+	wanted := validReceipt()
+	wanted.LogID, wanted.Status = "wanted receipt", Succeeded
+	exit, finished := 0, uint64(2)
+	wanted.ExitCode, wanted.FinishedUnixMS = &exit, &finished
+	unrelated := validReceipt()
+	unrelated.LogID = "newer-unrelated"
+	runner := &scriptedRunner{outputs: []string{logsResponseJSON(t, unrelated, wanted)}}
 	receipt, err := (Host{Runner: runner}).Receipt(context.Background(), "demo.plugin", "open", "wanted receipt")
 	if err != nil {
 		t.Fatal(err)
@@ -126,14 +132,18 @@ func TestReceiptSelectsExactLogID(t *testing.T) {
 }
 
 func TestInvokeRejectsChangedIdentity(t *testing.T) {
-	response := strings.Replace(invokeJSON("running", "receipt-1", nil), `"plugin_id":"demo.plugin"`, `"plugin_id":"other.plugin"`, 1)
+	action := validAction()
+	action.PluginID = "other.plugin"
+	response := invokeResponseJSON(t, action, validReceipt())
 	if _, err := (Host{Runner: &scriptedRunner{outputs: []string{response}}}).Invoke(context.Background(), "demo.plugin", "open"); err == nil {
 		t.Fatal("changed plugin identity accepted")
 	}
 }
 
 func TestInvokeRejectsMalformedAction(t *testing.T) {
-	response := strings.Replace(invokeJSON("running", "receipt-1", nil), `"command":["bin"]`, `"command":[]`, 1)
+	action := validAction()
+	action.Command = nil
+	response := invokeResponseJSON(t, action, validReceipt())
 	if _, err := (Host{Runner: &scriptedRunner{outputs: []string{response}}}).Invoke(context.Background(), "demo.plugin", "open"); err == nil {
 		t.Fatal("invoke response with an empty action command was accepted")
 	}
@@ -171,7 +181,7 @@ func TestActionHostRejectsOversizedJSON(t *testing.T) {
 }
 
 func TestActionHostAcceptsJSONAtSizeLimit(t *testing.T) {
-	response := `{"id":"cli:plugin","result":{"type":"plugin_action_list","actions":[]}}`
+	response := listJSON(t)
 	response += strings.Repeat(" ", MaxJSONBytes-len(response))
 	runner := &scriptedRunner{outputs: []string{response}}
 	if _, err := (Host{Runner: runner}).List(context.Background(), ""); err != nil {
@@ -180,7 +190,7 @@ func TestActionHostAcceptsJSONAtSizeLimit(t *testing.T) {
 }
 
 func TestActionHostRejectsEitherTruncatedStream(t *testing.T) {
-	validJSON := []byte(`{"id":"cli:plugin","result":{"type":"plugin_action_list","actions":[]}}`)
+	validJSON := []byte(listJSON(t))
 	tests := []struct {
 		name   string
 		result command.Result
@@ -211,13 +221,19 @@ func TestModelReceiptLifecycle(t *testing.T) {
 		terminal := rapid.SampledFrom([]Status{Succeeded, Failed}).Draw(t, "terminal")
 		outputs := make([]string, polls)
 		for i := 0; i < polls-1; i++ {
-			outputs[i] = logsJSON("running", "receipt-7", nil)
+			receipt := validReceipt()
+			receipt.LogID = "receipt-7"
+			outputs[i] = logsResponseJSON(t, receipt)
 		}
 		exit := 0
 		if terminal == Failed {
 			exit = 9
 		}
-		outputs[polls-1] = logsJSON(string(terminal), "receipt-7", &exit)
+		terminalReceipt := validReceipt()
+		terminalReceipt.LogID, terminalReceipt.Status = "receipt-7", terminal
+		finished := uint64(2)
+		terminalReceipt.ExitCode, terminalReceipt.FinishedUnixMS = &exit, &finished
+		outputs[polls-1] = logsResponseJSON(t, terminalReceipt)
 		runner := &scriptedRunner{outputs: outputs}
 		actionID := "open"
 		initial := Receipt{LogID: "receipt-7", PluginID: "demo.plugin", ActionID: &actionID, Command: []string{"bin"}, Status: Running, StartedUnixMS: 1}
@@ -284,26 +300,6 @@ func TestReceiptLogIDBoundaries(t *testing.T) {
 	}
 }
 
-func invokeJSON(status, logID string, exit *int) string {
-	return fmt.Sprintf(`{"id":"cli:plugin","result":{"type":"plugin_action_invoked","action":{"plugin_id":"demo.plugin","action_id":"open","title":"Open","command":["bin"]},"context":{},"log":%s}}`, receiptJSON(status, logID, exit))
-}
-
-func logsJSON(status, logID string, exit *int) string {
-	return fmt.Sprintf(`{"id":"cli:plugin","result":{"type":"plugin_log_list","logs":[%s]}}`, receiptJSON(status, logID, exit))
-}
-
-func receiptJSON(status, logID string, exit *int) string {
-	exitJSON := "null"
-	finished := "null"
-	if exit != nil {
-		exitJSON = fmt.Sprint(*exit)
-		finished = "2"
-	}
-	return fmt.Sprintf(`{"log_id":%q,"plugin_id":"demo.plugin","action_id":"open","command":["bin"],"status":%q,"started_unix_ms":1,"finished_unix_ms":%s,"exit_code":%s,"stdout":"","stderr":"","error":null,"event":null}`, logID, status, finished, exitJSON)
-}
-
-func intPointer(value int) *int { return &value }
-
 func validAction() Action {
 	return Action{PluginID: "demo.plugin", ActionID: "open", Title: "Open", Command: []string{"bin"}}
 }
@@ -321,8 +317,11 @@ func repeatedCommand(count int) []string {
 	return command
 }
 
-func listJSON(t *testing.T, actions ...Action) string {
-	t.Helper()
+type fataler interface {
+	Fatal(...any)
+}
+
+func listJSON(t fataler, actions ...Action) string {
 	response := struct {
 		ID     string `json:"id"`
 		Result struct {
@@ -335,8 +334,7 @@ func listJSON(t *testing.T, actions ...Action) string {
 	return marshalJSON(t, response)
 }
 
-func invokeResponseJSON(t *testing.T, action Action, receipt Receipt) string {
-	t.Helper()
+func invokeResponseJSON(t fataler, action Action, receipt Receipt) string {
 	var response invokeResponse
 	response.ID = "cli:plugin"
 	response.Result.Type = "plugin_action_invoked"
@@ -345,8 +343,7 @@ func invokeResponseJSON(t *testing.T, action Action, receipt Receipt) string {
 	return marshalJSON(t, response)
 }
 
-func logsResponseJSON(t *testing.T, receipts ...Receipt) string {
-	t.Helper()
+func logsResponseJSON(t fataler, receipts ...Receipt) string {
 	response := struct {
 		ID     string `json:"id"`
 		Result struct {
@@ -359,8 +356,7 @@ func logsResponseJSON(t *testing.T, receipts ...Receipt) string {
 	return marshalJSON(t, response)
 }
 
-func marshalJSON(t *testing.T, value any) string {
-	t.Helper()
+func marshalJSON(t fataler, value any) string {
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
