@@ -138,6 +138,27 @@ func TestWithinObservationRevisionChangeRejects(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+func TestFirstObservationRejectsEachStaleTargetVersionField(t *testing.T) {
+	current := validWireAgent("w:p")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Agent)
+	}{
+		{"status", func(a *Agent) { a.Status = "working" }},
+		{"revision", func(a *Agent) { a.Revision-- }},
+		{"state change sequence", func(a *Agent) { a.StateChangeSeq-- }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := mustPublic(t, current)
+			tc.mutate(&target)
+			runner := &scriptedRunner{results: []command.Result{jsonResult(t, listResponse(current))}}
+			got, err := (Probe{Host: Host{Runner: runner}, Settle: time.Nanosecond}).Assess(context.Background(), target)
+			if !errors.Is(err, ErrStaleReport) || got != (Assessment{}) || len(runner.calls) != 1 {
+				t.Fatalf("assessment=%+v error=%v calls=%q", got, err, runner.calls)
+			}
+		})
+	}
+}
 func TestPaneReplacementAndStaleTargetReject(t *testing.T) {
 	a, b := validWireAgent("w:p"), validWireAgent("w:p")
 	b.TabID = "other"
@@ -319,6 +340,11 @@ func TestTargetAndSessionValidationBoundaries(t *testing.T) {
 	}
 	if err := validateBounded("optional", "", 1, true); err != nil {
 		t.Fatalf("empty optional rejected: %v", err)
+	}
+	invalidSessionTarget := mustPublic(t, validWireAgent("w:p"))
+	invalidSessionTarget.SessionName = "../other"
+	if err := validateTarget(invalidSessionTarget); err == nil {
+		t.Fatal("invalid target session name accepted")
 	}
 }
 
