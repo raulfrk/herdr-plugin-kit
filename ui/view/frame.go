@@ -100,18 +100,11 @@ func (f *Frame) PutText(x, y int, text string, style Style) {
 }
 
 func clipRange(origin, length, limit int) (int, int) {
-	if length <= 0 || limit <= 0 {
+	if length <= 0 {
 		return 0, 0
 	}
 	if origin < 0 {
-		visibleLength := origin + length
-		if visibleLength <= 0 {
-			return 0, 0
-		}
-		return 0, min(visibleLength, limit)
-	}
-	if origin >= limit {
-		return 0, 0
+		return 0, min(origin+length, limit)
 	}
 	return origin, origin + min(length, limit-origin)
 }
@@ -129,7 +122,7 @@ func (f *Frame) clearGlyphAt(x, y int) {
 	}
 	cell := f.cells[f.index(lead, y)]
 	span := max(cell.Width, 1)
-	for i := 0; i < span && lead+i < f.width; i++ {
+	for i := range min(span, f.width-lead) {
 		f.cells[f.index(lead+i, y)] = Cell{}
 	}
 }

@@ -59,6 +59,33 @@ func TestFrameClippingPreservesEdgeSentinels(t *testing.T) {
 	}
 }
 
+func TestPutTextIgnoresOutOfBoundsRowsAndZeroWidthGraphemes(t *testing.T) {
+	frame, _ := view.NewFrame(1, 1)
+	frame.PutText(0, 0, "A", view.Style{Bold: true})
+	frame.PutText(0, -1, "B", view.Style{})
+	frame.PutText(0, frame.Height(), "C", view.Style{})
+	frame.PutText(0, 0, "\x00", view.Style{})
+
+	cell, _ := frame.CellAt(0, 0)
+	if cell.Text != "A" || !cell.Style.Bold || cell.Width != 1 {
+		t.Fatalf("protected cell changed: %+v", cell)
+	}
+}
+
+func TestCellAtFrameBoundaries(t *testing.T) {
+	frame, _ := view.NewFrame(2, 2)
+	for _, point := range []image.Point{{X: 0, Y: 0}, {X: 1, Y: 1}} {
+		if _, ok := frame.CellAt(point.X, point.Y); !ok {
+			t.Fatalf("in-bounds cell %v rejected", point)
+		}
+	}
+	for _, point := range []image.Point{{X: -1, Y: 0}, {X: 2, Y: 0}, {X: 0, Y: -1}, {X: 0, Y: 2}} {
+		if _, ok := frame.CellAt(point.X, point.Y); ok {
+			t.Fatalf("out-of-bounds cell %v accepted", point)
+		}
+	}
+}
+
 func TestANSIAndPNGDeterminismDimensionsAndStyleParity(t *testing.T) {
 	frame, _ := view.NewFrame(4, 2)
 	style := view.Style{Foreground: "#fefefe", Background: "#123456", Bold: true, Dim: true, Underline: true}
