@@ -185,7 +185,7 @@ func validateActionResponse(response ActionResponse, target ActionTarget) error 
 	if response.Error != nil && len(response.Payload) != 0 {
 		return errors.New("action response cannot contain both payload and error")
 	}
-	if response.Error != nil && (!validCategory(response.Error.Category) || strings.TrimSpace(response.Error.Message) == "" || len(response.Error.Message) > 1024) {
+	if response.Error != nil && !validCallError(response.Error) {
 		return errors.New("action response has invalid typed error")
 	}
 	return validatePayload(response.Payload)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -375,8 +376,24 @@ func TestActionTargetAndClientFailBeforeHostUse(t *testing.T) {
 	if len(host.calls) != 0 {
 		t.Fatalf("host calls = %v", host.calls)
 	}
-	if _, err := (ActionClient{Host: host}).Invoke(context.Background(), actionTarget()); err == nil {
-		t.Fatal("zero poll interval accepted")
+	for name, interval := range map[string]time.Duration{"zero": 0, "negative": -1} {
+		t.Run(name+" poll interval", func(t *testing.T) {
+			_, err := (ActionClient{Host: host, PollInterval: interval}).Invoke(context.Background(), actionTarget())
+			if err == nil || err.Error() != "poll interval must be positive" {
+				t.Fatalf("poll interval error = %v", err)
+			}
+			if len(host.calls) != 0 {
+				t.Fatalf("invalid poll interval reached host: %v", host.calls)
+			}
+		})
+	}
+}
+
+func TestActionResponseUsesSharedTypedErrorValidation(t *testing.T) {
+	target := actionTarget()
+	encoded := actionResponseJSON(t, target, nil, &CallError{Category: "unknown", Message: "failed"})
+	if _, err := DecodeActionResponse(strings.NewReader(encoded), target); err == nil {
+		t.Fatal("action response bypassed typed-error validation")
 	}
 }
 

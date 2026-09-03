@@ -444,6 +444,9 @@ func TestPrePublicationFailuresAndCancellationCleanUp(t *testing.T) {
 		{"lock publication", func(store *Store) {
 			store.hooks.publishLock = func(int, string, int, string, uint) error { return wantErr }
 		}},
+		{"document write", func(store *Store) {
+			store.hooks.write = func(int, []byte) (int, error) { return 0, wantErr }
+		}},
 		{"file fsync", func(store *Store) { store.hooks.syncFile = func(int) error { return wantErr } }},
 		{"rename", func(store *Store) { store.hooks.rename = func(int, string, int, string) error { return wantErr } }},
 	} {
@@ -453,6 +456,8 @@ func TestPrePublicationFailuresAndCancellationCleanUp(t *testing.T) {
 			test.set(store)
 			if got, err := store.Write(context.Background(), "config.toml", []byte("new"), Revision{}); !errors.Is(err, wantErr) || got != (Revision{}) {
 				t.Fatalf("Write = (%v, %v)", got, err)
+			} else if strings.Contains(err.Error(), "remove temporary document") {
+				t.Fatalf("successful cleanup reported as an error: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(root, "config.toml")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("target stat error = %v", err)
@@ -496,6 +501,17 @@ func TestCleanupFailureIsReported(t *testing.T) {
 	store.hooks.syncFile = func(int) error { return writeErr }
 	store.hooks.unlink = func(int, string) error { return cleanupErr }
 	if got, err := store.Write(context.Background(), "config.toml", []byte("secret"), Revision{}); got != (Revision{}) || !errors.Is(err, writeErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("Write = (%v, %v)", got, err)
+	}
+}
+
+func TestLockCollisionCleanupFailureIsReported(t *testing.T) {
+	root := t.TempDir()
+	store := openTestStore(t, root)
+	cleanupErr := errors.New("lock candidate cleanup failed")
+	store.hooks.publishLock = func(int, string, int, string, uint) error { return unix.EEXIST }
+	store.hooks.unlink = func(int, string) error { return cleanupErr }
+	if got, err := store.Write(context.Background(), "config.toml", []byte("content"), Revision{}); got != (Revision{}) || !errors.Is(err, cleanupErr) {
 		t.Fatalf("Write = (%v, %v)", got, err)
 	}
 }

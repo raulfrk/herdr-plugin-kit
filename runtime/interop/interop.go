@@ -162,10 +162,8 @@ func ValidateResponse(ctx context.Context, response Response) error {
 	if response.Error != nil && len(response.Payload) != 0 {
 		return errors.New("response cannot contain both payload and error")
 	}
-	if response.Error != nil {
-		if !validCategory(response.Error.Category) || strings.TrimSpace(response.Error.Message) == "" || len(response.Error.Message) > 1024 {
-			return errors.New("response has invalid typed error")
-		}
+	if response.Error != nil && !validCallError(response.Error) {
+		return errors.New("response has invalid typed error")
 	}
 	return validatePayload(response.Payload)
 }
@@ -210,6 +208,10 @@ func validCategory(c ErrorCategory) bool {
 		return true
 	}
 	return false
+}
+
+func validCallError(callErr *CallError) bool {
+	return validCategory(callErr.Category) && strings.TrimSpace(callErr.Message) != "" && len(callErr.Message) <= 1024
 }
 
 func decodeStrict(reader io.Reader, target any) error {

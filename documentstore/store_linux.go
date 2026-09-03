@@ -22,6 +22,7 @@ const internalPrefix = ".documentstore-"
 
 type systemHooks struct {
 	syncFile    func(int) error
+	write       func(int, []byte) (int, error)
 	rename      func(int, string, int, string) error
 	publishLock func(int, string, int, string, uint) error
 	syncDir     func(int) error
@@ -31,6 +32,7 @@ type systemHooks struct {
 func defaultHooks() systemHooks {
 	return systemHooks{
 		syncFile:    unix.Fsync,
+		write:       unix.Write,
 		rename:      unix.Renameat,
 		publishLock: unix.Renameat2,
 		syncDir:     unix.Fsync,
@@ -82,7 +84,7 @@ func (s *Store) Read(ctx context.Context, name string) (Document, error) {
 	}
 	defer release()
 
-	lock, err := openLock(parent, base, s.hooks.publishLock)
+	lock, err := openLock(parent, base, s.hooks)
 	if err != nil {
 		return Document{}, err
 	}
@@ -111,7 +113,7 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 	}
 	defer release()
 
-	lock, err := openLock(parent, base, s.hooks.publishLock)
+	lock, err := openLock(parent, base, s.hooks)
 	if err != nil {
 		return Revision{}, err
 	}
@@ -147,7 +149,7 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 		}
 	}()
 
-	if err := writeAll(tempFD, data); err != nil {
+	if err := writeAll(tempFD, data, s.hooks.write); err != nil {
 		return Revision{}, fmt.Errorf("write temporary document: %w", err)
 	}
 	if metadata != nil {
@@ -210,7 +212,7 @@ func splitName(name string) (string, string, error) {
 	return parent, base, nil
 }
 
-func openLock(parent int, base string, publish func(int, string, int, string, uint) error) (int, error) {
+func openLock(parent int, base string, hooks systemHooks) (int, error) {
 	name := lockName(base)
 	fd, err := openExistingLock(parent, name, base)
 	if err == nil {
@@ -224,14 +226,14 @@ func openLock(parent int, base string, publish func(int, string, int, string, ui
 		return 0, fmt.Errorf("prepare document lock: %w", err)
 	}
 	if err := unix.Fchmod(candidate, ownerOnly); err != nil {
-		return 0, errors.Join(fmt.Errorf("set owner-only document lock mode: %w", err), discardCandidate(parent, temporary, candidate))
+		return 0, errors.Join(fmt.Errorf("set owner-only document lock mode: %w", err), discardCandidate(parent, temporary, candidate, hooks.unlink))
 	}
-	if err := publish(parent, temporary, parent, name, unix.RENAME_NOREPLACE); err == nil {
+	if err := hooks.publishLock(parent, temporary, parent, name, unix.RENAME_NOREPLACE); err == nil {
 		return candidate, nil
 	} else if !errors.Is(err, unix.EEXIST) {
-		return 0, errors.Join(fmt.Errorf("publish document lock: %w", err), discardCandidate(parent, temporary, candidate))
+		return 0, errors.Join(fmt.Errorf("publish document lock: %w", err), discardCandidate(parent, temporary, candidate, hooks.unlink))
 	}
-	if err := discardCandidate(parent, temporary, candidate); err != nil {
+	if err := discardCandidate(parent, temporary, candidate, hooks.unlink); err != nil {
 		return 0, err
 	}
 	return openExistingLock(parent, name, base)
@@ -257,12 +259,12 @@ func openExistingLock(parent int, name, base string) (int, error) {
 	return fd, nil
 }
 
-func discardCandidate(parent int, name string, fd int) error {
+func discardCandidate(parent int, name string, fd int, unlink func(int, string) error) error {
 	var result error
 	if err := unix.Close(fd); err != nil {
 		result = errors.Join(result, fmt.Errorf("close unpublished document lock: %w", err))
 	}
-	if err := unix.Unlinkat(parent, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+	if err := unlink(parent, name); err != nil && !errors.Is(err, unix.ENOENT) {
 		result = errors.Join(result, fmt.Errorf("remove unpublished document lock: %w", err))
 	}
 	return result
@@ -358,9 +360,9 @@ func createPrivateTemp(parent, access int, kind string) (string, int, error) {
 	return "", 0, errors.New("create temporary document: exhausted temporary names")
 }
 
-func writeAll(fd int, data []byte) error {
+func writeAll(fd int, data []byte, write func(int, []byte) (int, error)) error {
 	for len(data) > 0 {
-		n, err := unix.Write(fd, data)
+		n, err := write(fd, data)
 		if err != nil {
 			return err
 		}
