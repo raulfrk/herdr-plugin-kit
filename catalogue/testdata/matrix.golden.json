@@ -1,0 +1,44 @@
+{
+  "designs": ["dense-palette", "split-inspector", "calm-cards"],
+  "viewports": [
+    {"id": "wide", "width": 160, "height": 45, "keyboard_open": false},
+    {"id": "desktop", "width": 110, "height": 34, "keyboard_open": false},
+    {"id": "phone", "width": 48, "height": 30, "keyboard_open": false},
+    {"id": "phone-keyboard", "width": 48, "height": 18, "keyboard_open": true}
+  ],
+  "scenarios": [
+    "picker-search-selected",
+    "config-validation",
+    "config-live-applied",
+    "diagnostic-timeline-detail",
+    "diagnostic-storage-health",
+    "diagnostic-screenshot",
+    "loading",
+    "empty",
+    "error",
+    "long-content"
+  ],
+  "theme_count": 12,
+  "entry_count": 1440,
+  "contact_sheet_count": 144,
+  "render_hashes": {
+    "calm-cards/catppuccin/desktop/config-validation.png": "07fc52585527d2f4bf2735f79ba9e216ee740b8510cc6d67eab49aea21cfadce",
+    "calm-cards/catppuccin/desktop/long-content.png": "3af913fcf5f47b3415cebced84f083da6f9414c2de4abd62f2e150d0f3c3b092",
+    "calm-cards/catppuccin/desktop/picker-search-selected.png": "c399b022ca40821d00ec8211694d01daa29000cbb0a277ea9fa8ab116e6ae409",
+    "calm-cards/catppuccin/phone-keyboard/config-validation.png": "8df31b68f7c9fc6406bb6afd503f8230c763c4189dea37a1a968da9e61f05aea",
+    "calm-cards/catppuccin/phone-keyboard/long-content.png": "0d7b16e693cccb1725f16554c0aa06ff7934fb88961c83c45243b0148f0ad0fe",
+    "calm-cards/catppuccin/phone-keyboard/picker-search-selected.png": "06c6f044f305fec99f5c1bf832b09f0686ce77b3b71f41a63af797560e1a4017",
+    "dense-palette/catppuccin/desktop/config-validation.png": "79d12adce31a9d2e330a07c0b08ecc71d4898918ed46d47d3c0d061049002440",
+    "dense-palette/catppuccin/desktop/long-content.png": "845b8465e577721ba8acd7e75d170425dcf2bc1ad9d9e01cf696db674f908ac8",
+    "dense-palette/catppuccin/desktop/picker-search-selected.png": "7e8415c4503b8b2063256ec26ac345665de44d48e8f3c64bce25e96810b505db",
+    "dense-palette/catppuccin/phone-keyboard/config-validation.png": "8d9c019cf032c2c9504751a8d3fe0760938d88ba669ed47307b6101ad0a42933",
+    "dense-palette/catppuccin/phone-keyboard/long-content.png": "067336a25cea9f24fd0403364184d140d6f06224ad592511b17c7b599b3b0914",
+    "dense-palette/catppuccin/phone-keyboard/picker-search-selected.png": "4e41239b4734ed54849332e22d036061c34d5dac0e6e1244b64bced7d0c769ee",
+    "split-inspector/catppuccin/desktop/config-validation.png": "1159f1d4ce9cd3a73752199f8f8a23f8e11c5f423d36c14048b1f2b7524190ef",
+    "split-inspector/catppuccin/desktop/long-content.png": "ec252b6313cec7bfab027a31927681717b0480565cc30576176a93509b233f8f",
+    "split-inspector/catppuccin/desktop/picker-search-selected.png": "5b8f7e7f60aecbee48f6189b95e35e00ea61c6866759bc6ec480b2db573dbba8",
+    "split-inspector/catppuccin/phone-keyboard/config-validation.png": "36547a6225df72fc57520c827167fe6bb0b009d70d9f79105a12c6a10dc8a992",
+    "split-inspector/catppuccin/phone-keyboard/long-content.png": "04a17f8f372e379d2929e2bd05311a903509d8ea2f354d4b8aba0775e1e1007b",
+    "split-inspector/catppuccin/phone-keyboard/picker-search-selected.png": "20ae8194f54be5cd01bb5af352c23c34162f6e19e9f17e3bd8b6d21e1498c42c"
+  }
+}

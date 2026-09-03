@@ -316,3 +316,113 @@ panel_bg = "reset"
   second call changes output.
 - Diagnostics: only already-redacted output, sensitive key pattern index, and
   Rapid seed/minimized value shape (never the generated secret itself).
+
+## HYP-CAT-01 — The review catalogue covers every committed design dimension
+
+- Claim: the catalogue matrix is the deterministic Cartesian product of three
+  structurally distinct design families, every built-in Herdr theme, the wide,
+  desktop, phone, and phone-with-keyboard viewports, and every committed UI
+  scenario. Each planned plugin surface and each required state appears in at
+  least one scenario.
+- Fault model: a new theme or scenario silently omitted from review, unstable
+  ordering, duplicate layout families, or a future consumer represented only by
+  a happy-path screen.
+- Setup or generator: the checked-in matrix fixture plus the live built-in theme
+  catalogue and published design, viewport, scenario, state, and surface IDs.
+- Independent oracle: explicit required surface/state sets, distinct layout
+  signatures, fixed matrix endpoints, and the arithmetic product of dimensions.
+- Falsified when: a required dimension is absent, order changes unexpectedly,
+  layout signatures collide, or the product differs from the exported entries.
+- Diagnostics: the missing or unexpected ID, matrix endpoints, and dimension
+  counts; no generated image bytes are needed to diagnose matrix membership.
+
+## HYP-CAT-02 — Responsive studies remain bounded and reproducible
+
+- Claim: every family and scenario renders at the exact requested cell dimensions
+  for wide through phone-with-keyboard layouts and retains styled frame edges;
+  representative desktop and constrained-phone studies preserve meaningful state
+  text and match reviewed, byte-stable PNGs at the expected pixel dimensions.
+- Fault model: desktop-only coordinates, content drawn outside a short viewport,
+  nondeterministic rendering, or a theme ignored by the renderer.
+- Setup or generator: all family/viewport/scenario combinations under one theme,
+  followed by a representative screen under every built-in theme.
+- Independent oracle: frame dimensions and corner cells, PNG decoder bounds,
+  repeated-byte equality, and palette equality at a known background cell.
+- Falsified when: rendering fails, dimensions drift, an edge is lost, repeated
+  PNG bytes differ, or a supported theme does not contribute its own palette.
+- Diagnostics: the design/theme/viewport/scenario path and observed frame or PNG
+  dimensions, suitable for opening the exact failed image in the review index.
+
+## HYP-CAT-03 — Catalogue exports are safe, complete, and inspectable
+
+- Claim: exporting a selected review slice writes each matrix image once, adds
+  its expected contact sheets and JSON/HTML indexes, and produces identical file
+  bytes in independent output directories without overwriting existing content.
+- Fault model: partial or reordered output, path escape, stale-file overwrite,
+  invalid PNGs, or an index that cannot identify the generated studies.
+- Setup or generator: a filtered multi-scenario selection exported twice, an
+  unsafe selector, and a non-empty destination.
+- Independent oracle: the selected matrix paths, standard-library PNG decoding,
+  recursive byte comparison, and explicit index/file existence checks.
+- Falsified when: any selected artifact is absent or undecodable, exports differ,
+  an unsafe selector succeeds, or a non-empty destination is modified.
+- Diagnostics: relative artifact path and byte comparison; output remains in a
+  caller-selected directory and is never part of a generated plugin.
+
+## HYP-DIAG-01 — Persisted diagnostics are private, valid, and recoverable
+
+- Claim: each accepted event receives a monotonic versioned identity, every
+  textual and structured field is redacted before persistence, storage uses
+  owner-only modes, and reopening repairs corrupt, truncated, delimiter-less,
+  or newly over-budget logs while retaining the newest valid tail.
+- Fault model: a secret escapes through a nested key or snapshot reference,
+  partial writes poison later appends, recovery preserves stale records instead
+  of recent context, or permissive file modes expose diagnostics.
+- Setup or generator: nested multi-format secrets, corrupt/truncated JSONL,
+  a valid final record without a newline, and a prior log larger than a reduced
+  byte budget.
+- Independent oracle: raw persisted-byte secret absence, decoded event schema
+  and sequences, filesystem modes, newest-tail identity, and successful record
+  immediately after recovery.
+- Falsified when: secret input is present on disk, valid records stop decoding,
+  sequence continuity is lost, stale head records survive instead of the newest
+  tail, or directory/log permissions differ from `0700`/`0600`.
+- Diagnostics: redacted contextual error, corrupt-record count, storage health,
+  and event sequence; rejected cyclic/deep input itself is never persisted.
+
+## HYP-DIAG-02 — Retention remains bounded under concurrent recording
+
+- Claim: participants sharing one recorder receive unique sequences and observe
+  settled count, byte, and age limits after every operation without races,
+  deadlocks, or an on-disk quota overshoot.
+- Fault model: check-then-write quota races, incorrect byte accounting during
+  compaction rollback, expired records surviving cleanup, or concurrent close
+  and health inspection corrupting state.
+- Setup or generator: deterministic count/byte/age pressure, twelve concurrent
+  writers, and Rapid-generated event sizes, operation counts, and quota values.
+- Independent oracle: decoded unique sequences, `Health` counters, filesystem
+  size, age cutoff, and the configured limits after each generated operation.
+- Falsified when: any accepted state exceeds a limit, sequences duplicate, an
+  expired event remains, a writer hangs/errors unexpectedly, or the race
+  detector reports shared-state access.
+- Diagnostics: Rapid seed/minimized operation, configured quotas, health, file
+  size, and retained sequence list. Cross-process recorders are not participants
+  in this contract.
+
+## HYP-DIAG-03 — Debug reports are deterministic, redacted, and truly bounded
+
+- Claim: unchanged recorder state exports byte-identical versioned JSON no
+  larger than the caller's valid limit; oldest events, snapshots, metadata, and
+  finally an oversized last event can be omitted with explicit reasons while
+  preserving the newest event whenever it fits.
+- Fault model: wall-clock nondeterminism, report-only metadata leaks, silent
+  truncation, or a single retained event making the configured bound impossible.
+- Setup or generator: fixed time, secret-bearing metadata/snapshots, multiple
+  large events, and one event larger than the minimum report limit.
+- Independent oracle: repeated-byte equality, JSON decoding, secret absence,
+  output length, truncation reasons, and newest retained sequence.
+- Falsified when: equivalent exports differ, output exceeds its limit, a secret
+  remains, omissions are unnamed, or export fails when an event-free envelope
+  fits.
+- Diagnostics: report length, reasons, retained sequences, and redacted health;
+  report contents are safe to attach to a debugging session.

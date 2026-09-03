@@ -1,6 +1,7 @@
 {
   "critical_paths": [
     "manifest/",
+    "diagnostics/",
     "runtime/actionhost/",
     "runtime/command/",
     "runtime/interop/",
