@@ -2,22 +2,19 @@
 package sessionhost
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/internal/herdrcmd"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/internal/herdrid"
 )
 
-const MaxJSONBytes = 1 << 20
-
-var sessionName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+const MaxJSONBytes = herdrcmd.MaxJSONBytes
 
 type Host struct {
 	Runner command.Runner
@@ -143,55 +140,16 @@ func (h Host) OpenAtDirectory(ctx context.Context, name, directory string) (Work
 }
 
 func (h Host) run(ctx context.Context, args []string) error {
-	if h.Runner == nil {
-		return errors.New("session host requires a command runner")
-	}
-	executable := h.Herdr
-	if executable == "" {
-		executable = "herdr"
-	}
-	result, err := h.Runner.Run(ctx, executable, args)
-	if err != nil {
-		return err
-	}
-	if result.StdoutTruncated || result.StderrTruncated {
-		return errors.New("Herdr command output was truncated")
-	}
-	return nil
+	_, err := herdrcmd.Run(ctx, h.Runner, h.Herdr, args)
+	return err
 }
 
 func (h Host) runJSON(ctx context.Context, args []string, target any) error {
-	if h.Runner == nil {
-		return errors.New("session host requires a command runner")
-	}
-	executable := h.Herdr
-	if executable == "" {
-		executable = "herdr"
-	}
-	result, err := h.Runner.Run(ctx, executable, args)
-	if err != nil {
-		return err
-	}
-	if result.StdoutTruncated || result.StderrTruncated || len(result.Stdout) > MaxJSONBytes {
-		return errors.New("Herdr command output exceeded bounds")
-	}
-	dec := json.NewDecoder(bytes.NewReader(result.Stdout))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(target); err != nil {
-		return fmt.Errorf("decode Herdr JSON: %w", err)
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return errors.New("Herdr output must contain exactly one JSON value")
-	}
-	return nil
+	return herdrcmd.RunJSON(ctx, h.Runner, h.Herdr, args, target)
 }
 
 func validateName(name string) error {
-	if !sessionName.MatchString(name) || name == "." || name == ".." {
-		return errors.New("invalid session name")
-	}
-	return nil
+	return herdrid.ValidateSessionName(name)
 }
 
 func validateDirectory(directory string) (string, error) {

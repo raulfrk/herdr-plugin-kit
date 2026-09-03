@@ -2,20 +2,19 @@
 package actionhost
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/manifest"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/internal/herdrcmd"
 )
 
-const MaxJSONBytes = 1 << 20
+const MaxJSONBytes = herdrcmd.MaxJSONBytes
 
 type Host struct {
 	Runner command.Runner
@@ -185,33 +184,7 @@ func (h Host) AwaitReceipt(ctx context.Context, initial Receipt, interval time.D
 }
 
 func (h Host) runJSON(ctx context.Context, args []string, target any) error {
-	if h.Runner == nil {
-		return errors.New("action host requires a command runner")
-	}
-	executable := h.Herdr
-	if executable == "" {
-		executable = "herdr"
-	}
-	result, err := h.Runner.Run(ctx, executable, args)
-	if err != nil {
-		return err
-	}
-	if result.StdoutTruncated || result.StderrTruncated {
-		return errors.New("Herdr command output was truncated")
-	}
-	if len(result.Stdout) > MaxJSONBytes {
-		return errors.New("Herdr JSON exceeds size limit")
-	}
-	dec := json.NewDecoder(bytes.NewReader(result.Stdout))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(target); err != nil {
-		return fmt.Errorf("decode Herdr JSON: %w", err)
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return errors.New("Herdr output must contain exactly one JSON value")
-	}
-	return nil
+	return herdrcmd.RunJSON(ctx, h.Runner, h.Herdr, args, target)
 }
 
 type invokeResponse struct {
