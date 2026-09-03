@@ -33,6 +33,12 @@ func (r *scriptedRunner) Run(_ context.Context, exe string, args []string) (comm
 	return v, nil
 }
 
+func fastProbe(host Host) Probe {
+	probe := NewProbe(host)
+	probe.wait = func(context.Context, time.Duration) error { return nil }
+	return probe
+}
+
 func TestListExportsKnownFieldsPreservesOrderAndNamedSession(t *testing.T) {
 	a, b := validWireAgent("w1:p1"), validWireAgent("w1:p2")
 	a.Name = "one"
@@ -103,7 +109,7 @@ func TestChangingTextSameClassificationAndStableStatusSeqSucceeds(t *testing.T) 
 	a := validWireAgent("w:p")
 	results := observationResults(t, a, "running command alpha", a, "running command beta")
 	runner := &scriptedRunner{results: results}
-	got, err := (Probe{Host: Host{Runner: runner}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	got, err := fastProbe(Host{Runner: runner}).Assess(context.Background(), mustPublic(t, a))
 	if err != nil || !got.Stable || got.Status != Working || got.Reason != TerminalWait {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
@@ -115,7 +121,7 @@ func TestConstantTextChangingSeqRejects(t *testing.T) {
 	a, b := validWireAgent("w:p"), validWireAgent("w:p")
 	b.StateChangeSeq++
 	results := append(oneObservation(t, a, a, "Ask Codex"), oneObservation(t, b, b, "Ask Codex")...)
-	got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 	if !errors.Is(err, ErrStaleReport) || got.Stable {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
@@ -124,7 +130,7 @@ func TestRevisionMayChangeBetweenCoherentObservations(t *testing.T) {
 	a, b := validWireAgent("w:p"), validWireAgent("w:p")
 	b.Revision++
 	results := append(oneObservation(t, a, a, "Ask Codex"), oneObservation(t, b, b, "Ask Codex")...)
-	got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 	if err != nil || !got.Stable {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
@@ -133,7 +139,7 @@ func TestWithinObservationRevisionChangeRejects(t *testing.T) {
 	a, b := validWireAgent("w:p"), validWireAgent("w:p")
 	b.Revision++
 	r := &scriptedRunner{results: oneObservation(t, a, b, "Ask Codex")}
-	_, err := (Probe{Host: Host{Runner: r}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	_, err := fastProbe(Host{Runner: r}).Assess(context.Background(), mustPublic(t, a))
 	if !errors.Is(err, ErrStaleReport) {
 		t.Fatalf("error=%v", err)
 	}
@@ -152,7 +158,7 @@ func TestFirstObservationRejectsEachStaleTargetVersionField(t *testing.T) {
 			target := mustPublic(t, current)
 			tc.mutate(&target)
 			runner := &scriptedRunner{results: []command.Result{jsonResult(t, listResponse(current))}}
-			got, err := (Probe{Host: Host{Runner: runner}, Settle: time.Nanosecond}).Assess(context.Background(), target)
+			got, err := fastProbe(Host{Runner: runner}).Assess(context.Background(), target)
 			if !errors.Is(err, ErrStaleReport) || got != (Assessment{}) || len(runner.calls) != 1 {
 				t.Fatalf("assessment=%+v error=%v calls=%q", got, err, runner.calls)
 			}
@@ -164,7 +170,7 @@ func TestPaneReplacementAndStaleTargetReject(t *testing.T) {
 	b.TabID = "other"
 	for _, results := range [][]command.Result{oneObservation(t, a, b, "Ask Codex"), oneObservation(t, b, b, "Ask Codex")} {
 		r := &scriptedRunner{results: results}
-		_, err := (Probe{Host: Host{Runner: r}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+		_, err := fastProbe(Host{Runner: r}).Assess(context.Background(), mustPublic(t, a))
 		if !errors.Is(err, ErrStaleReport) {
 			t.Fatalf("error=%v", err)
 		}
@@ -178,7 +184,7 @@ func TestNamedSessionIdentityCannotCrossHosts(t *testing.T) {
 	if _, err := (Host{Runner: runner, Session: "beta"}).Focus(context.Background(), a); err == nil {
 		t.Fatal("cross-session focus target accepted")
 	}
-	if _, err := (Probe{Host: Host{Runner: runner, Session: "beta"}}).Assess(context.Background(), a); err == nil {
+	if _, err := NewProbe(Host{Runner: runner, Session: "beta"}).Assess(context.Background(), a); err == nil {
 		t.Fatal("cross-session assessment target accepted")
 	}
 	if len(runner.calls) != 0 {
@@ -190,7 +196,9 @@ func TestCancellationDuringSettle(t *testing.T) {
 	r := &scriptedRunner{results: oneObservation(t, a, a, "Ask Codex")}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := (Probe{Host: Host{Runner: r}, Settle: time.Hour}).Assess(ctx, mustPublic(t, a))
+	probe := NewProbe(Host{Runner: r})
+	probe.wait = func(ctx context.Context, _ time.Duration) error { return wait(ctx, time.Hour) }
+	_, err := probe.Assess(ctx, mustPublic(t, a))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
@@ -212,8 +220,11 @@ func TestListRejectsUnsupportedStatusAndOversizedFields(t *testing.T) {
 	}
 }
 func TestDefaultSettleAndInvalidHostSession(t *testing.T) {
-	if got := (Probe{}).settle(); got != DefaultSettle() || got != 400*time.Millisecond {
-		t.Fatalf("settle=%v", got)
+	if DefaultSettle() != 400*time.Millisecond {
+		t.Fatalf("settle=%v", DefaultSettle())
+	}
+	if _, err := (Probe{}).Assess(context.Background(), Agent{}); err == nil || !strings.Contains(err.Error(), "NewProbe") {
+		t.Fatalf("zero probe error=%v", err)
 	}
 	runner := &scriptedRunner{}
 	if _, err := (Host{Runner: runner, Session: "../bad"}).List(context.Background()); err == nil || len(runner.calls) != 0 {
@@ -231,7 +242,7 @@ func TestOversizedTruncatedAndInvalidDetection(t *testing.T) {
 	a := validWireAgent("w:p")
 	for _, v := range []command.Result{{Stdout: []byte(strings.Repeat("x", MaxDetectionBytes+1))}, {Stdout: []byte("x"), StdoutTruncated: true}, {Stdout: []byte{0xff}}} {
 		r := &scriptedRunner{results: []command.Result{jsonResult(t, listResponse(a)), v}}
-		_, err := (Probe{Host: Host{Runner: r}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+		_, err := fastProbe(Host{Runner: r}).Assess(context.Background(), mustPublic(t, a))
 		if err == nil {
 			t.Fatalf("accepted %+v", v)
 		}
@@ -241,7 +252,7 @@ func TestRawDetectionAbsentFromExportedTypes(t *testing.T) {
 	a := validWireAgent("w:p")
 	secret := "private query 937"
 	results := observationResults(t, a, "Ask Codex "+secret, a, "Ask Codex changed "+secret)
-	got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +267,7 @@ func TestPropertyObservationCoherence(t *testing.T) {
 		a := validWireAgent("w:p")
 		a.Revision = revision
 		results := observationResults(t, a, "messages to be submitted at end of turn: one", a, "edit last queued message: two")
-		got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+		got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 		if err != nil || !got.Stable || got.Status != Working {
 			rt.Fatalf("assessment=%+v error=%v", got, err)
 		}
@@ -280,7 +291,7 @@ func TestAssessmentRejectsEveryCrossSampleIdentityAndSemanticChange(t *testing.T
 			second := base
 			tc.mutate(&second)
 			results := append(oneObservation(t, base, base, "Ask Codex"), oneObservation(t, second, second, tc.text)...)
-			got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, base))
+			got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, base))
 			if !errors.Is(err, ErrStaleReport) || got != tc.want {
 				t.Fatalf("assessment=%+v error=%v", got, err)
 			}
@@ -352,7 +363,7 @@ func TestDetectionAndTailExactBoundaries(t *testing.T) {
 	a := validWireAgent("w:p")
 	exact := strings.Repeat("x", MaxDetectionBytes)
 	results := observationResults(t, a, exact, a, exact)
-	got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 	if err != nil || !got.Stable || got.Status != Unknown || got.Reason != Unrecognized {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}

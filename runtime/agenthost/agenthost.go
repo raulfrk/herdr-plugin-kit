@@ -68,9 +68,12 @@ type Host struct {
 	Herdr, Session string
 }
 type Probe struct {
-	Host   Host
-	Settle time.Duration
+	Host Host
+	wait func(context.Context, time.Duration) error
 }
+
+// NewProbe creates a status probe with the production settle policy.
+func NewProbe(host Host) Probe { return Probe{Host: host, wait: wait} }
 
 func (h Host) List(ctx context.Context) ([]Agent, error) {
 	var response agentListResponse
@@ -121,6 +124,9 @@ func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 	return a, nil
 }
 func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
+	if p.wait == nil {
+		return Assessment{}, errors.New("assess agent: probe must be created with NewProbe")
+	}
 	if err := validateTarget(target); err != nil {
 		return Assessment{}, fmt.Errorf("assess agent: %w", err)
 	}
@@ -131,7 +137,7 @@ func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
 	if err != nil {
 		return Assessment{}, fmt.Errorf("assess agent first sample: %w", err)
 	}
-	if err := wait(ctx, p.settle()); err != nil {
+	if err := p.wait(ctx, DefaultSettle()); err != nil {
 		return Assessment{}, fmt.Errorf("assess agent settle: %w", err)
 	}
 	second, err := p.observe(ctx, first.agent, false)
@@ -219,12 +225,6 @@ func (h Host) args(a []string) ([]string, error) {
 	}
 	return append([]string{"--session", h.Session}, a...), nil
 }
-func (p Probe) settle() time.Duration {
-	if p.Settle <= 0 {
-		return DefaultSettle()
-	}
-	return p.Settle
-}
 func wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -260,12 +260,16 @@ func classify(a Agent, screen string) (Status, Reason) {
 }
 func boundedTail(s string) string {
 	lines := strings.Split(s, "\n")
-	lines = lines[max(0, len(lines)-DetectionLines):]
+	if len(lines) > DetectionLines {
+		lines = lines[len(lines)-DetectionLines:]
+	}
 	return strings.Join(lines, "\n")
 }
 func normalize(s string) string {
 	lines := strings.Split(boundedTail(s), "\n")
-	lines = lines[max(0, len(lines)-classifierLines):]
+	if len(lines) > classifierLines {
+		lines = lines[len(lines)-classifierLines:]
+	}
 	return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, "\n")), " "))
 }
 func containsAny(s string, ms ...string) bool {
