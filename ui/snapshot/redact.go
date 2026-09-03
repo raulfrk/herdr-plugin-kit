@@ -17,8 +17,7 @@ var sensitiveKeyPatternText = []string{
 
 var (
 	sensitiveKeyPatterns = compilePatterns(sensitiveKeyPatternText)
-	quotedValue          = `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`
-	assignment           = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])(["']?)([A-Za-z][A-Za-z0-9_.-]*)(["']?[\t ]*[:=][\t ]*)((?:` + quotedValue + `|<redacted>|\\.|[^,;\t \}\]\)"'&|()<>])+)`)
+	assignment           = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])(["']?)([A-Za-z][A-Za-z0-9_.-]*)(["']?[\t ]*[:=][\t ]*)((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|<redacted>|\\.|[^,;\t \}\]\)"'&|()<>])+)`)
 	flagName             = regexp.MustCompile(`--([A-Za-z][A-Za-z0-9_-]*)`)
 	sensitiveHeader      = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])((authorization|cookie)["']?[\t ]*:[\t ]*)`)
 	bearerToken          = regexp.MustCompile(`(?i)(bearer[\t ]+)([A-Za-z0-9._~+/\-]+=*|<redacted>[A-Za-z0-9._~+/\-]*=*)`)
@@ -42,7 +41,7 @@ func Redact(text string) string {
 
 func redactHeaders(line string) string {
 	var output strings.Builder
-	for cursor := 0; cursor < len(line); {
+	for cursor := 0; cursor != len(line); {
 		match := sensitiveHeader.FindStringSubmatchIndex(line[cursor:])
 		if match == nil {
 			output.WriteString(line[cursor:])
@@ -77,8 +76,8 @@ func redactHeaders(line string) string {
 }
 
 func headerValueEnd(line string, start int, quote byte, key string, structured bool) int {
-	for index := start; index < len(line); index++ {
-		if line[index] == '\\' && index+1 < len(line) {
+	for index := start; index != len(line); index++ {
+		if line[index] == '\\' && index != len(line)-1 {
 			index++
 			continue
 		}
@@ -88,8 +87,13 @@ func headerValueEnd(line string, start int, quote byte, key string, structured b
 			}
 			continue
 		}
-		if structured && (line[index] == ',' || line[index] == '}' || line[index] == ']') {
+		switch line[index] {
+		case '}', ']':
 			return index
+		case ',':
+			if structured {
+				return index
+			}
 		}
 		if headerBoundary(line, index, key) {
 			return index
@@ -103,7 +107,7 @@ func headerBoundary(line string, index int, key string) bool {
 	if value == ',' && strings.EqualFold(key, "authorization") {
 		return true
 	}
-	if (value == ';' || value == ',') && sensitiveHeader.MatchString(strings.TrimLeft(line[index+1:], " \t")) {
+	if (value == ';' || value == ',') && sensitiveHeader.MatchString(strings.TrimLeft(line[index:], " \t")) {
 		return true
 	}
 	if !isShellBoundary(value) {
@@ -114,7 +118,7 @@ func headerBoundary(line string, index int, key string) bool {
 	}
 	rest := strings.TrimLeft(line[index+1:], " \t")
 	wordEnd := strings.IndexAny(rest, " \t;")
-	if wordEnd < 0 {
+	if wordEnd == -1 {
 		wordEnd = len(rest)
 	}
 	return !strings.Contains(rest[:wordEnd], "=")
@@ -122,7 +126,7 @@ func headerBoundary(line string, index int, key string) bool {
 
 func redactBearer(line string) string {
 	var output strings.Builder
-	for cursor := 0; cursor < len(line); {
+	for cursor := 0; cursor != len(line); {
 		match := bearerToken.FindStringSubmatchIndex(line[cursor:])
 		if match == nil {
 			output.WriteString(line[cursor:])
@@ -165,7 +169,7 @@ func redactMatches(line string, expression *regexp.Regexp) string {
 
 func redactFlags(line string) string {
 	var output strings.Builder
-	for cursor := 0; cursor < len(line); {
+	for cursor := 0; cursor != len(line); {
 		match := flagName.FindStringSubmatchIndex(line[cursor:])
 		if match == nil {
 			output.WriteString(line[cursor:])
@@ -214,19 +218,19 @@ func redactFlags(line string) string {
 
 func shellValueEnd(line string, start int) int {
 	index := start
-	for index < len(line) {
+	for index != len(line) {
 		if line[index] == ' ' || line[index] == '\t' || isShellBoundary(line[index]) {
 			return index
 		}
-		if line[index] == '\\' && index+1 < len(line) {
+		if line[index] == '\\' && index != len(line)-1 {
 			index += 2
 			continue
 		}
 		if line[index] == '\'' || line[index] == '"' {
 			quote := line[index]
 			index++
-			for index < len(line) {
-				if line[index] == '\\' && index+1 < len(line) {
+			for index != len(line) {
+				if line[index] == '\\' && index != len(line)-1 {
 					index += 2
 					continue
 				}
@@ -248,7 +252,7 @@ func isShellBoundary(value byte) bool {
 
 func sensitive(key string) bool {
 	key = strings.Trim(strings.ToLower(key), `"'`)
-	if index := strings.LastIndexByte(key, '.'); index >= 0 {
+	if index := strings.LastIndexByte(key, '.'); index != -1 {
 		key = key[index+1:]
 	}
 	for _, pattern := range sensitiveKeyPatterns {

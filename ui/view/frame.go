@@ -40,7 +40,8 @@ func NewFrame(width, height int) (*Frame, error) {
 	}
 	maxInt := int(^uint(0) >> 1)
 	cellSize := int(unsafe.Sizeof(Cell{}))
-	if height != 0 && (width > maxInt/height || width*height > maxInt/cellSize) {
+	maxCells := maxInt / cellSize
+	if height != 0 && width > maxCells/height {
 		return nil, fmt.Errorf("frame size overflows int: %dx%d", width, height)
 	}
 	return &Frame{width: width, height: height, cells: make([]Cell, width*height)}, nil
@@ -58,14 +59,8 @@ func (f *Frame) CellAt(x, y int) (Cell, bool) {
 
 // Fill replaces a clipped rectangle with styled blank cells.
 func (f *Frame) Fill(x, y, width, height int, style Style) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	startX, endX, visibleX := clipRange(x, width, f.width)
-	startY, endY, visibleY := clipRange(y, height, f.height)
-	if !visibleX || !visibleY {
-		return
-	}
+	startX, endX := clipRange(x, width, f.width)
+	startY, endY := clipRange(y, height, f.height)
 	for row := startY; row < endY; row++ {
 		for col := startX; col < endX; col++ {
 			f.clearGlyphAt(col, row)
@@ -83,7 +78,7 @@ func (f *Frame) PutText(x, y int, text string, style Style) {
 	column := x
 	graphemes := uniseg.NewGraphemes(text)
 	for graphemes.Next() {
-		if column > f.width {
+		if column >= f.width {
 			return
 		}
 		cluster := graphemes.Str()
@@ -91,8 +86,8 @@ func (f *Frame) PutText(x, y int, text string, style Style) {
 		if width <= 0 {
 			continue
 		}
-		if column >= 0 && width <= f.width && column <= f.width-width {
-			for i := 0; i < width; i++ {
+		if column >= 0 && column <= f.width-width {
+			for i := range width {
 				f.clearGlyphAt(column+i, y)
 			}
 			f.cells[f.index(column, y)] = Cell{Text: cluster, Style: style, Width: width}
@@ -104,20 +99,21 @@ func (f *Frame) PutText(x, y int, text string, style Style) {
 	}
 }
 
-func clipRange(origin, length, limit int) (int, int, bool) {
+func clipRange(origin, length, limit int) (int, int) {
 	if length <= 0 || limit <= 0 {
-		return 0, 0, false
+		return 0, 0
 	}
 	if origin < 0 {
-		if origin <= -length {
-			return 0, 0, false
+		visibleLength := origin + length
+		if visibleLength <= 0 {
+			return 0, 0
 		}
-		return 0, min(origin+length, limit), true
+		return 0, min(visibleLength, limit)
 	}
 	if origin >= limit {
-		return 0, 0, false
+		return 0, 0
 	}
-	return origin, origin + min(length, limit-origin), true
+	return origin, origin + min(length, limit-origin)
 }
 
 func (f *Frame) inBounds(x, y int) bool { return x >= 0 && x < f.width && y >= 0 && y < f.height }

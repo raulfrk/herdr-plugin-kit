@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,86 @@ func TestLoaderAppliesDefaultsAndRejectsUnknown(t *testing.T) {
 				t.Fatalf("contextual error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLoaderLoadReadsFileAndWrapsReadFailure(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(path, []byte("[theme]\nname='dracula'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, err := visualLoader().Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Theme.Name != "dracula" {
+		t.Fatalf("theme = %q", value.Theme.Name)
+	}
+
+	_, err = visualLoader().Load(filepath.Join(directory, "missing.toml"))
+	if err == nil || !strings.Contains(err.Error(), "read config:") || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file error = %v", err)
+	}
+}
+
+func TestWatchOptionBoundaries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[theme]\nname='catppuccin'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if watcher, err := visualLoader().Watch(context.Background(), path, config.WatchOptions{Debounce: -time.Nanosecond}, func(config.Update[visualConfig]) {}); err == nil || watcher != nil || !strings.Contains(err.Error(), "debounce is negative") {
+		t.Fatalf("negative debounce result = (%v, %v)", watcher, err)
+	}
+
+	for name, pollInterval := range map[string]time.Duration{
+		"zero poll interval":     0,
+		"negative poll interval": -time.Nanosecond,
+	} {
+		t.Run(name, func(t *testing.T) {
+			updates := make(chan config.Update[visualConfig], 1)
+			watcher, err := visualLoader().Watch(context.Background(), path, config.WatchOptions{PollInterval: pollInterval, Debounce: time.Millisecond}, func(update config.Update[visualConfig]) { updates <- update })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { watcher.Stop(); <-watcher.Done() })
+			if err := os.WriteFile(path, []byte("[theme]\nname='dracula'\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case update := <-updates:
+				if update.Err != nil || update.Value.Theme.Name != "dracula" {
+					t.Fatalf("update = %+v", update)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("normalized poll interval did not produce an update")
+			}
+			if err := os.WriteFile(path, []byte("[theme]\nname='catppuccin'\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	updates := make(chan config.Update[visualConfig], 1)
+	watcher, err := visualLoader().Watch(context.Background(), path, config.WatchOptions{PollInterval: time.Millisecond}, func(update config.Update[visualConfig]) { updates <- update })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { watcher.Stop(); <-watcher.Done() })
+	if err := os.WriteFile(path, []byte("[theme]\nname='rose-pine'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-updates:
+		if update.Err != nil || update.Value.Theme.Name != "rose-pine" {
+			t.Fatalf("update = %+v", update)
+		}
+		if elapsed := update.AppliedAt.Sub(update.DetectedAt); elapsed < 80*time.Millisecond {
+			t.Fatalf("zero debounce default applied after only %v", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("zero debounce default did not produce an update")
 	}
 }
 
@@ -150,6 +231,44 @@ func TestWatchReportsInvalidReloadAndStopsWithoutLateCallback(t *testing.T) {
 	case update := <-updates:
 		t.Fatalf("late callback: %+v", update)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestWatchReportsRemovalAndRecoversWhenFileReturns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	initial := []byte("[theme]\nname='catppuccin'\n")
+	if err := os.WriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan config.Update[visualConfig], 2)
+	watcher, err := visualLoader().Watch(context.Background(), path, config.WatchOptions{PollInterval: 5 * time.Millisecond, Debounce: 10 * time.Millisecond}, func(update config.Update[visualConfig]) { updates <- update })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { watcher.Stop(); <-watcher.Done() })
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-updates:
+		if update.Err == nil || !strings.Contains(update.Err.Error(), "reload config:") || !errors.Is(update.Err, os.ErrNotExist) {
+			t.Fatalf("removal update = %+v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("file removal was not reported")
+	}
+
+	if err := os.WriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-updates:
+		if update.Err != nil || update.Value.Theme.Name != "catppuccin" {
+			t.Fatalf("recovery update = %+v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restored file was not loaded")
 	}
 }
 

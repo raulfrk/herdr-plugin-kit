@@ -30,7 +30,10 @@ func ParseColor(value string) (Color, error) {
 	if hex, ok := namedColors[s]; ok {
 		s = hex
 	}
-	if strings.HasPrefix(s, "rgb(") && strings.HasSuffix(s, ")") {
+	if strings.HasPrefix(s, "rgb(") {
+		if !strings.HasSuffix(s, ")") {
+			return "", fmt.Errorf("invalid colour %q", value)
+		}
 		parts := strings.Split(s[4:len(s)-1], ",")
 		if len(parts) != 3 {
 			return "", fmt.Errorf("invalid colour %q", value)
@@ -38,17 +41,29 @@ func ParseColor(value string) (Color, error) {
 		var rgb [3]int
 		for i, part := range parts {
 			n, err := strconv.Atoi(strings.TrimSpace(part))
-			if err != nil || n < 0 || n > 255 {
+			if err != nil {
+				return "", fmt.Errorf("invalid colour %q", value)
+			}
+			if n < 0 {
+				return "", fmt.Errorf("invalid colour %q", value)
+			}
+			if n > 255 {
 				return "", fmt.Errorf("invalid colour %q", value)
 			}
 			rgb[i] = n
 		}
 		return Color(fmt.Sprintf("#%02x%02x%02x", rgb[0], rgb[1], rgb[2])), nil
 	}
-	if len(s) == 4 && s[0] == '#' {
+	if len(s) == 4 {
+		if s[0] != '#' {
+			return "", fmt.Errorf("invalid colour %q", value)
+		}
 		s = fmt.Sprintf("#%c%c%c%c%c%c", s[1], s[1], s[2], s[2], s[3], s[3])
 	}
-	if len(s) != 7 || s[0] != '#' {
+	if len(s) != 7 {
+		return "", fmt.Errorf("invalid colour %q", value)
+	}
+	if s[0] != '#' {
 		return "", fmt.Errorf("invalid colour %q", value)
 	}
 	if _, err := strconv.ParseUint(s[1:], 16, 24); err != nil {
@@ -59,7 +74,13 @@ func ParseColor(value string) (Color, error) {
 
 // RGBA resolves a non-reset colour for image rendering.
 func (c Color) RGBA() (color.RGBA, bool) {
-	if c == Reset || len(c) != 7 || c[0] != '#' {
+	if c == Reset {
+		return color.RGBA{}, false
+	}
+	if len(c) != 7 {
+		return color.RGBA{}, false
+	}
+	if c[0] != '#' {
 		return color.RGBA{}, false
 	}
 	n, err := strconv.ParseUint(string(c[1:]), 16, 24)

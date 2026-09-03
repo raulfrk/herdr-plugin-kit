@@ -1,12 +1,76 @@
 package theme_test
 
 import (
+	"image/color"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
 )
+
+func TestParseColorCanonicalizesSupportedFormats(t *testing.T) {
+	tests := map[string]struct {
+		input string
+		want  theme.Color
+	}{
+		"reset":      {" RESET ", theme.Reset},
+		"named":      {"Bright-Red", "#ff0000"},
+		"short hex":  {"#AbC", "#aabbcc"},
+		"long hex":   {"#ABCDEF", "#abcdef"},
+		"rgb bounds": {"rgb(0, 255, 1)", "#00ff01"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := theme.ParseColor(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("ParseColor(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestParseColorRejectsMalformedInput(t *testing.T) {
+	for _, input := range []string{
+		"junk1,2,3)",
+		"rgb(1,2,3",
+		"rgb(no,2,3)",
+		"rgb(-1,2,3)",
+		"rgb(1,2,256)",
+		"nope",
+		"#12345",
+		"1234567",
+		"#gggggg",
+	} {
+		t.Run(input, func(t *testing.T) {
+			if got, err := theme.ParseColor(input); err == nil {
+				t.Fatalf("ParseColor(%q) = %q, want error", input, got)
+			}
+		})
+	}
+}
+
+func TestColorRGBA(t *testing.T) {
+	got, ok := theme.Color("#12abef").RGBA()
+	if !ok {
+		t.Fatal("RGBA rejected a canonical colour")
+	}
+	want := color.RGBA{R: 0x12, G: 0xab, B: 0xef, A: 0xff}
+	if got != want {
+		t.Fatalf("RGBA = %#v, want %#v", got, want)
+	}
+
+	for _, value := range []theme.Color{"", theme.Reset, "1234567", "#12345", "#gggggg"} {
+		t.Run(string(value), func(t *testing.T) {
+			if got, ok := value.RGBA(); ok || got != (color.RGBA{}) {
+				t.Fatalf("RGBA(%q) = (%#v, %t), want zero, false", value, got, ok)
+			}
+		})
+	}
+}
 
 func TestCatalogueHasDocumentedStableIDs(t *testing.T) {
 	want := []string{"catppuccin", "catppuccin-latte", "dracula", "gruvbox", "kanagawa", "nord", "one-dark", "rose-pine", "solarized", "terminal", "tokyo-night", "vesper"}

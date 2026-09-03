@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
@@ -122,6 +123,17 @@ func TestANSIAlwaysResetsAndEmitsOnlySGRControls(t *testing.T) {
 	}
 }
 
+func TestANSIExplicitResetAndMalformedColors(t *testing.T) {
+	frame, _ := view.NewFrame(2, 1)
+	frame.PutText(0, 0, "A", view.Style{Foreground: theme.Reset, Background: theme.Reset})
+	frame.PutText(1, 0, "B", view.Style{Foreground: theme.Color("invalid"), Background: theme.Color("invalid")})
+
+	want := "\x1b[0;39;49mA\x1b[0mB\x1b[0m"
+	if got := view.ANSI(frame); got != want {
+		t.Fatalf("ANSI reset and malformed colours = %q, want %q", got, want)
+	}
+}
+
 func TestPNGStyleFieldsAndReset(t *testing.T) {
 	render := func(style view.Style) image.Image {
 		frame, _ := view.NewFrame(1, 1)
@@ -171,7 +183,66 @@ func TestPNGStyleFieldsAndReset(t *testing.T) {
 	}
 }
 
+func TestPNGCellLayoutAndUnderlineBoundaries(t *testing.T) {
+	frame, _ := view.NewFrame(2, 2)
+	backgrounds := []theme.Color{"#102030", "#405060", "#708090", "#a0b0c0"}
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			frame.Fill(x, y, 1, 1, view.Style{Background: backgrounds[y*2+x]})
+		}
+	}
+	encoded, err := view.PNG(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			want, _ := backgrounds[y*2+x].RGBA()
+			for _, point := range []image.Point{{X: x * view.PNGCellWidth, Y: y * view.PNGCellHeight}, {X: (x+1)*view.PNGCellWidth - 1, Y: (y+1)*view.PNGCellHeight - 1}} {
+				if got := color.RGBAModel.Convert(decoded.At(point.X, point.Y)).(color.RGBA); got != want {
+					t.Fatalf("cell (%d,%d) pixel %v = %v, want %v", x, y, point, got, want)
+				}
+			}
+		}
+	}
+
+	underlineFrame, _ := view.NewFrame(2, 2)
+	underlineFrame.PutText(0, 1, "界", view.Style{Foreground: "#ff0000", Underline: true})
+	encoded, err = view.PNG(underlineFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = png.Decode(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	red := color.RGBA{R: 255, A: 255}
+	for x := 0; x < 2*view.PNGCellWidth; x++ {
+		if got := color.RGBAModel.Convert(decoded.At(x, 2*view.PNGCellHeight-2)).(color.RGBA); got != red {
+			t.Fatalf("underline pixel (%d,%d) = %v, want %v", x, 2*view.PNGCellHeight-2, got, red)
+		}
+	}
+	for _, point := range []image.Point{{X: 15, Y: 2*view.PNGCellHeight - 3}, {X: 15, Y: 2*view.PNGCellHeight - 1}} {
+		if _, _, _, alpha := decoded.At(point.X, point.Y).RGBA(); alpha != 0 {
+			t.Fatalf("underline escaped its row at %v", point)
+		}
+	}
+}
+
 func TestFrameRejectsOverflowAndClipsExtremeRectangles(t *testing.T) {
+	for _, dimensions := range [][2]int{{-1, 0}, {0, -1}, {-1, -1}} {
+		if _, err := view.NewFrame(dimensions[0], dimensions[1]); err == nil {
+			t.Fatalf("negative frame %v accepted", dimensions)
+		}
+	}
+	maxCells := math.MaxInt / int(unsafe.Sizeof(view.Cell{}))
+	if _, err := view.NewFrame(maxCells+1, 1); err == nil {
+		t.Fatal("frame exceeding addressable cell storage accepted")
+	}
 	if _, err := view.NewFrame(math.MaxInt, 2); err == nil {
 		t.Fatal("overflowing frame accepted")
 	}
@@ -179,6 +250,31 @@ func TestFrameRejectsOverflowAndClipsExtremeRectangles(t *testing.T) {
 	frame.Fill(math.MaxInt, 0, math.MaxInt, 1, view.Style{})
 	frame.Fill(math.MinInt, 0, math.MaxInt, 1, view.Style{})
 	frame.PutText(math.MaxInt, 0, "界", view.Style{})
+}
+
+func TestFillClipsAtEachFrameEdge(t *testing.T) {
+	frame, _ := view.NewFrame(3, 3)
+	frame.PutText(0, 0, "abcdefghi", view.Style{})
+	filled := view.Style{Bold: true}
+
+	frame.Fill(-2, -2, 3, 3, filled)
+	frame.Fill(2, 2, 3, 3, filled)
+	frame.Fill(-3, 0, 3, 1, filled)
+	frame.Fill(0, -3, 1, 3, filled)
+	frame.Fill(3, 0, 1, 1, filled)
+	frame.Fill(0, 3, 1, 1, filled)
+	frame.Fill(1, 1, 0, 1, filled)
+	frame.Fill(1, 1, 1, 0, filled)
+
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 3; x++ {
+			cell, _ := frame.CellAt(x, y)
+			wantFilled := (x == 0 && y == 0) || (x == 2 && y == 2)
+			if got := cell.Style == filled; got != wantFilled {
+				t.Fatalf("cell (%d,%d) filled = %v, want %v: %+v", x, y, got, wantFilled, cell)
+			}
+		}
+	}
 }
 
 func TestPropertyFrameNeverContainsOrphanContinuation(t *testing.T) {
