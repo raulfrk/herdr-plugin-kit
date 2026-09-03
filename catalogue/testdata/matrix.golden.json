@@ -21,6 +21,12 @@
   "theme_count": 12,
   "entry_count": 1440,
   "contact_sheet_count": 144,
+  "contact_sheet_hashes": {
+    "contact-sheets/calm-cards/dracula/phone.png": "efbbff2bc714082e97ac4c049e7664deb50ccc1623a79e1ff533bd1a13cabb4c",
+    "contact-sheets/dense-palette/catppuccin/wide.png": "626ffe9df8dcf8d18ef5698b6f49897a34817a30948c7904323a3d791108afe3",
+    "contact-sheets/dense-palette/vesper/phone-keyboard.png": "d3b9c3d7af9a5628c17abd33f27a24a771386f996bf769a966b60a13b36b498d",
+    "contact-sheets/split-inspector/nord/desktop.png": "9735c6487b277c258aaabf78f6517e02b940adcb9a6e4a63832446606807620d"
+  },
   "render_hashes": {
     "calm-cards/catppuccin/desktop/config-validation.png": "07fc52585527d2f4bf2735f79ba9e216ee740b8510cc6d67eab49aea21cfadce",
     "calm-cards/catppuccin/desktop/long-content.png": "3af913fcf5f47b3415cebced84f083da6f9414c2de4abd62f2e150d0f3c3b092",

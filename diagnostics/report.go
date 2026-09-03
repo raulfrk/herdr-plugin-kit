@@ -88,11 +88,11 @@ func fitReport(report *Report, limit int) ([]byte, error) {
 	}
 	if len(report.Events) > 1 {
 		addReason(report, "oldest_events_omitted")
-		for len(report.Events) > 1 {
+		for range len(report.Events) - 1 {
 			report.Events[0] = Event{}
 			report.Events = report.Events[1:]
-			data, err = encode()
-			if err == nil && len(data) <= limit {
+			data, _ = encode()
+			if len(data) <= limit {
 				return data, nil
 			}
 		}
@@ -106,8 +106,8 @@ func fitReport(report *Report, limit int) ([]byte, error) {
 	}
 	if hadSnapshots {
 		addReason(report, "embedded_snapshots_omitted")
-		data, err = encode()
-		if err == nil && len(data) <= limit {
+		data, _ = encode()
+		if len(data) <= limit {
 			return data, nil
 		}
 	}
@@ -115,10 +115,7 @@ func fitReport(report *Report, limit int) ([]byte, error) {
 		addReason(report, "metadata_omitted")
 		report.ConfigMetadata = nil
 		report.ManifestMetadata = nil
-		data, err = encode()
-		if err != nil {
-			return nil, fmt.Errorf("encode truncated diagnostics report: %w", err)
-		}
+		data, _ = encode()
 		if len(data) <= limit {
 			return data, nil
 		}
@@ -126,10 +123,7 @@ func fitReport(report *Report, limit int) ([]byte, error) {
 	if len(data) > limit && len(report.Events) != 0 {
 		addReason(report, "oversized_last_event_omitted")
 		report.Events = nil
-		data, err = encode()
-		if err != nil {
-			return nil, fmt.Errorf("encode event-free diagnostics report: %w", err)
-		}
+		data, _ = encode()
 	}
 	if len(data) > limit {
 		return nil, errors.New("report byte limit is too small for the bounded report envelope")

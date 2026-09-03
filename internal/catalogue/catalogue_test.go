@@ -27,11 +27,12 @@ type matrixFixture struct {
 		Height       int    `json:"height"`
 		KeyboardOpen bool   `json:"keyboard_open"`
 	} `json:"viewports"`
-	Scenarios         []string          `json:"scenarios"`
-	ThemeCount        int               `json:"theme_count"`
-	EntryCount        int               `json:"entry_count"`
-	ContactSheetCount int               `json:"contact_sheet_count"`
-	RenderHashes      map[string]string `json:"render_hashes"`
+	Scenarios          []string          `json:"scenarios"`
+	ThemeCount         int               `json:"theme_count"`
+	EntryCount         int               `json:"entry_count"`
+	ContactSheetCount  int               `json:"contact_sheet_count"`
+	RenderHashes       map[string]string `json:"render_hashes"`
+	ContactSheetHashes map[string]string `json:"contact_sheet_hashes"`
 }
 
 func loadFixture(t *testing.T) matrixFixture {
@@ -206,6 +207,53 @@ func TestHYPCAT002RepresentativeFramesPreserveContentAndVisualDesign(t *testing.
 		if len(hashes) != len(catalogue.Designs()) {
 			t.Errorf("%s has %d distinct rendered designs, want %d", group, len(hashes), len(catalogue.Designs()))
 		}
+	}
+}
+
+func TestHYPCAT002RepresentativeContactSheetsPreserveReviewArtifact(t *testing.T) {
+	fixture := loadFixture(t)
+	cases := []struct {
+		designID   string
+		themeID    string
+		viewportID string
+	}{
+		{designID: "dense-palette", themeID: "catppuccin", viewportID: "wide"},
+		{designID: "split-inspector", themeID: "nord", viewportID: "desktop"},
+		{designID: "calm-cards", themeID: "dracula", viewportID: "phone"},
+		{designID: "dense-palette", themeID: "vesper", viewportID: "phone-keyboard"},
+	}
+	for _, tc := range cases {
+		path := strings.Join([]string{"contact-sheets", tc.designID, tc.themeID, tc.viewportID + ".png"}, "/")
+		t.Run(strings.TrimSuffix(strings.TrimPrefix(path, "contact-sheets/"), ".png"), func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "catalogue")
+			manifest, err := catalogue.Export(context.Background(), output, catalogue.Selection{
+				DesignIDs:   []string{tc.designID},
+				ThemeIDs:    []string{tc.themeID},
+				ViewportIDs: []string{tc.viewportID},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.ContactSheets) != 1 || manifest.ContactSheets[0].Path != path {
+				t.Fatalf("contact sheets = %+v, want only %q", manifest.ContactSheets, path)
+			}
+			data, err := os.ReadFile(filepath.Join(output, filepath.FromSlash(path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(data)
+			gotHash := hex.EncodeToString(sum[:])
+			if manifest.ContactSheets[0].SHA256 != gotHash {
+				t.Fatalf("%s manifest hash = %s, artifact hash = %s", path, manifest.ContactSheets[0].SHA256, gotHash)
+			}
+			wantHash, ok := fixture.ContactSheetHashes[path]
+			if !ok {
+				t.Fatalf("%s has no golden hash", path)
+			}
+			if gotHash != wantHash {
+				t.Fatalf("%s visual hash = %s, want %s", path, gotHash, wantHash)
+			}
+		})
 	}
 }
 

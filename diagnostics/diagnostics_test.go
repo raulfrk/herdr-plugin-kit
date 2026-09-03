@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,49 @@ func TestDefaultConfigKeepsUsefulDebuggingHistory(t *testing.T) {
 	}
 	if config.MaxDetailBytes != 1<<20 || config.MaxSnapshotBytes != 2<<20 || config.MaxReportBytes != 32<<20 {
 		t.Fatalf("default artifact budget = details %d, snapshot %d, report %d", config.MaxDetailBytes, config.MaxSnapshotBytes, config.MaxReportBytes)
+	}
+}
+
+func TestConfigValidationDocumentsEveryOperationalBoundary(t *testing.T) {
+	valid := testConfig(filepath.Join(t.TempDir(), "private"))
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid config error = %v", err)
+	}
+	tests := []struct {
+		name   string
+		change func(*diagnostics.Config)
+		want   string
+	}{
+		{"empty directory", func(c *diagnostics.Config) { c.Directory = "" }, "directory"},
+		{"zero events", func(c *diagnostics.Config) { c.MaxEvents = 0 }, "max events"},
+		{"negative events", func(c *diagnostics.Config) { c.MaxEvents = -1 }, "max events"},
+		{"bytes below minimum", func(c *diagnostics.Config) { c.MaxBytes = 1023 }, "max bytes"},
+		{"bytes above maximum", func(c *diagnostics.Config) { c.MaxBytes = 1<<30 + 1 }, "max bytes"},
+		{"zero age", func(c *diagnostics.Config) { c.MaxAge = 0 }, "max age"},
+		{"zero details", func(c *diagnostics.Config) { c.MaxDetailBytes = 0 }, "max detail"},
+		{"zero snapshot", func(c *diagnostics.Config) { c.MaxSnapshotBytes = 0 }, "max snapshot"},
+		{"report below minimum", func(c *diagnostics.Config) { c.MaxReportBytes = 1023 }, "max report"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := valid
+			test.change(&config)
+			if err := config.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want context %q", err, test.want)
+			}
+		})
+	}
+	for _, maxBytes := range []int64{1024, 1 << 30} {
+		config := valid
+		config.MaxBytes = maxBytes
+		if err := config.Validate(); err != nil {
+			t.Fatalf("MaxBytes boundary %d error = %v", maxBytes, err)
+		}
+	}
+	config := valid
+	config.MaxReportBytes = 1024
+	if err := config.Validate(); err != nil {
+		t.Fatalf("MaxReportBytes boundary error = %v", err)
 	}
 }
 
@@ -167,6 +211,27 @@ func TestDetailTruncationMarkerFitsItsExactBudget(t *testing.T) {
 	encoded, err := json.Marshal(event.Details)
 	if err != nil || string(encoded) != marker || !event.DetailsTruncated {
 		t.Fatalf("exact marker budget = details %s, truncated %v, error %v", encoded, event.DetailsTruncated, err)
+	}
+}
+
+func TestDetailsAtExactBudgetRemainAvailable(t *testing.T) {
+	details := map[string]any{"context": "visible"}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(filepath.Join(t.TempDir(), "private"))
+	config.MaxDetailBytes = len(encoded)
+	recorder := openRecorder(t, config)
+	event, err := recorder.Record(diagnostics.Event{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
+		Message: "exact details", Details: details,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.DetailsTruncated || event.Details["context"] != "visible" {
+		t.Fatalf("exact-budget details = %#v", event)
 	}
 }
 
@@ -328,6 +393,47 @@ func TestOpenRetainsCompleteTailStartingAtExactRecordBoundary(t *testing.T) {
 	}
 }
 
+func TestOpenDoesNotRewriteAValidLogAtItsExactByteBudget(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	config := testConfig(directory)
+	config.MaxBytes = 1024
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	config.Now = func() time.Time { return now }
+	recorder, err := diagnostics.Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalized := diagnostics.Event{Version: diagnostics.EventSchemaVersion, Sequence: 1, Time: now, Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle}
+	base, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: strings.Repeat("x", int(config.MaxBytes)-len(base)-1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, diagnostics.EventLogName)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := diagnostics.Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := reopened.Health()
+	if !os.SameFile(before, after) || health.Dropped != 0 || health.CorruptRecords != 0 || health.LastError != "" || health.Bytes != config.MaxBytes {
+		t.Fatalf("exact-budget reopen rewrote or degraded log: same=%v health=%#v", os.SameFile(before, after), health)
+	}
+}
+
 func TestOpenRetainsTailWhenByteWindowStartsOnRecordSeparator(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {
@@ -442,7 +548,7 @@ func TestRetentionByCountBytesAndAge(t *testing.T) {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 	health := recorder.Health()
-	if health.Events > config.MaxEvents || health.Bytes > config.MaxBytes || health.Dropped == 0 || !health.Pressure {
+	if health.Events != 3 || health.Bytes > config.MaxBytes || health.Dropped != 5 || !health.Pressure {
 		t.Fatalf("retention health = %#v", health)
 	}
 	events := readEvents(t, filepath.Join(config.Directory, diagnostics.EventLogName))
@@ -453,6 +559,44 @@ func TestRetentionByCountBytesAndAge(t *testing.T) {
 	}
 	if len(events) == 0 || !events[0].Time.Equal(now.Add(-config.MaxAge)) {
 		t.Fatalf("event exactly at age cutoff was not retained: %#v", events)
+	}
+}
+
+func TestHealthReportsExactUsageAndIndependentPressureSignals(t *testing.T) {
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		maxEvents int
+		bytes     int
+		pressure  bool
+	}{
+		{"below byte pressure", 20, 819, false},
+		{"at byte pressure", 20, 820, true},
+		{"at event pressure", 1, 200, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := testConfig(filepath.Join(t.TempDir(), "private"))
+			config.MaxEvents = test.maxEvents
+			config.MaxBytes = 1024
+			config.Now = func() time.Time { return now }
+			recorder := openRecorder(t, config)
+			envelope := diagnostics.Event{Version: diagnostics.EventSchemaVersion, Sequence: 1, Time: now, Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic}
+			base, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			messageBytes := test.bytes - len(base) - 1
+			if messageBytes < 1 {
+				t.Fatalf("fixture byte target %d is too small", test.bytes)
+			}
+			if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
+				t.Fatal(err)
+			}
+			health := recorder.Health()
+			if health.Events != 1 || health.Bytes != int64(test.bytes) || health.UsageRatio != float64(test.bytes)/1024 || health.Pressure != test.pressure || health.Dropped != 0 {
+				t.Fatalf("health = %#v", health)
+			}
+		})
 	}
 }
 
@@ -607,6 +751,64 @@ func TestReportCanOmitTheFinalOversizedEvent(t *testing.T) {
 	}
 }
 
+func TestReportLimitsAndEveryTruncationStage(t *testing.T) {
+	config := testConfig(filepath.Join(t.TempDir(), "private"))
+	config.MaxReportBytes = 16 << 10
+	recorder := openRecorder(t, config)
+	for sequence := range 3 {
+		if _, err := recorder.Record(diagnostics.Event{
+			Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
+			Message:    fmt.Sprintf("event-%d-%s", sequence, strings.Repeat("m", 700)),
+			UISnapshot: &diagnostics.UISnapshot{Name: "main", Text: strings.Repeat("screen", 200)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options := diagnostics.ReportOptions{
+		MaxBytes: 1024, EmbedSnapshots: true,
+		ConfigMetadata:   map[string]any{"config": strings.Repeat("c", 700)},
+		ManifestMetadata: map[string]any{"manifest": strings.Repeat("m", 700)},
+	}
+	seen := map[string]bool{}
+	for limit := 1024; limit <= config.MaxReportBytes; limit += 64 {
+		options.MaxBytes = limit
+		encoded, err := recorder.Export(options)
+		if err != nil {
+			continue
+		}
+		if len(encoded) > limit {
+			t.Fatalf("report size %d exceeds limit %d", len(encoded), limit)
+		}
+		var report diagnostics.Report
+		if err := json.Unmarshal(encoded, &report); err != nil {
+			t.Fatal(err)
+		}
+		for _, reason := range report.TruncationReasons {
+			seen[reason] = true
+		}
+	}
+	for _, reason := range []string{"oldest_events_omitted", "embedded_snapshots_omitted", "metadata_omitted", "oversized_last_event_omitted"} {
+		if !seen[reason] {
+			t.Errorf("no bounded report demonstrated %q", reason)
+		}
+	}
+	full, err := recorder.Export(diagnostics.ReportOptions{EmbedSnapshots: true, ConfigMetadata: options.ConfigMetadata, ManifestMetadata: options.ManifestMetadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactOptions := options
+	exactOptions.MaxBytes = len(full)
+	exact, err := recorder.Export(exactOptions)
+	if err != nil || string(exact) != string(full) {
+		t.Fatalf("exact-fit report changed: size=%d error=%v", len(exact), err)
+	}
+	for _, limit := range []int{1023, config.MaxReportBytes + 1} {
+		if _, err := recorder.Export(diagnostics.ReportOptions{MaxBytes: limit}); err == nil {
+			t.Errorf("invalid report limit %d accepted", limit)
+		}
+	}
+}
+
 func TestOpenRejectsSymlinkedPrivateStorageWithoutTouchingTarget(t *testing.T) {
 	root := t.TempDir()
 	targetDirectory := filepath.Join(root, "target-directory")
@@ -721,6 +923,77 @@ func TestCyclicDetailsAndMetadataFailBeforeRecursiveRedaction(t *testing.T) {
 	event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "still usable"})
 	if err != nil || event.Sequence != 1 {
 		t.Fatalf("Record() after rejected values = (%#v, %v)", event, err)
+	}
+}
+
+func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
+	recorder := openRecorder(t, testConfig(filepath.Join(t.TempDir(), "private")))
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "number", Details: map[string]any{"value": value}}); err == nil || !strings.Contains(err.Error(), "non-finite") {
+			t.Errorf("non-finite value %v error = %v", value, err)
+		}
+	}
+	nested := func(depth int) map[string]any {
+		var value any = "leaf"
+		for range depth {
+			value = map[string]any{"nested": value}
+		}
+		return value.(map[string]any)
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-16", Details: nested(16)}); err != nil {
+		t.Fatalf("depth 16 rejected: %v", err)
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-17", Details: nested(17)}); err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("depth 17 error = %v", err)
+	}
+	items := make([]any, 4094)
+	for index := range items {
+		items[index] = index
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4096", Details: map[string]any{"items": items}}); err != nil {
+		t.Fatalf("4096 nodes rejected: %v", err)
+	}
+	items = append(items, 4094)
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4097", Details: map[string]any{"items": items}}); err == nil || !strings.Contains(err.Error(), "node count") {
+		t.Fatalf("4097 nodes error = %v", err)
+	}
+	longKey := strings.Repeat("k", 80)
+	cycle := map[string]any{}
+	cycle[longKey] = cycle
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "bounded path", Details: cycle}); err == nil || !strings.Contains(err.Error(), strings.Repeat("k", 64)+"...") || strings.Contains(err.Error(), longKey) {
+		t.Fatalf("bounded validation path error = %v", err)
+	}
+}
+
+func TestCleanupStorageFailureRollsBackAndReportsOneDrop(t *testing.T) {
+	base := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	now := base
+	directory := filepath.Join(t.TempDir(), "private")
+	config := testConfig(directory)
+	config.MaxAge = time.Minute
+	config.Now = func() time.Time { return now }
+	recorder := openRecorder(t, config)
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "retained after rollback"}); err != nil {
+		t.Fatal(err)
+	}
+	moved := directory + "-moved"
+	if err := os.Rename(directory, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory, []byte("blocks directory recreation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(directory)
+		_ = os.Rename(moved, directory)
+	})
+	now = base.Add(2 * time.Minute)
+	if err := recorder.Cleanup(); err == nil || !strings.Contains(err.Error(), "clean diagnostics event log") {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	health := recorder.Health()
+	if health.Writable || health.Dropped != 1 || health.Events != 1 || health.LastError == "" {
+		t.Fatalf("cleanup rollback health = %#v", health)
 	}
 }
 
