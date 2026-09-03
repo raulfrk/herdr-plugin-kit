@@ -223,8 +223,8 @@ func contactSheet(encodedImages [][]byte) ([]byte, int, int, error) {
 		offsetX := (i % columns) * (thumbWidth + gap)
 		offsetY := (i / columns) * (thumbHeight + gap)
 		bounds := source.Bounds()
-		for y := 0; y < thumbHeight; y++ {
-			for x := 0; x < thumbWidth; x++ {
+		for y := range thumbHeight {
+			for x := range thumbWidth {
 				sheet.Set(offsetX+x, offsetY+y, source.At(bounds.Min.X+x*4, bounds.Min.Y+y*4))
 			}
 		}

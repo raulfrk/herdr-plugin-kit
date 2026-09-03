@@ -179,7 +179,7 @@ func (c canvas) renderCards(spec Spec, data sample) {
 }
 
 func (c canvas) rows(x, y, width, height int, rows []string, selected bool) {
-	for i := 0; i < min(height, len(rows)); i++ {
+	for i := range min(height, len(rows)) {
 		style := view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground}
 		prefix := "  "
 		if selected && i == 1 {
@@ -193,7 +193,7 @@ func (c canvas) rows(x, y, width, height int, rows []string, selected bool) {
 }
 
 func (c canvas) details(x, y, width, height int, lines []string) {
-	for i := 0; i < min(height, len(lines)); i++ {
+	for i := range min(height, len(lines)) {
 		style := view.Style{Foreground: c.palette.Text, Background: c.palette.Surface}
 		if i == 0 {
 			style.Foreground = c.palette.Accent
@@ -223,7 +223,8 @@ func (c canvas) box(x, y, width, height int, background, border theme.Color) {
 			c.text(x, y+height-1, width, "+"+strings.Repeat("-", max(0, width-2))+"+", style)
 		}
 	}
-	for row := y + 1; row < y+height-1; row++ {
+	for offset := range max(0, height-2) {
+		row := y + 1 + offset
 		c.text(x, row, 1, "|", style)
 		c.text(x+width-1, row, 1, "|", style)
 	}
