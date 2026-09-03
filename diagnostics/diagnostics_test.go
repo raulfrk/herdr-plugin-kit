@@ -64,7 +64,8 @@ func TestRecordNormalizesSchemaAndRedactsEveryTextPath(t *testing.T) {
 		CorrelationID: "request TOKEN=correlation-secret",
 		Message:       "Authorization: Bearer message-secret",
 		Details: map[string]any{
-			"nested": []any{"api_key=string-secret", map[string]any{"password": "map-secret", "safe": "visible"}},
+			"nested":     []any{"api_key=string-secret", map[string]any{"password": "map-secret", "safe": "visible"}},
+			"auth.token": "dotted-secret",
 		},
 		UISnapshot: &diagnostics.UISnapshot{Name: "dialog TOKEN=name-secret", Text: "Cookie: session=snapshot-secret"},
 		Screenshot: &diagnostics.ScreenshotRef{
@@ -89,7 +90,7 @@ func TestRecordNormalizesSchemaAndRedactsEveryTextPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"plugin-secret", "component-secret", "action-secret", "correlation-secret", "message-secret", "string-secret", "map-secret", "name-secret", "snapshot-secret", "ref-secret", "path-secret", "media-secret", "sha-secret"} {
+	for _, secret := range []string{"plugin-secret", "component-secret", "action-secret", "correlation-secret", "message-secret", "string-secret", "map-secret", "dotted-secret", "name-secret", "snapshot-secret", "ref-secret", "path-secret", "media-secret", "sha-secret"} {
 		if strings.Contains(string(raw), secret) {
 			t.Errorf("persisted event contains secret %q", secret)
 		}
@@ -119,6 +120,13 @@ func TestUISnapshotBudgetCoversNameAndText(t *testing.T) {
 	if !utf8.ValidString(event.UISnapshot.Name) || !utf8.ValidString(event.UISnapshot.Text) {
 		t.Fatalf("snapshot truncation split UTF-8: %#v", event.UISnapshot)
 	}
+	exact, err := recorder.Record(diagnostics.Event{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "exact snapshot",
+		UISnapshot: &diagnostics.UISnapshot{Name: strings.Repeat("n", config.MaxSnapshotBytes)},
+	})
+	if err != nil || exact.UISnapshot == nil || exact.UISnapshot.Truncated {
+		t.Fatalf("exact snapshot budget = (%#v, %v)", exact.UISnapshot, err)
+	}
 }
 
 func TestDetailBudgetSmallerThanMarkerStillBoundsPayload(t *testing.T) {
@@ -141,6 +149,24 @@ func TestDetailBudgetSmallerThanMarkerStillBoundsPayload(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"details":`) || !strings.Contains(string(raw), `"details_truncated":true`) {
 		t.Fatalf("persisted tiny-budget event = %s", raw)
+	}
+}
+
+func TestDetailTruncationMarkerFitsItsExactBudget(t *testing.T) {
+	const marker = `{"_truncated":true}`
+	config := testConfig(filepath.Join(t.TempDir(), "private"))
+	config.MaxDetailBytes = len(marker)
+	recorder := openRecorder(t, config)
+	event, err := recorder.Record(diagnostics.Event{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "details",
+		Details: map[string]any{"safe": strings.Repeat("x", 100)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(event.Details)
+	if err != nil || string(encoded) != marker || !event.DetailsTruncated {
+		t.Fatalf("exact marker budget = details %s, truncated %v, error %v", encoded, event.DetailsTruncated, err)
 	}
 }
 
@@ -174,6 +200,37 @@ func TestOpenUsesPrivateModesAndRecoversCorruptRecords(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
 			t.Fatalf("recovered log still contains corrupt record %q: %v", line, err)
 		}
+	}
+}
+
+func TestOpenRejectsEachInvalidStoredEventIndependently(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"version":1,"sequence":1,"time":"2026-09-03T10:00:00Z","level":"info","kind":"lifecycle","message":"first"}`,
+		`{"version":2,"sequence":2,"time":"2026-09-03T10:01:00Z","level":"info","kind":"lifecycle","message":"bad-version"}`,
+		`{"version":1,"sequence":1,"time":"2026-09-03T10:02:00Z","level":"info","kind":"lifecycle","message":"duplicate"}`,
+		`{"version":1,"sequence":3,"time":"0001-01-01T00:00:00Z","level":"info","kind":"lifecycle","message":"zero-time"}`,
+		`{"version":1,"sequence":4,"time":"2026-09-03T09:59:00Z","level":"info","kind":"lifecycle","message":"backward-time"}`,
+		`{"version":1,"sequence":5,"time":"2026-09-03T10:03:00Z","level":"trace","kind":"lifecycle","message":"bad-level"}`,
+		`{"version":1,"sequence":6,"time":"2026-09-03T10:04:00Z","level":"info","kind":"unknown","message":"bad-kind"}`,
+		`{"version":1,"sequence":7,"time":"2026-09-03T10:05:00Z","level":"info","kind":"lifecycle","message":""}`,
+		`{"version":1,"sequence":8,"time":"2026-09-03T10:06:00Z","level":"info","kind":"lifecycle","message":"last"}`,
+	}
+	if err := os.WriteFile(filepath.Join(directory, diagnostics.EventLogName), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(directory)
+	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 7, 0, 0, time.UTC) }
+	recorder := openRecorder(t, config)
+	if health := recorder.Health(); health.CorruptRecords != 7 {
+		t.Fatalf("independent corrupt record count = %d, want 7", health.CorruptRecords)
+	}
+	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	if len(events) != 2 || events[0].Sequence != 1 || events[1].Sequence != 8 {
+		t.Fatalf("valid records around corruption = %#v", events)
 	}
 }
 
@@ -229,6 +286,101 @@ func TestOpenRetainsNewestRecordsWhenExistingLogExceedsNewByteBudget(t *testing.
 	}
 }
 
+func TestOpenRetainsCompleteTailStartingAtExactRecordBoundary(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const maxBytes = 1024
+	tail := diagnostics.Event{
+		Version: diagnostics.EventSchemaVersion, Sequence: 2,
+		Time:  time.Date(2026, 9, 3, 10, 1, 0, 0, time.UTC),
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle,
+	}
+	base, err := json.Marshal(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail.Message = strings.Repeat("x", maxBytes-len(base)-1)
+	tailLine, err := json.Marshal(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tailLine = append(tailLine, '\n')
+	if len(tailLine) != maxBytes {
+		t.Fatalf("tail fixture bytes = %d, want %d", len(tailLine), maxBytes)
+	}
+	older := []byte(`{"version":1,"sequence":1,"time":"2026-09-03T10:00:00Z","level":"info","kind":"lifecycle","message":"older"}` + "\n")
+	path := filepath.Join(directory, diagnostics.EventLogName)
+	if err := os.WriteFile(path, append(older, tailLine...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(directory)
+	config.MaxBytes = maxBytes
+	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 2, 0, 0, time.UTC) }
+	recorder := openRecorder(t, config)
+	events := readEvents(t, path)
+	if len(events) != 1 || events[0].Sequence != 2 || recorder.Health().Bytes != maxBytes {
+		t.Fatalf("exact bounded tail = events %#v, health %#v", events, recorder.Health())
+	}
+	if event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "new"}); err != nil || event.Sequence != 3 {
+		t.Fatalf("record after exact bounded tail = (%#v, %v)", event, err)
+	}
+}
+
+func TestOpenReportsOversizedUndelimitedTailAsCorrupt(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, diagnostics.EventLogName)
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 2048)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(directory)
+	config.MaxBytes = 1024
+	recorder := openRecorder(t, config)
+	health := recorder.Health()
+	if health.CorruptRecords != 1 || health.Dropped != 1 || health.LastError == "" || health.Events != 0 || health.Bytes != 0 {
+		t.Fatalf("oversized undelimited recovery health = %#v", health)
+	}
+	if data, err := os.ReadFile(path); err != nil || len(data) != 0 {
+		t.Fatalf("oversized undelimited recovery log = %q, error = %v", data, err)
+	}
+}
+
+func TestEventAtExactByteBudgetFitsAndOversizedEventIsDropped(t *testing.T) {
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	config := testConfig(filepath.Join(t.TempDir(), "private"))
+	config.MaxBytes = 1024
+	config.Now = func() time.Time { return now }
+	recorder := openRecorder(t, config)
+	normalized := diagnostics.Event{
+		Version: diagnostics.EventSchemaVersion, Sequence: 1, Time: now,
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
+	}
+	base, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageBytes := int(config.MaxBytes) - len(base) - 1
+	if messageBytes <= 0 {
+		t.Fatalf("event envelope unexpectedly consumes byte budget: %d", len(base))
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
+		t.Fatalf("exact-budget event error = %v", err)
+	}
+	if health := recorder.Health(); health.Bytes != config.MaxBytes || health.Dropped != 0 {
+		t.Fatalf("exact-budget health = %#v", health)
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", int(config.MaxBytes))}); !errors.Is(err, diagnostics.ErrEventTooLarge) {
+		t.Fatalf("oversized event error = %v", err)
+	}
+	if health := recorder.Health(); health.Dropped != 1 || !health.Pressure || health.Bytes != config.MaxBytes {
+		t.Fatalf("oversized rejection health = %#v", health)
+	}
+}
+
 func TestRetentionByCountBytesAndAge(t *testing.T) {
 	base := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
 	now := base
@@ -261,6 +413,9 @@ func TestRetentionByCountBytesAndAge(t *testing.T) {
 		if event.Time.Before(now.Add(-config.MaxAge)) {
 			t.Fatalf("expired event retained: %v", event.Time)
 		}
+	}
+	if len(events) == 0 || !events[0].Time.Equal(now.Add(-config.MaxAge)) {
+		t.Fatalf("event exactly at age cutoff was not retained: %#v", events)
 	}
 }
 
@@ -431,6 +586,13 @@ func TestOpenRejectsSymlinkedPrivateStorageWithoutTouchingTarget(t *testing.T) {
 	if mode := mustMode(t, targetDirectory).Perm(); mode != 0o755 {
 		t.Fatalf("symlink target directory mode changed to %o", mode)
 	}
+	regularPath := filepath.Join(root, "regular-directory-target")
+	if err := os.WriteFile(regularPath, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := diagnostics.Open(testConfig(regularPath)); err == nil {
+		t.Fatalf("regular-file directory error = %v", err)
+	}
 
 	directory := filepath.Join(root, "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {
@@ -449,6 +611,16 @@ func TestOpenRejectsSymlinkedPrivateStorageWithoutTouchingTarget(t *testing.T) {
 	data, err := os.ReadFile(targetFile)
 	if err != nil || string(data) != "keep" || mustMode(t, targetFile).Perm() != 0o644 {
 		t.Fatalf("symlink target changed: data=%q mode=%o error=%v", data, mustMode(t, targetFile).Perm(), err)
+	}
+	specialDirectory := filepath.Join(root, "special-log")
+	if err := os.Mkdir(specialDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(specialDirectory, diagnostics.EventLogName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := diagnostics.Open(testConfig(specialDirectory)); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("directory event-log error = %v", err)
 	}
 }
 

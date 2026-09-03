@@ -43,9 +43,7 @@ func redactValue(value any) any {
 
 func sensitiveDetailKey(key string) bool {
 	key = strings.Trim(strings.ToLower(key), `"'`)
-	if index := strings.LastIndexByte(key, '.'); index != -1 {
-		key = key[index+1:]
-	}
+	key = key[strings.LastIndexByte(key, '.')+1:]
 	for _, pattern := range sensitiveKeyPatterns {
 		if pattern.MatchString(key) {
 			return true

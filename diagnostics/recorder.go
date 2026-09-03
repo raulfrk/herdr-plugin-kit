@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/raulfrk/herdr-plugin-kit/ui/snapshot"
 )
@@ -47,16 +47,16 @@ func Open(config Config) (*Recorder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect diagnostics directory: %w", err)
 	}
-	if directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
-		return nil, fmt.Errorf("diagnostics directory must be a real directory, not a symlink or special file")
+	if !directoryInfo.IsDir() {
+		return nil, fmt.Errorf("diagnostics directory must be a real directory")
 	}
 	if err := os.Chmod(config.Directory, 0o700); err != nil {
 		return nil, fmt.Errorf("secure diagnostics directory: %w", err)
 	}
 	path := filepath.Join(config.Directory, EventLogName)
 	if eventInfo, inspectErr := os.Lstat(path); inspectErr == nil {
-		if eventInfo.Mode()&os.ModeSymlink != 0 || !eventInfo.Mode().IsRegular() {
-			return nil, fmt.Errorf("diagnostics event log must be a regular file, not a symlink or special file")
+		if !eventInfo.Mode().IsRegular() {
+			return nil, fmt.Errorf("diagnostics event log must be a regular file")
 		}
 	} else if !os.IsNotExist(inspectErr) {
 		return nil, fmt.Errorf("inspect diagnostics event log: %w", inspectErr)
@@ -91,15 +91,21 @@ func (r *Recorder) load(now time.Time) error {
 	readLimit := r.config.MaxBytes
 	if info.Size() > r.config.MaxBytes {
 		start = info.Size() - r.config.MaxBytes
-		readLimit++
 		r.health.Dropped++
 		r.health.Pressure = true
 	}
-	seek := start
-	if seek > 0 {
-		seek--
+	tailStartsAtBoundary := start == 0
+	if start > 0 {
+		if _, err := r.file.Seek(start-1, 0); err != nil {
+			return fmt.Errorf("seek diagnostics boundary byte: %w", err)
+		}
+		var previous [1]byte
+		if _, err := io.ReadFull(r.file, previous[:]); err != nil {
+			return fmt.Errorf("read diagnostics boundary byte: %w", err)
+		}
+		tailStartsAtBoundary = previous[0] == '\n'
 	}
-	if _, err := r.file.Seek(seek, 0); err != nil {
+	if _, err := r.file.Seek(start, 0); err != nil {
 		return fmt.Errorf("seek diagnostics event log: %w", err)
 	}
 	data, err := io.ReadAll(io.LimitReader(r.file, readLimit))
@@ -108,17 +114,15 @@ func (r *Recorder) load(now time.Time) error {
 	}
 	corrupt := uint64(0)
 	changed := start > 0
-	if start > 0 {
-		if len(data) > 0 && data[0] == '\n' {
-			data = data[1:]
-		} else if boundary := bytes.IndexByte(data, '\n'); boundary >= 0 {
+	if !tailStartsAtBoundary {
+		if boundary := bytes.IndexByte(data, '\n'); boundary >= 0 {
 			data = data[boundary+1:]
 		} else {
 			data = nil
 			corrupt++
 		}
 	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
+	if missingFinalDelimiter(data) {
 		changed = true
 	}
 	var previousSequence uint64
@@ -128,16 +132,12 @@ func (r *Recorder) load(now time.Time) error {
 			continue
 		}
 		var event Event
-		if json.Unmarshal(line, &event) != nil || event.Version != EventSchemaVersion || event.Sequence <= previousSequence || event.Time.IsZero() || event.Time.Before(previousTime) || validateEvent(event) != nil {
+		if !validStoredEvent(line, &event, previousSequence, previousTime) {
 			corrupt++
 			continue
 		}
 		event = r.sanitize(event)
-		canonical, marshalErr := json.Marshal(event)
-		if marshalErr != nil {
-			corrupt++
-			continue
-		}
+		canonical, _ := json.Marshal(event)
 		encoded := append(canonical, '\n')
 		if !bytes.Equal(encoded, append(append([]byte(nil), line...), '\n')) {
 			changed = true
@@ -153,9 +153,11 @@ func (r *Recorder) load(now time.Time) error {
 		r.health.CorruptRecords = corrupt
 		r.health.LastError = fmt.Sprintf("recovered %d corrupt or truncated prior record(s)", corrupt)
 		r.health.Pressure = true
+		changed = true
 	}
-	changed = corrupt > 0 || changed
-	changed = r.applyRetention(now) || changed
+	if r.applyRetention(now) {
+		changed = true
+	}
 	if changed {
 		if err := r.rewrite(); err != nil {
 			return fmt.Errorf("recover diagnostics event log: %w", err)
@@ -165,6 +167,32 @@ func (r *Recorder) load(now time.Time) error {
 	}
 	r.updateUsage()
 	return nil
+}
+
+func missingFinalDelimiter(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	return data[len(data)-1] != '\n'
+}
+
+func validStoredEvent(line []byte, event *Event, previousSequence uint64, previousTime time.Time) bool {
+	if json.Unmarshal(line, event) != nil {
+		return false
+	}
+	if event.Version != EventSchemaVersion {
+		return false
+	}
+	if event.Sequence <= previousSequence {
+		return false
+	}
+	if event.Time.IsZero() {
+		return false
+	}
+	if event.Time.Before(previousTime) {
+		return false
+	}
+	return validateEvent(*event) == nil
 }
 
 func (r *Recorder) Record(input Event) (Event, error) {
@@ -194,17 +222,13 @@ func (r *Recorder) Record(input Event) (Event, error) {
 	previousRecords := append([]storedEvent(nil), r.records...)
 	previousBytes := r.bytes
 	previousDropped := r.health.Dropped
-	before := len(r.records)
 	r.records = append(r.records, storedEvent{event: event, data: data})
 	r.bytes += int64(len(data))
 	changed := r.applyRetention(event.Time)
-	if changed || len(r.records) != before+1 {
+	if changed {
 		err = r.rewrite()
 	} else {
-		_, err = r.file.Write(data)
-		if err == nil {
-			err = r.file.Sync()
-		}
+		err = appendRecord(r.file, data)
 	}
 	if err != nil {
 		r.records = previousRecords
@@ -219,6 +243,13 @@ func (r *Recorder) Record(input Event) (Event, error) {
 	r.health.Writable = true
 	r.updateUsage()
 	return event, nil
+}
+
+func appendRecord(file *os.File, data []byte) error {
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func (r *Recorder) normalize(input Event) (Event, error) {
@@ -263,7 +294,12 @@ func (r *Recorder) sanitize(input Event) Event {
 		var nameTruncated, textTruncated bool
 		copy.Name, nameTruncated = truncate(copy.Name, r.config.MaxSnapshotBytes, false)
 		copy.Text, textTruncated = truncate(copy.Text, r.config.MaxSnapshotBytes-len(copy.Name), false)
-		copy.Truncated = copy.Truncated || nameTruncated || textTruncated
+		if nameTruncated {
+			copy.Truncated = true
+		}
+		if textTruncated {
+			copy.Truncated = true
+		}
 		input.UISnapshot = &copy
 	}
 	if input.Screenshot != nil {
@@ -281,21 +317,23 @@ func truncate(value string, limit int, already bool) (string, bool) {
 	if len(value) <= limit {
 		return value, already
 	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value, true
+	return strings.ToValidUTF8(value[:limit], ""), true
 }
 
 func (r *Recorder) applyRetention(now time.Time) bool {
 	changed := false
 	cutoff := now.Add(-r.config.MaxAge)
-	for len(r.records) > 0 && r.records[0].event.Time.Before(cutoff) {
+	for range len(r.records) {
+		if !r.records[0].event.Time.Before(cutoff) {
+			break
+		}
 		r.dropOldest()
 		changed = true
 	}
-	for len(r.records) > r.config.MaxEvents || r.bytes > r.config.MaxBytes {
+	for range len(r.records) {
+		if len(r.records) <= r.config.MaxEvents && r.bytes <= r.config.MaxBytes {
+			break
+		}
 		r.dropOldest()
 		changed = true
 	}
@@ -306,9 +344,6 @@ func (r *Recorder) applyRetention(now time.Time) bool {
 }
 
 func (r *Recorder) dropOldest() {
-	if len(r.records) == 0 {
-		return
-	}
 	r.bytes -= int64(len(r.records[0].data))
 	r.records[0] = storedEvent{}
 	r.records = r.records[1:]
