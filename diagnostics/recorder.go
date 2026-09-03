@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -246,10 +247,9 @@ func (r *Recorder) Record(input Event) (Event, error) {
 }
 
 func appendRecord(file *os.File, data []byte) error {
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-	return file.Sync()
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	return errors.Join(writeErr, syncErr)
 }
 
 func (r *Recorder) normalize(input Event) (Event, error) {

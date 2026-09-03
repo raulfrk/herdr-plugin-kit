@@ -328,6 +328,43 @@ func TestOpenRetainsCompleteTailStartingAtExactRecordBoundary(t *testing.T) {
 	}
 }
 
+func TestOpenRetainsTailWhenByteWindowStartsOnRecordSeparator(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const tailBytes = 1024
+	tail := diagnostics.Event{
+		Version: diagnostics.EventSchemaVersion, Sequence: 2,
+		Time:  time.Date(2026, 9, 3, 10, 1, 0, 0, time.UTC),
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle,
+	}
+	base, err := json.Marshal(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail.Message = strings.Repeat("x", tailBytes-len(base)-1)
+	tailLine, err := json.Marshal(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tailLine = append(tailLine, '\n')
+	older := []byte(`{"version":1,"sequence":1,"time":"2026-09-03T10:00:00Z","level":"info","kind":"lifecycle","message":"older"}` + "\n")
+	path := filepath.Join(directory, diagnostics.EventLogName)
+	if err := os.WriteFile(path, append(older, tailLine...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(directory)
+	config.MaxBytes = tailBytes + 1
+	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 2, 0, 0, time.UTC) }
+	recorder := openRecorder(t, config)
+	events := readEvents(t, path)
+	health := recorder.Health()
+	if len(events) != 1 || events[0].Sequence != 2 || health.Bytes != tailBytes || health.CorruptRecords != 0 {
+		t.Fatalf("separator-aligned tail = events %#v, health %#v", events, health)
+	}
+}
+
 func TestOpenReportsOversizedUndelimitedTailAsCorrupt(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {
