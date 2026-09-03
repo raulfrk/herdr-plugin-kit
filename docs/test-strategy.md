@@ -208,3 +208,109 @@ live Herdr resources.
   cancellation is not visible to a handler, or an invalid response validates.
 - Diagnostics: Rapid seed/minimized size, category, correlation ID, and context
   error; payload content is omitted.
+## Visual/config hypothesis register
+
+### Theme configuration reference
+
+Stable built-in IDs are `catppuccin`, `terminal`, `tokyo-night`, `dracula`,
+`nord`, `gruvbox`, `one-dark`, `solarized`, `kanagawa`, `rose-pine`, `vesper`,
+and `catppuccin-latte`. The Latte theme is the default light counterpart when
+auto-switching. Custom tokens are `background`, `panel_bg`, `sidebar_bg`,
+`active_row_bg`, `selection_bg`, `surface`, `overlay`, `border`, `text`,
+`muted`, `accent`, `red`, `green`, `yellow`, `blue`, `magenta`, and `cyan`.
+Colours accept `#rgb`, `#rrggbb`, ANSI names, `rgb(r,g,b)`, or `reset`.
+
+```toml
+[theme]
+auto_switch = true
+dark_name = "catppuccin"
+light_name = "catppuccin-latte"
+
+[theme.custom]
+accent = "#89b4fa"
+panel_bg = "reset"
+```
+
+## HYP-UI-01 — Frame placement preserves terminal-cell geometry
+
+- Claim: every placement leaves a fixed-size frame whose wide graphemes have
+  exactly one leading cell and no orphan continuation cell; combining clusters
+  occupy one cell and edge clipping never emits half a wide cluster.
+- Fault model: byte/rune indexing, incorrect Unicode width, partial clipping,
+  or overwriting only one half of an existing wide grapheme.
+- Setup or generator: deterministic CJK/combining/emoji edge fixtures plus
+  Rapid-generated frame widths, positions, text choices, and placement traces.
+- Independent oracle: `uniseg.StringWidth` for rendered row width and a direct
+  scan from each continuation cell to a leading cell whose declared span
+  contains it.
+- Falsified when: a row width differs from `Frame.Width`, a clipped half appears,
+  or any continuation lacks a covering lead.
+- Diagnostics: Rapid seed/minimized operation trace and the frame cells; frame
+  text is passed through the HYP-SNAPSHOT-01 policy if persisted.
+
+## HYP-UI-02 — ANSI and PNG are deterministic views of one frame
+
+- Claim: repeated renders are byte-identical; ANSI rows retain frame cell
+  dimensions and end with reset style state, while PNG dimensions are exactly
+  `width*8` by `height*16` and cell backgrounds match the same styles. A frame
+  with either dimension zero emits no ANSI or PNG bytes.
+- Fault model: map/order nondeterminism, renderer-specific layout, split wide
+  graphemes, omitted style reset, or hidden terminal cursor/screen mutation.
+- Setup or generator: styled fixed fixtures and Rapid-generated bounded frame
+  dimensions, positions, and Unicode graphemes.
+- Independent oracle: ANSI SGR stripping plus `uniseg.StringWidth`, standard
+  library PNG decoding, direct pixel sampling, and byte equality on rerender.
+- Falsified when: bytes differ, dimensions differ, sampled style differs, a row
+  width differs, a zero-geometry frame emits bytes, or positive-geometry ANSI
+  contains non-SGR controls or lacks its final SGR reset.
+- Diagnostics: generated dimensions/text trace, escaped ANSI, PNG bytes or
+  decoded bounds; diagnostics use HYP-SNAPSHOT-01 redaction.
+
+## HYP-CONFIG-01 — Strict loading preserves defaults and rejects invalid input
+
+- Claim: omitted TOML values retain caller defaults, while unknown fields,
+  unknown theme IDs/tokens, and malformed colours return contextual errors.
+- Fault model: zeroing before decode, permissive schema drift, or validation
+  bypass after decoding/customisation.
+- Setup or generator: minimal valid documents and one-fault fixtures for an
+  unknown field, theme, token, and colour.
+- Independent oracle: explicit expected defaults and the catalogue copied from
+  the current `herdr --default-config` built-in list.
+- Falsified when: a default is lost, invalid input succeeds, or an error omits
+  the invalid field/theme context.
+- Diagnostics: input fixture and error with values redacted by HYP-SNAPSHOT-01.
+
+## HYP-CONFIG-02 — Live reload detects replacement and stops cleanly
+
+- Claim: a content-changing atomic replacement with identical byte size and
+  preserved timestamps is detected in under one second and reaches one
+  callback in under two seconds; callback-initiated and concurrent `Stop` calls
+  complete. Callbacks may overlap and already-started callbacks may outlive
+  `Done`; once `Done` closes, no new callback is dispatched.
+- Fault model: metadata-only watching, missed rename, debounce starvation,
+  unsynchronised callback/cancellation, or duplicate delivery.
+- Setup or generator: temporary TOML files, content hash polling at 10ms,
+  30ms debounce, preserved `mtime`, atomic rename, invalid reload, and eight
+  concurrent stop callers plus a callback-initiated stop.
+- Independent oracle: callback value/error, monotonic elapsed thresholds,
+  timestamped `Update`, and a post-stop callback channel observation.
+- Falsified when: detection is at least one second, propagation is at least two
+  seconds, the replacement/error is absent or duplicated, a stop hangs, or a
+  callback is dispatched after `Done` closes.
+- Diagnostics: start/detected/applied times and redacted callback error/value.
+
+## HYP-SNAPSHOT-01 — Sensitive diagnostic values are explicitly redacted
+
+- Claim: values for the published sensitive-key regexes and bearer credentials
+  are replaced across assignment, JSON-like, environment, and CLI forms;
+  redaction is deterministic/idempotent and leaves non-sensitive assignments.
+- Fault model: secret-form blind spots, substring key matching, replacement
+  instability, or collateral redaction.
+- Setup or generator: representative multi-format fixture and Rapid-generated
+  token lengths used to derive bounded values without recording secret text.
+- Independent oracle: exact `<redacted>` assignment, absence of fixed secrets,
+  preservation of `username=raul`, and equality after a second redaction.
+- Falsified when: a sensitive value remains, non-sensitive text changes, or a
+  second call changes output.
+- Diagnostics: only already-redacted output, sensitive key pattern index, and
+  Rapid seed/minimized value shape (never the generated secret itself).
