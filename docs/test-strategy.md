@@ -622,3 +622,61 @@ panel_bg = "reset"
   fits.
 - Diagnostics: report length, reasons, retained sequences, and redacted health;
   report contents are safe to attach to a debugging session.
+
+## HYP-INTERACTION-01 — Picker state converges on the newest visible request
+
+- Claim: opaque provider cursors can page without a kit-imposed total limit,
+  keyed selection remains stable across reordered results, and only the newest
+  request and resize generations can change visible state.
+- Fault model: a stale completion replaces current results, an older resize
+  restores obsolete geometry, paging silently stops at a fixed count, or a
+  reordered page selects a different action.
+- Setup or generator: 4,097 opaque pages, reordered keyed results, out-of-order
+  result and resize generations, Unicode committed text, and every responsive
+  boundary including Recovery and projected oversize.
+- Independent oracle: provider cursor identity, selected item key, current
+  request/resize generation, exact frame geometry, and visible selected row.
+- Falsified when: any stale generation commits, navigation loses the selected
+  key, a valid next cursor is refused, or Recovery changes interaction state.
+- Diagnostics: only static screen/state/selection IDs, counts, generations, and
+  geometry; query text and provider item content remain private.
+
+## HYP-FORM-01 — Apply and rollback use immutable submitted values
+
+- Claim: validation runs on a cloned value set, apply receives the exact
+  submitted snapshot, later draft edits remain visible, stale completions are
+  ignored, and every nonempty failure or success token is rolled back through
+  the matching operation without entering diagnostics.
+- Fault model: caller mutation aliases form state, an apply completion commits
+  a newer draft that was not submitted, an error token is abandoned, or an old
+  result overwrites the current operation.
+- Setup or generator: invalid values, grapheme edits, mutating appliers,
+  partial-failure tokens, edits during apply, stale generations, explicit
+  rollback, Recovery, and secret fields.
+- Independent oracle: applier-observed values and tokens, form draft and state,
+  rollback calls, visible non-secret cues, and semantic diagnostics.
+- Falsified when: submitted/applied values differ, a stale result changes state,
+  a partial failure skips rollback, a newer draft is lost, or a secret appears
+  in a frame or diagnostic projection.
+- Diagnostics: static field/state IDs, operation generation, geometry, pending,
+  and error presence only.
+
+## HYP-DEBUG-UI-01 — Debug views expose only trusted semantic evidence
+
+- Claim: the Debug UI projects only events marked by `RecordSemantic`, exports
+  only the allowlisted projection, and displays or exports a PNG only when the
+  persistent PreviewStore registration, event/state association, confined
+  owner-only regular file, visual digest, and PNG hash all revalidate.
+- Fault model: ID-shaped raw content passes as semantic data, a forged snapshot
+  reaches the gallery, a path or free-form error enters export, a symlink or
+  tampered PNG remains visible, or selection scrolls out of a compact viewport.
+- Setup or generator: static-looking raw canaries, forged semantic snapshots,
+  registered and unregistered previews, changed state/hash/file type/mode,
+  compact navigation, stale resize generations, and bounded export limits.
+- Independent oracle: decoded `DebugReport`, raw canary absence, PreviewStore
+  registry membership and hashes, filesystem modes, and visible focus rail.
+- Falsified when: untrusted data is projected, an invalid preview is accepted,
+  output exceeds its limit, selected focus disappears, or an old resize enters
+  the flight recorder.
+- Diagnostics: omission counts, semantic IDs, health, generations, and relative
+  registered preview references; payloads and absolute paths are never exposed.

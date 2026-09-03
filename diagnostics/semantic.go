@@ -10,6 +10,8 @@ import (
 
 var semanticIDPattern = regexp.MustCompile("^[a-z][a-z0-9._-]{0,63}$")
 
+const semanticSchemaVersion = 1
+
 // ID is a bounded identifier used by semantic diagnostics. Callers must create
 // IDs only from static developer-defined values, never from user content.
 type ID struct {
@@ -101,7 +103,8 @@ func (r *Recorder) RecordSemantic(input SemanticEvent) error {
 		return err
 	}
 	details := map[string]any{
-		"outcome": string(input.Outcome), "generation": input.Generation,
+		"semantic_schema": semanticSchemaVersion,
+		"outcome":         string(input.Outcome), "generation": input.Generation,
 		"related_generation": input.RelatedGeneration, "count": input.Count,
 		"bytes": input.Bytes, "graphemes": input.Graphemes,
 		"alt": input.Alt, "paste": input.Paste,
@@ -171,15 +174,38 @@ func validateVisualState(state VisualState) error {
 }
 
 func encodeVisualState(state VisualState) ([]byte, error) {
-	return json.Marshal(map[string]any{
-		"screen": state.Screen.String(), "focus": state.Focus.String(),
-		"selection": state.Selection.String(), "state": state.State.String(),
-		"geometry": map[string]any{
-			"reported_columns": state.Geometry.ReportedColumns, "reported_rows": state.Geometry.ReportedRows,
-			"render_columns": state.Geometry.RenderColumns, "render_rows": state.Geometry.RenderRows,
+	return json.Marshal(visualWireFromState(state))
+}
+
+type geometryWire struct {
+	ReportedColumns int `json:"reported_columns"`
+	ReportedRows    int `json:"reported_rows"`
+	RenderColumns   int `json:"render_columns"`
+	RenderRows      int `json:"render_rows"`
+}
+
+type visualWire struct {
+	Screen            string       `json:"screen"`
+	Focus             string       `json:"focus"`
+	Selection         string       `json:"selection"`
+	State             string       `json:"state"`
+	Geometry          geometryWire `json:"geometry"`
+	ResizeGeneration  uint64       `json:"resize_generation"`
+	RequestGeneration uint64       `json:"request_generation"`
+	ItemCount         int          `json:"item_count"`
+	SelectedIndex     int          `json:"selected_index"`
+	Pending           bool         `json:"pending"`
+	HasError          bool         `json:"has_error"`
+}
+
+func visualWireFromState(state VisualState) visualWire {
+	return visualWire{
+		Screen: state.Screen.String(), Focus: state.Focus.String(), Selection: state.Selection.String(), State: state.State.String(),
+		Geometry: geometryWire{
+			ReportedColumns: state.Geometry.ReportedColumns, ReportedRows: state.Geometry.ReportedRows,
+			RenderColumns: state.Geometry.RenderColumns, RenderRows: state.Geometry.RenderRows,
 		},
-		"resize_generation": state.ResizeGeneration, "request_generation": state.RequestGeneration,
-		"item_count": state.ItemCount, "selected_index": state.SelectedIndex,
-		"pending": state.Pending, "has_error": state.HasError,
-	})
+		ResizeGeneration: state.ResizeGeneration, RequestGeneration: state.RequestGeneration,
+		ItemCount: state.ItemCount, SelectedIndex: state.SelectedIndex, Pending: state.Pending, HasError: state.HasError,
+	}
 }

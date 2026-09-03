@@ -61,7 +61,8 @@ func TestSemanticRecordPersistsCompleteAllowlistedProjection(t *testing.T) {
 		t.Fatalf("semantic event IDs = %#v", event)
 	}
 	wantDetails := map[string]any{
-		"outcome": "applied", "generation": float64(4), "related_generation": float64(3),
+		"semantic_schema": float64(1),
+		"outcome":         "applied", "generation": float64(4), "related_generation": float64(3),
 		"count": float64(12), "bytes": float64(144), "graphemes": float64(36),
 		"alt": true, "paste": true, "duration_ns": float64(25 * time.Millisecond),
 		"reported_columns": float64(80), "reported_rows": float64(24),
