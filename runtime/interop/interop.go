@@ -213,14 +213,18 @@ func validCategory(c ErrorCategory) bool {
 }
 
 func decodeStrict(reader io.Reader, target any) error {
+	return decodeStrictLimit(reader, target, MaxEnvelopeBytes)
+}
+
+func decodeStrictLimit(reader io.Reader, target any, limit int) error {
 	if reader == nil {
 		return &CallError{Category: InvalidRequest, Message: "nil envelope reader"}
 	}
-	data, err := io.ReadAll(io.LimitReader(reader, MaxEnvelopeBytes+1))
+	data, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
 	if err != nil {
 		return fmt.Errorf("read envelope: %w", err)
 	}
-	if len(data) > MaxEnvelopeBytes {
+	if len(data) > limit {
 		return &CallError{Category: PayloadTooLarge, Message: "envelope exceeds limit"}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

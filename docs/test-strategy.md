@@ -210,6 +210,28 @@ live Herdr resources.
   cancellation is not visible to a handler, or an invalid response validates.
 - Diagnostics: Rapid seed/minimized size, category, correlation ID, and context
   error; payload content is omitted.
+
+## HYP-INTEROP-02 — Herdr actions provide no-input, receipt-correlated calls
+
+- Claim: on Herdr 0.8.2 an exact static action can be discovered, invoked, and
+  correlated by its opaque receipt ID; successful stdout carries one strict,
+  bounded response envelope whose interface, version, and method match the
+  caller's binding. Caller-selected request envelopes and correlation IDs are
+  explicitly unsupported.
+- Fault model: an unrelated or duplicate action is selected, receipt identities
+  cross under concurrency, malformed/trailing/oversized stdout is accepted, a
+  response changes the bound interface identity, cancellation is ignored, or a
+  mailbox/socket/environment channel is silently introduced.
+- Setup or generator: injected ActionHost fixtures plus a disposable live Herdr
+  plugin with one static action. The negative live fixture invokes concurrently
+  with distinct stdin values; the positive fixture emits fixed versioned JSON.
+- Independent oracle: exact action tuple, distinct Herdr log IDs, byte-exact
+  captured stdin/stdout, strict standard-library JSON decoding, and the
+  published capability booleans.
+- Falsified when: caller bytes reach the action, receipts are confused, response
+  identity or bounds are not enforced, or cancellation fails to end waiting.
+- Diagnostics: plugin/action/interface/method IDs, opaque receipt ID, response
+  length, and typed category only; payload content is omitted.
 ## Visual/config hypothesis register
 
 ### Theme configuration reference
