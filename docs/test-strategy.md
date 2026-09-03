@@ -524,6 +524,30 @@ panel_bg = "reset"
 - Diagnostics: relative artifact path and byte comparison; output remains in a
   caller-selected directory and is never part of a generated plugin.
 
+## HYP-CAT-04 — Live review reflects the delivered terminal
+
+- Claim: the interactive catalogue runs through the production shell, renders
+  each design, component treatment, plugin surface, flow state, built-in theme,
+  and named viewport fixture, and remains operable with six task rows at
+  `40x10`. Its unclipped compact footer opens a complete `40x10` navigation
+  guide. Its HUD shows the reported and bounded render geometry, resize
+  generation, and final settled state.
+- Fault model: a static-only or desktop-only review hides short-height failures;
+  a resize HUD reports a guessed keyboard size; a design dimension is present
+  in metadata but cannot be reached; or text editing splits a grapheme.
+- Setup or generator: direct shell events over every live catalogue axis,
+  compact and representative render contexts, Unicode/IME-style committed text,
+  and the checked-in viewport fixture catalogue.
+- Independent oracle: exact public axis IDs, frame dimensions, six populated
+  compact task rows, visible non-colour selection markers, the complete help
+  text at minimum size, grapheme-aware deletion, and HUD text derived from
+  `responsive.Layout`.
+- Falsified when: a choice or state is unreachable, a compact task row budget is
+  lost, the final frame differs from the latest delivered geometry, query text
+  corrupts, or the HUD substitutes a fixture for observed terminal size.
+- Diagnostics: semantic axis/state IDs plus reported/rendered dimensions and
+  resize generation; sample query text is never included.
+
 ## HYP-DIAG-01 — Persisted diagnostics are private, valid, and recoverable
 
 - Claim: each accepted event receives a monotonic versioned identity, every

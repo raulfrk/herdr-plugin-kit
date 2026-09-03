@@ -10,30 +10,39 @@ import (
 )
 
 type canvas struct {
-	frame   *view.Frame
-	palette theme.Palette
+	frame     *view.Frame
+	palette   theme.Palette
+	treatment Treatment
 }
 
 type sample struct {
-	title  string
-	query  string
-	status string
-	rows   []string
-	detail []string
+	title    string
+	query    string
+	status   string
+	help     string
+	rows     []string
+	detail   []string
+	selected int
 }
 
 func Render(spec Spec) (*view.Frame, error) {
 	if err := validateSpec(spec); err != nil {
 		return nil, err
 	}
-	palette, _ := theme.Builtin(spec.ThemeID)
+	return renderSample(spec, scenarioSample(spec.Scenario), Treatment{})
+}
+
+func renderSample(spec Spec, data sample, treatment Treatment) (*view.Frame, error) {
+	palette, err := theme.Builtin(spec.ThemeID)
+	if err != nil {
+		return nil, err
+	}
 	frame, err := view.NewFrame(spec.Viewport.Width, spec.Viewport.Height)
 	if err != nil {
 		return nil, err
 	}
-	c := canvas{frame: frame, palette: palette}
+	c := canvas{frame: frame, palette: palette, treatment: treatment}
 	c.fill(0, 0, frame.Width(), frame.Height(), palette.Background)
-	data := scenarioSample(spec.Scenario)
 	switch spec.Design.ID {
 	case "dense-palette":
 		c.renderDense(spec, data)
@@ -41,6 +50,12 @@ func Render(spec Spec) (*view.Frame, error) {
 		c.renderSplit(spec, data)
 	case "calm-cards":
 		c.renderCards(spec, data)
+	case "bento-air":
+		c.renderModernBento(data, "AIR")
+	case "bento-command":
+		c.renderModernBento(data, "COMMAND")
+	case "bento-flow":
+		c.renderModernBento(data, "FLOW")
 	default:
 		return nil, fmt.Errorf("unknown design %q", spec.Design.ID)
 	}
@@ -90,22 +105,30 @@ func containsScenario(id string) bool {
 
 func (c canvas) renderDense(spec Spec, data sample) {
 	w, h := c.frame.Width(), c.frame.Height()
+	if h < 18 || (c.treatment.ID != "" && h <= 18) {
+		c.renderCompact(data, "DENSE")
+		return
+	}
 	c.fill(0, 0, w, 2, c.palette.SidebarBackground)
 	c.text(2, 0, w, "HERDR / "+strings.ToUpper(data.title), view.Style{Foreground: c.palette.Text, Background: c.palette.SidebarBackground, Bold: true})
-	c.text(2, 1, w-4, spec.ThemeID+"  |  "+spec.Viewport.Name+"  |  "+data.status, view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
+	status := spec.ThemeID + "  |  " + spec.Viewport.Name + "  |  " + data.status
+	if c.treatment.ID != "" {
+		status = data.status
+	}
+	c.text(2, 1, w-4, status, view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
 	c.box(1, 3, w-2, 3, c.palette.PanelBackground, c.palette.Border)
 	c.text(3, 4, w-6, "> "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground})
 	if w >= 80 {
 		left := w * 3 / 5
 		c.box(1, 7, left-1, h-9, c.palette.PanelBackground, c.palette.Border)
 		c.box(left+1, 7, w-left-2, h-9, c.palette.Surface, c.palette.Border)
-		c.rows(3, 8, left-5, len(data.rows), data.rows, true)
+		c.rows(3, 8, left-5, len(data.rows), data.rows, selectedRow(data))
 		c.details(left+3, 8, w-left-6, len(data.detail), data.detail)
 	} else {
 		detailHeight := max(4, (h-8)/3)
 		listHeight := h - 9 - detailHeight
 		c.box(1, 7, w-2, listHeight, c.palette.PanelBackground, c.palette.Border)
-		c.rows(3, 8, w-6, max(1, listHeight-2), data.rows, true)
+		c.rows(3, 8, w-6, max(1, listHeight-2), data.rows, selectedRow(data))
 		c.box(1, 7+listHeight, w-2, detailHeight, c.palette.Surface, c.palette.Border)
 		c.details(3, 8+listHeight, w-6, max(1, detailHeight-2), data.detail)
 	}
@@ -114,6 +137,10 @@ func (c canvas) renderDense(spec Spec, data sample) {
 
 func (c canvas) renderSplit(spec Spec, data sample) {
 	w, h := c.frame.Width(), c.frame.Height()
+	if h < 18 || (c.treatment.ID != "" && h <= 18) {
+		c.renderCompact(data, "SPLIT")
+		return
+	}
 	if w >= 80 {
 		nav := max(18, w/6)
 		master := max(32, w/3)
@@ -130,7 +157,7 @@ func (c canvas) renderSplit(spec Spec, data sample) {
 		c.fill(nav, 0, master, h, c.palette.PanelBackground)
 		c.text(nav+2, 1, master, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
 		c.text(nav+2, 3, master-4, "> "+data.query, view.Style{Foreground: c.palette.Muted, Background: c.palette.Surface})
-		c.rows(nav+2, 5, master-4, len(data.rows), data.rows, true)
+		c.rows(nav+2, 5, master-4, len(data.rows), data.rows, selectedRow(data))
 		c.fill(nav+master, 0, w, h, c.palette.Background)
 		c.details(nav+master+3, 2, w-nav-master-6, len(data.detail), data.detail)
 		c.text(nav+master+3, h-2, w, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.Background, Bold: true})
@@ -141,7 +168,7 @@ func (c canvas) renderSplit(spec Spec, data sample) {
 	c.text(2, 1, w, "Search | Configure | Debug", view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
 	c.text(2, 3, w-4, "> "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.Surface})
 	masterHeight := max(4, (h-5)*2/5)
-	c.rows(2, 5, w-4, masterHeight, data.rows, true)
+	c.rows(2, 5, w-4, masterHeight, data.rows, selectedRow(data))
 	c.fill(0, 5+masterHeight, w, h, c.palette.PanelBackground)
 	c.details(2, 6+masterHeight, w-4, h-8-masterHeight, data.detail)
 	c.text(2, h-1, w, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.PanelBackground, Bold: true})
@@ -149,6 +176,10 @@ func (c canvas) renderSplit(spec Spec, data sample) {
 
 func (c canvas) renderCards(spec Spec, data sample) {
 	w, h := c.frame.Width(), c.frame.Height()
+	if h < 18 || (c.treatment.ID != "" && h <= 18) {
+		c.renderCompact(data, "CARDS")
+		return
+	}
 	margin := 2
 	if w >= 100 {
 		margin = 5
@@ -164,12 +195,12 @@ func (c canvas) renderCards(spec Spec, data sample) {
 		cardW := (w - 2*margin - gap) / 2
 		c.box(margin, 9, cardW, available, c.palette.PanelBackground, c.palette.Border)
 		c.box(margin+cardW+gap, 9, w-margin-(margin+cardW+gap), available, c.palette.Surface, c.palette.Border)
-		c.rows(margin+2, 10, cardW-4, len(data.rows), data.rows, false)
+		c.rows(margin+2, 10, cardW-4, len(data.rows), data.rows, data.selected)
 		c.details(margin+cardW+gap+2, 10, cardW-4, len(data.detail), data.detail)
 	} else {
 		firstH := max(3, available/2)
 		c.box(margin, 9, w-2*margin, firstH, c.palette.PanelBackground, c.palette.Border)
-		c.rows(margin+2, 10, w-2*margin-4, max(1, firstH-2), data.rows, false)
+		c.rows(margin+2, 10, w-2*margin-4, max(1, firstH-2), data.rows, data.selected)
 		secondY := 9 + firstH + 1
 		secondH := max(2, h-secondY-1)
 		c.box(margin, secondY, w-2*margin, secondH, c.palette.Surface, c.palette.Border)
@@ -178,14 +209,116 @@ func (c canvas) renderCards(spec Spec, data sample) {
 	c.text(margin, h-1, w, "Review sample · static data", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
-func (c canvas) rows(x, y, width, height int, rows []string, selected bool) {
+func (c canvas) renderModernBento(data sample, variant string) {
+	w, h := c.frame.Width(), c.frame.Height()
+	if h <= 18 {
+		c.renderModernBentoCompact(data, variant)
+		return
+	}
+	margin, gap := 2, 2
+	if w >= 100 {
+		margin = 4
+	}
+	headerBackground := c.palette.Background
+	searchBackground := c.palette.Surface
+	if variant == "COMMAND" {
+		searchBackground = c.palette.PanelBackground
+	} else if variant == "FLOW" {
+		headerBackground = c.palette.PanelBackground
+	}
+	c.fill(0, 0, w, 3, headerBackground)
+	c.text(margin, 1, w-2*margin, data.title, view.Style{Foreground: c.palette.Text, Background: headerBackground, Bold: true})
+	c.text(margin, 2, w-2*margin, data.status, view.Style{Foreground: c.palette.Muted, Background: headerBackground})
+	c.fill(margin, 4, w-2*margin, 3, searchBackground)
+	c.fill(margin, 4, 1, 3, c.palette.Accent)
+	c.text(margin+3, 5, w-2*margin-5, "⌕  "+data.query, view.Style{Foreground: c.palette.Text, Background: searchBackground, Bold: variant == "COMMAND"})
+
+	contentTop := 8
+	if w < 80 {
+		listHeight := min(len(data.rows), max(3, h-contentTop-6))
+		c.modernRows(margin, contentTop, w-2*margin, listHeight, data.rows, data.selected, variant)
+		detailY := contentTop + listHeight + 1
+		c.fill(margin, detailY, w-2*margin, max(0, h-detailY-3), c.palette.Surface)
+		c.details(margin+2, detailY+1, w-2*margin-4, max(0, h-detailY-5), data.detail)
+		c.text(margin, h-2, w-2*margin, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+		c.text(margin, h-1, w-2*margin, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+		return
+	}
+	available := w - 2*margin - gap
+	mainWidth := available * 2 / 3
+	metaX := margin + mainWidth + gap
+	c.modernRows(margin, contentTop, mainWidth, min(len(data.rows), h-contentTop-3), data.rows, data.selected, variant)
+	c.fill(metaX, contentTop, available-mainWidth, h-contentTop-3, c.palette.Surface)
+	c.text(metaX+2, contentTop+1, available-mainWidth-4, "CONTEXT", view.Style{Foreground: c.palette.Muted, Background: c.palette.Surface})
+	c.details(metaX+2, contentTop+3, available-mainWidth-4, h-contentTop-6, data.detail)
+	c.text(margin, h-2, w-2*margin, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+	c.text(margin, h-1, w-2*margin, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+}
+
+func (c canvas) renderModernBentoCompact(data sample, variant string) {
+	w, h := c.frame.Width(), c.frame.Height()
+	headerBackground := c.palette.Background
+	queryBackground := c.palette.Surface
+	rowX, rowWidth := 1, w-2
+	if variant == "COMMAND" {
+		headerBackground = c.palette.PanelBackground
+		queryBackground = c.palette.PanelBackground
+	} else if variant == "FLOW" {
+		rowX, rowWidth = 2, w-4
+	}
+	c.fill(0, 0, w, 1, headerBackground)
+	c.text(1, 0, w-2, data.title, view.Style{Foreground: c.palette.Text, Background: headerBackground, Bold: true})
+	c.fill(0, 1, w, 1, queryBackground)
+	c.text(1, 1, w-2, "⌕ "+data.query, view.Style{Foreground: c.palette.Text, Background: queryBackground})
+
+	c.modernRows(rowX, 2, rowWidth, h-4, data.rows, data.selected, variant)
+	c.fill(0, h-2, w, 2, c.palette.Background)
+	c.text(1, h-2, w-2, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+	c.text(1, h-1, w-2, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+}
+
+func (c canvas) modernRows(x, y, width, height int, rows []string, selected int, variant string) {
+	for index := range min(height, len(rows)) {
+		background := c.palette.Background
+		if variant == "FLOW" && index%2 == 1 {
+			background = c.palette.Surface
+		}
+		style := view.Style{Foreground: c.palette.Text, Background: background}
+		prefix := "  "
+		if index == selected {
+			prefix, style.Bold = "▌ ", true
+			style.Foreground = c.palette.Accent
+			if c.treatment.ID == "structured" {
+				style.Background = c.palette.SelectionBackground
+			} else if c.treatment.ID == "quiet" {
+				style.Underline = true
+			}
+		}
+		c.fill(x, y+index, width, 1, style.Background)
+		c.text(x+1, y+index, width-2, prefix+rows[index], style)
+	}
+}
+
+func selectedRow(data sample) int {
+	if data.selected < 0 {
+		return 1
+	}
+	return data.selected
+}
+
+func (c canvas) rows(x, y, width, height int, rows []string, selected int) {
 	for i := range min(height, len(rows)) {
 		style := view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground}
 		prefix := "  "
-		if selected && i == 1 {
-			style.Background = c.palette.SelectionBackground
+		if i == selected {
+			if c.treatment.ID == "quiet" {
+				style.Underline = true
+			} else if c.treatment.ID != "focus-rail" {
+				style.Background = c.palette.SelectionBackground
+			}
+			style.Foreground = c.palette.Text
 			style.Bold = true
-			prefix = "> "
+			prefix = "> " // Selection remains visible without colour.
 		}
 		c.fill(x, y+i, width, 1, style.Background)
 		c.text(x, y+i, width, prefix+rows[i], style)
@@ -216,6 +349,12 @@ func (c canvas) box(x, y, width, height int, background, border theme.Color) {
 		return
 	}
 	c.fill(x, y, width, height, background)
+	if c.treatment.ID == "quiet" {
+		if width > 1 {
+			c.text(x, y, width, strings.Repeat("─", width), view.Style{Foreground: border, Background: background})
+		}
+		return
+	}
 	style := view.Style{Foreground: border, Background: background}
 	if width >= 2 {
 		c.text(x, y, width, "+"+strings.Repeat("-", max(0, width-2))+"+", style)
@@ -228,6 +367,69 @@ func (c canvas) box(x, y, width, height int, background, border theme.Color) {
 		c.text(x, row, 1, "|", style)
 		c.text(x+width-1, row, 1, "|", style)
 	}
+}
+
+// renderCompact keeps four or fewer chrome rows and dedicates the remaining
+// rows to the active task. Each family stays visually distinct at 40x10.
+func (c canvas) renderCompact(data sample, family string) {
+	w, h := c.frame.Width(), c.frame.Height()
+	headerBackground := c.palette.SidebarBackground
+	if family == "CARDS" {
+		headerBackground = c.palette.Background
+	}
+	c.fill(0, 0, w, 1, headerBackground)
+	c.text(1, 0, w-2, data.title, view.Style{Foreground: c.palette.Text, Background: headerBackground, Bold: true})
+
+	queryBackground := c.palette.Surface
+	if family == "DENSE" {
+		queryBackground = c.palette.PanelBackground
+	}
+	c.fill(0, 1, w, 1, queryBackground)
+	c.text(1, 1, w-2, "> "+data.query, view.Style{Foreground: c.palette.Text, Background: queryBackground})
+
+	taskTop := 2
+	taskBottom := h - 2
+	if family == "CARDS" {
+		for row := taskTop; row < taskBottom; row++ {
+			background := c.palette.PanelBackground
+			if (row-taskTop)%2 == 1 {
+				background = c.palette.Surface
+			}
+			c.fill(1, row, max(0, w-2), 1, background)
+			index := row - taskTop
+			if index < len(data.rows) {
+				prefix := "  "
+				style := view.Style{Foreground: c.palette.Text, Background: background}
+				if index == data.selected {
+					prefix, style.Bold = "> ", true
+					if c.treatment.ID == "structured" {
+						style.Background = c.palette.SelectionBackground
+					} else if c.treatment.ID == "quiet" {
+						style.Underline = true
+					}
+				}
+				c.text(2, row, w-4, prefix+data.rows[index], style)
+			}
+		}
+	} else if family == "SPLIT" {
+		available := taskBottom - taskTop
+		if available <= len(data.rows) {
+			c.fill(0, taskTop, w, available, c.palette.PanelBackground)
+			c.rows(1, taskTop, w-2, available, data.rows, selectedRow(data))
+		} else {
+			listRows := max(1, available/2)
+			c.fill(0, taskTop, w, listRows, c.palette.PanelBackground)
+			c.rows(1, taskTop, w-2, listRows, data.rows, selectedRow(data))
+			c.fill(0, taskTop+listRows, w, available-listRows, c.palette.Surface)
+			c.details(1, taskTop+listRows, w-2, available-listRows, data.detail)
+		}
+	} else {
+		lines := append(append([]string(nil), data.rows...), data.detail...)
+		c.rows(1, taskTop, w-2, taskBottom-taskTop, lines, selectedRow(data))
+	}
+	c.fill(0, h-2, w, 2, c.palette.Background)
+	c.text(1, h-2, w-2, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+	c.text(1, h-1, w-2, "d/e/p/s/t/f · / type · enter · esc", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
 func (c canvas) fill(x, y, width, height int, background theme.Color) {
@@ -266,7 +468,7 @@ func fit(value string, width int) string {
 }
 
 func scenarioSample(s Scenario) sample {
-	base := sample{title: s.Name, query: "Search sessions, actions, memories, and settings...", status: "Ready | static review data", rows: []string{"Yesterday | Debug flaky pane resize", "11:42 | Recall terminal theme decision", "Action | Switch attention to build agent", "Session | diagnostics implementation", "Configure | snapshot retention", "Command | Copy selected identifier"}, detail: []string{"Selected detail", "Source: Codex Recall", "Workspace: herdr-plugin-kit", "Updated 2 minutes ago", "Tags: terminal, responsive", "Enter opens | Ctrl-K actions"}}
+	base := sample{title: s.Name, query: "Search sessions, actions, memories, and settings...", status: "Ready | static review data", rows: []string{"Yesterday | Debug flaky pane resize", "11:42 | Recall terminal theme decision", "Action | Switch attention to build agent", "Session | diagnostics implementation", "Configure | snapshot retention", "Command | Copy selected identifier"}, detail: []string{"Selected detail", "Source: Codex Recall", "Workspace: herdr-plugin-kit", "Updated 2 minutes ago", "Tags: terminal, responsive", "Enter opens | Ctrl-K actions"}, selected: -1}
 	switch s.ID {
 	case "config-validation":
 		base.query = "Plugin configuration"

@@ -15,6 +15,16 @@ type Design struct {
 	Name            string `json:"name"`
 	Description     string `json:"description"`
 	LayoutSignature string `json:"layout_signature"`
+	shortName       string
+}
+
+// Treatment is a coherent set of component-level visual choices. Treatments
+// are intentionally few: the catalogue is for choosing a design, not building
+// arbitrary combinations.
+type Treatment struct {
+	ID          string
+	Name        string
+	Description string
 }
 
 type Viewport struct {
@@ -51,9 +61,15 @@ type Selection struct {
 }
 
 var designs = []Design{
-	{ID: "dense-palette", Name: "Dense Palette", Description: "Command-first workspace with compact rows and high information density.", LayoutSignature: "header/query/full-width-table/inline-detail"},
-	{ID: "split-inspector", Name: "Split Inspector", Description: "Persistent navigation, results, and focused detail in separate panes.", LayoutSignature: "sidebar/master-list/detail-pane"},
-	{ID: "calm-cards", Name: "Calm Cards", Description: "Spacious task-oriented cards with progressive disclosure.", LayoutSignature: "hero/stacked-cards/action-footer"},
+	{ID: "dense-palette", Name: "Dense Palette", Description: "Command-first workspace with compact rows and high information density.", LayoutSignature: "header/query/full-width-table/inline-detail", shortName: "Dense"},
+	{ID: "split-inspector", Name: "Split Inspector", Description: "Persistent navigation, results, and focused detail in separate panes.", LayoutSignature: "sidebar/master-list/detail-pane", shortName: "Split"},
+	{ID: "calm-cards", Name: "Calm Cards", Description: "Spacious task-oriented cards with progressive disclosure.", LayoutSignature: "hero/stacked-cards/action-footer", shortName: "Cards"},
+}
+
+var treatments = []Treatment{
+	{ID: "structured", Name: "Structured", Description: "Visible borders and filled selection rows."},
+	{ID: "quiet", Name: "Quiet", Description: "Tinted regions with restrained dividers."},
+	{ID: "focus-rail", Name: "Focus Rail", Description: "Strong non-colour focus marker with minimal fill."},
 }
 
 var viewports = []Viewport{
@@ -76,8 +92,9 @@ var scenarios = []Scenario{
 	{ID: "long-content", Name: "Long content", State: "long-content", Surfaces: []string{"recall-search", "session-switcher", "plugin-configurator", "debug-ui"}},
 }
 
-func Designs() []Design     { return slices.Clone(designs) }
-func Viewports() []Viewport { return slices.Clone(viewports) }
+func Designs() []Design       { return slices.Clone(designs) }
+func Treatments() []Treatment { return slices.Clone(treatments) }
+func Viewports() []Viewport   { return slices.Clone(viewports) }
 func Scenarios() []Scenario {
 	result := slices.Clone(scenarios)
 	for i := range result {
