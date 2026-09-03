@@ -40,8 +40,8 @@ const (
 	KindDiagnostic  Kind = "diagnostic"
 )
 
-// Event is the stable persisted diagnostic schema. Record assigns Version,
-// Sequence, and Time; callers supply the remaining diagnostic context.
+// Event is the stable persisted and report schema. Callers record through
+// SemanticSink; Event remains public so reports and legacy logs can be decoded.
 type Event struct {
 	Version          int            `json:"version"`
 	Sequence         uint64         `json:"sequence"`

@@ -97,9 +97,11 @@ func openRecorder(t *testing.T, config diagnostics.Config) *diagnostics.Recorder
 
 func TestRecordNormalizesSchemaAndRedactsEveryTextPath(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "private")
-	recorder := openRecorder(t, testConfig(directory))
+	config := testConfig(directory)
+	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 30, 0, 0, time.UTC) }
+	recorder := openRecorder(t, config)
 
-	event, err := recorder.Record(diagnostics.Event{
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level:         diagnostics.LevelInfo,
 		Kind:          diagnostics.KindInteraction,
 		Plugin:        "search TOKEN=plugin-secret",
@@ -148,7 +150,7 @@ func TestUISnapshotBudgetCoversNameAndText(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	config.MaxSnapshotBytes = 32
 	recorder := openRecorder(t, config)
-	event, err := recorder.Record(diagnostics.Event{
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "snapshot",
 		UISnapshot: &diagnostics.UISnapshot{Name: strings.Repeat("名", 20), Text: strings.Repeat("screen", 20)},
 	})
@@ -164,7 +166,7 @@ func TestUISnapshotBudgetCoversNameAndText(t *testing.T) {
 	if !utf8.ValidString(event.UISnapshot.Name) || !utf8.ValidString(event.UISnapshot.Text) {
 		t.Fatalf("snapshot truncation split UTF-8: %#v", event.UISnapshot)
 	}
-	exact, err := recorder.Record(diagnostics.Event{
+	exact, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "exact snapshot",
 		UISnapshot: &diagnostics.UISnapshot{Name: strings.Repeat("n", config.MaxSnapshotBytes)},
 	})
@@ -177,7 +179,7 @@ func TestDetailBudgetSmallerThanMarkerStillBoundsPayload(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	config.MaxDetailBytes = 1
 	recorder := openRecorder(t, config)
-	event, err := recorder.Record(diagnostics.Event{
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "details",
 		Details: map[string]any{"safe": "value"},
 	})
@@ -201,7 +203,7 @@ func TestDetailTruncationMarkerFitsItsExactBudget(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	config.MaxDetailBytes = len(marker)
 	recorder := openRecorder(t, config)
-	event, err := recorder.Record(diagnostics.Event{
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "details",
 		Details: map[string]any{"safe": strings.Repeat("x", 100)},
 	})
@@ -223,7 +225,7 @@ func TestDetailsAtExactBudgetRemainAvailable(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	config.MaxDetailBytes = len(encoded)
 	recorder := openRecorder(t, config)
-	event, err := recorder.Record(diagnostics.Event{
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
 		Message: "exact details", Details: details,
 	})
@@ -250,7 +252,7 @@ func TestOpenUsesPrivateModesAndRecoversCorruptRecords(t *testing.T) {
 	if !health.Writable || health.CorruptRecords != 1 || health.LastError == "" {
 		t.Fatalf("recovery health = %#v", health)
 	}
-	event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "ready"})
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "ready"})
 	if err != nil || event.Sequence != 8 {
 		t.Fatalf("post-recovery Record() = (%#v, %v)", event, err)
 	}
@@ -308,8 +310,10 @@ func TestOpenRepairsMissingDelimiterBeforeAppending(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, diagnostics.EventLogName), []byte(prior), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	recorder := openRecorder(t, testConfig(directory))
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "next"}); err != nil {
+	config := testConfig(directory)
+	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 30, 0, 0, time.UTC) }
+	recorder := openRecorder(t, config)
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "next"}); err != nil {
 		t.Fatal(err)
 	}
 	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
@@ -335,7 +339,7 @@ func TestOpenRetainsNewestRecordsWhenExistingLogExceedsNewByteBudget(t *testing.
 	config.MaxBytes = 1400
 	config.Now = func() time.Time { return time.Date(2026, 9, 3, 11, 0, 0, 0, time.UTC) }
 	recorder := openRecorder(t, config)
-	event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "newest"})
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "newest"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +392,7 @@ func TestOpenRetainsCompleteTailStartingAtExactRecordBoundary(t *testing.T) {
 	if len(events) != 1 || events[0].Sequence != 2 || recorder.Health().Bytes != maxBytes {
 		t.Fatalf("exact bounded tail = events %#v, health %#v", events, recorder.Health())
 	}
-	if event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "new"}); err != nil || event.Sequence != 3 {
+	if event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "new"}); err != nil || event.Sequence != 3 {
 		t.Fatalf("record after exact bounded tail = (%#v, %v)", event, err)
 	}
 }
@@ -408,7 +412,7 @@ func TestOpenDoesNotRewriteAValidLogAtItsExactByteBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: strings.Repeat("x", int(config.MaxBytes)-len(base)-1)}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: strings.Repeat("x", int(config.MaxBytes)-len(base)-1)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := recorder.Close(); err != nil {
@@ -510,13 +514,13 @@ func TestEventAtExactByteBudgetFitsAndOversizedEventIsDropped(t *testing.T) {
 	if messageBytes <= 0 {
 		t.Fatalf("event envelope unexpectedly consumes byte budget: %d", len(base))
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
 		t.Fatalf("exact-budget event error = %v", err)
 	}
 	if health := recorder.Health(); health.Bytes != config.MaxBytes || health.Dropped != 0 {
 		t.Fatalf("exact-budget health = %#v", health)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", int(config.MaxBytes))}); !errors.Is(err, diagnostics.ErrEventTooLarge) {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", int(config.MaxBytes))}); !errors.Is(err, diagnostics.ErrEventTooLarge) {
 		t.Fatalf("oversized event error = %v", err)
 	}
 	if health := recorder.Health(); health.Dropped != 1 || !health.Pressure || health.Bytes != config.MaxBytes {
@@ -536,7 +540,7 @@ func TestRetentionByCountBytesAndAge(t *testing.T) {
 
 	for index := range 8 {
 		now = base.Add(time.Duration(index) * time.Minute)
-		_, err := recorder.Record(diagnostics.Event{
+		_, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 			Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
 			Message: fmt.Sprintf("event-%d-%s", index, strings.Repeat("x", 180)),
 		})
@@ -589,7 +593,7 @@ func TestHealthReportsExactUsageAndIndependentPressureSignals(t *testing.T) {
 			if messageBytes < 1 {
 				t.Fatalf("fixture byte target %d is too small", test.bytes)
 			}
-			if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
+			if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", messageBytes)}); err != nil {
 				t.Fatal(err)
 			}
 			health := recorder.Health()
@@ -615,7 +619,7 @@ func TestConcurrentRecordingHasUniqueSequenceAndSettledQuota(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			for index := range perGoroutine {
-				_, err := recorder.Record(diagnostics.Event{
+				_, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 					Level: diagnostics.LevelDebug, Kind: diagnostics.KindInteraction,
 					Plugin: fmt.Sprintf("plugin-%d", worker), Message: fmt.Sprintf("event-%d-%s", index, strings.Repeat("x", index%40)),
 				})
@@ -666,7 +670,7 @@ func TestPropertyRetentionNeverExceedsCountOrByteBudget(t *testing.T) {
 		operations := rapid.IntRange(1, 60).Draw(rt, "operations")
 		for index := range operations {
 			length := rapid.IntRange(1, 2000).Draw(rt, fmt.Sprintf("length-%d", index))
-			_, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("m", length)})
+			_, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("m", length)})
 			if err != nil && !errors.Is(err, diagnostics.ErrEventTooLarge) {
 				rt.Fatalf("Record() unexpected error = %v", err)
 			}
@@ -684,7 +688,7 @@ func TestReportIsDeterministicRedactedBoundedAndExplicitlyTruncated(t *testing.T
 	config.Now = func() time.Time { return base }
 	recorder := openRecorder(t, config)
 	for index := range 12 {
-		_, err := recorder.Record(diagnostics.Event{
+		_, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 			Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle,
 			Message:    fmt.Sprintf("event-%02d %s", index, strings.Repeat("x", 180)),
 			UISnapshot: &diagnostics.UISnapshot{Name: "main", Text: "TOKEN=snapshot-secret\n" + strings.Repeat("screen", 100)},
@@ -732,7 +736,7 @@ func TestReportIsDeterministicRedactedBoundedAndExplicitlyTruncated(t *testing.T
 func TestReportCanOmitTheFinalOversizedEvent(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	recorder := openRecorder(t, config)
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", 4000)}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: strings.Repeat("x", 4000)}); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := recorder.Export(diagnostics.ReportOptions{MaxBytes: 1024})
@@ -756,7 +760,7 @@ func TestReportLimitsAndEveryTruncationStage(t *testing.T) {
 	config.MaxReportBytes = 16 << 10
 	recorder := openRecorder(t, config)
 	for sequence := range 3 {
-		if _, err := recorder.Record(diagnostics.Event{
+		if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
 			Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
 			Message:    fmt.Sprintf("event-%d-%s", sequence, strings.Repeat("m", 700)),
 			UISnapshot: &diagnostics.UISnapshot{Name: "main", Text: strings.Repeat("screen", 200)},
@@ -907,7 +911,7 @@ func TestValidationAndIdempotentCloseCleanup(t *testing.T) {
 	if err := recorder.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "late"}); !errors.Is(err, diagnostics.ErrClosed) {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "late"}); !errors.Is(err, diagnostics.ErrClosed) {
 		t.Fatalf("Record() after close error = %v", err)
 	}
 	if err := recorder.Cleanup(); !errors.Is(err, diagnostics.ErrClosed) {
@@ -919,19 +923,19 @@ func TestCyclicDetailsAndMetadataFailBeforeRecursiveRedaction(t *testing.T) {
 	recorder := openRecorder(t, testConfig(filepath.Join(t.TempDir(), "private")))
 	cyclicMap := map[string]any{}
 	cyclicMap["nested"] = cyclicMap
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "cycle", Details: cyclicMap}); err == nil || !strings.Contains(err.Error(), "details") || !strings.Contains(err.Error(), "cycle") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "cycle", Details: cyclicMap}); err == nil || !strings.Contains(err.Error(), "details") || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("cyclic map error = %v", err)
 	}
 	cyclicSlice := make([]any, 1)
 	cyclicSlice[0] = cyclicSlice
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "cycle", Details: map[string]any{"items": cyclicSlice}}); err == nil || !strings.Contains(err.Error(), "cycle") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "cycle", Details: map[string]any{"items": cyclicSlice}}); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("cyclic slice error = %v", err)
 	}
 	deep := any("leaf")
 	for range 18 {
 		deep = map[string]any{"nested": deep}
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "deep", Details: deep.(map[string]any)}); err == nil || !strings.Contains(err.Error(), "depth") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "deep", Details: deep.(map[string]any)}); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("excessive depth error = %v", err)
 	}
 	if health := recorder.Health(); health.Events != 0 || health.Bytes != 0 {
@@ -940,7 +944,7 @@ func TestCyclicDetailsAndMetadataFailBeforeRecursiveRedaction(t *testing.T) {
 	if _, err := recorder.Export(diagnostics.ReportOptions{ConfigMetadata: cyclicMap}); err == nil || !strings.Contains(err.Error(), "config metadata") || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("cyclic report metadata error = %v", err)
 	}
-	event, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "still usable"})
+	event, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "still usable"})
 	if err != nil || event.Sequence != 1 {
 		t.Fatalf("Record() after rejected values = (%#v, %v)", event, err)
 	}
@@ -949,7 +953,7 @@ func TestCyclicDetailsAndMetadataFailBeforeRecursiveRedaction(t *testing.T) {
 func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 	recorder := openRecorder(t, testConfig(filepath.Join(t.TempDir(), "private")))
 	for _, value := range []any{math.NaN(), math.Inf(1), math.Inf(-1), float32(math.Inf(1)), float32(math.NaN())} {
-		if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "number", Details: map[string]any{"value": value}}); err == nil || !strings.Contains(err.Error(), "non-finite") {
+		if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "number", Details: map[string]any{"value": value}}); err == nil || !strings.Contains(err.Error(), "non-finite") {
 			t.Errorf("non-finite value %v error = %v", value, err)
 		}
 	}
@@ -960,10 +964,10 @@ func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 		}
 		return value.(map[string]any)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-16", Details: nested(16)}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-16", Details: nested(16)}); err != nil {
 		t.Fatalf("depth 16 rejected: %v", err)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-17", Details: nested(17)}); err == nil || !strings.Contains(err.Error(), "depth") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-17", Details: nested(17)}); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("depth 17 error = %v", err)
 	}
 	nestedSlices := func(depth int) map[string]any {
@@ -973,33 +977,33 @@ func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 		}
 		return map[string]any{"items": value}
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-16", Details: nestedSlices(15)}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-16", Details: nestedSlices(15)}); err != nil {
 		t.Fatalf("slice depth 16 rejected: %v", err)
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-17", Details: nestedSlices(16)}); err == nil || !strings.Contains(err.Error(), "depth") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-17", Details: nestedSlices(16)}); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("slice depth 17 error = %v", err)
 	}
 	items := make([]any, 4094)
 	for index := range items {
 		items[index] = index
 	}
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4096", Details: map[string]any{"items": items}}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4096", Details: map[string]any{"items": items}}); err != nil {
 		t.Fatalf("4096 nodes rejected: %v", err)
 	}
 	items = append(items, 4094)
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4097", Details: map[string]any{"items": items}}); err == nil || !strings.Contains(err.Error(), "node count") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "nodes-4097", Details: map[string]any{"items": items}}); err == nil || !strings.Contains(err.Error(), "node count") {
 		t.Fatalf("4097 nodes error = %v", err)
 	}
 	longKey := strings.Repeat("k", 80)
 	cycle := map[string]any{}
 	cycle[longKey] = cycle
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "bounded path", Details: cycle}); err == nil || !strings.Contains(err.Error(), strings.Repeat("k", 64)+"...") || strings.Contains(err.Error(), longKey) {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "bounded path", Details: cycle}); err == nil || !strings.Contains(err.Error(), strings.Repeat("k", 64)+"...") || strings.Contains(err.Error(), longKey) {
 		t.Fatalf("bounded validation path error = %v", err)
 	}
 	exactKey := strings.Repeat("e", 64)
 	exactCycle := map[string]any{}
 	exactCycle[exactKey] = exactCycle
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "exact path", Details: exactCycle}); err == nil || !strings.Contains(err.Error(), exactKey) || strings.Contains(err.Error(), exactKey+"...") {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "exact path", Details: exactCycle}); err == nil || !strings.Contains(err.Error(), exactKey) || strings.Contains(err.Error(), exactKey+"...") {
 		t.Fatalf("exact validation path error = %v", err)
 	}
 }
@@ -1012,7 +1016,7 @@ func TestCleanupStorageFailureRollsBackAndReportsOneDrop(t *testing.T) {
 	config.MaxAge = time.Minute
 	config.Now = func() time.Time { return now }
 	recorder := openRecorder(t, config)
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "retained after rollback"}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "retained after rollback"}); err != nil {
 		t.Fatal(err)
 	}
 	moved := directory + "-moved"
@@ -1041,13 +1045,13 @@ func TestStorageFailureIsReportedWithoutRecursivePersistence(t *testing.T) {
 	config := testConfig(directory)
 	config.MaxEvents = 1
 	recorder := openRecorder(t, config)
-	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "first"}); err != nil {
+	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "first"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(directory, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	_, recordErr := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "forces compaction"})
+	_, recordErr := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "forces compaction"})
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

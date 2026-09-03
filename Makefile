@@ -1,10 +1,14 @@
 GOTOOLCHAIN ?= go1.27.0
 BASE ?=
 
-.PHONY: test test-race test-properties mutation-changed mutation-full
+.PHONY: test test-timing test-race test-properties mutation-changed mutation-full
 
 test:
-	GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+	HERDR_PLUGIN_KIT_TIMING= GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
+	$(MAKE) test-timing
+
+test-timing:
+	GOFLAGS= HERDR_PLUGIN_KIT_TIMING=1 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./ui/shell -run 'Test(PTYResizeOutputAndSettlementTiming|WorstSupportedResizeBurstP95)$$' -count=1
 
 test-race:
 	GOTOOLCHAIN=$(GOTOOLCHAIN) go test -race ./...

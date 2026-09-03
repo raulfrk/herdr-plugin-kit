@@ -94,6 +94,11 @@ make mutation-full before the final acceptance bead and again after its final
 code commit, before live proof and release. Any later production change
 requires another full run.
 
+Wall-clock SLO tests run through `make test-timing` in an isolated package
+process. `make test` runs that lane after the functional suite. Coverage and
+race instrumentation skip only the timing assertions while continuing to run
+all shell correctness and concurrency tests.
+
 ## Toolchain feasibility record
 
 On 2026-09-02 the disposable gate ran with Go 1.27.0, Rapid 1.3.0, and
@@ -110,6 +115,84 @@ The Herdr host fixtures below were derived on 2026-09-02 from installed Herdr
 read-only `plugin action list`, `plugin log list`, and `session list --json`
 output. Tests use injected runners and do not create, invoke, stop, or delete
 live Herdr resources.
+
+## HYP-RESP-01 — Every terminal size resolves to one bounded layout
+
+- Claim: every reported size resolves deterministically to recovery, compact,
+  standard, or wide; render geometry is positive and never exceeds 500x200.
+- Fault model: a threshold gap/overlap, zero-sized frame, unbounded allocation,
+  or nondeterministic class selection.
+- Setup or generator: exhaustive sizes from 1x1 through 500x200 plus negative,
+  zero, and oversized dimensions.
+- Independent oracle: literal class thresholds and component-wise clamp computed
+  in the test rather than by the resolver.
+- Falsified when: class or geometry differs from the oracle, or repeated calls
+  differ.
+- Diagnostics: reported size, expected/actual class, render size, and projection
+  flag.
+
+## HYP-RESP-02 — Resize bursts converge quickly to the latest stable size
+
+- Claim: every resize is applied immediately, stale settle timers are ignored,
+  and the latest generation settles once within 100–250 ms without later stale
+  rendering.
+- Fault model: debounce hides an intermediate resize, an old timer wins, event
+  backlog delays recovery, or the final viewport is misidentified.
+- Setup or generator: deterministic generation traces, 200 seeded PTY bursts,
+  short phone-like rows, and a final 500x200 resize.
+- Independent oracle: monotonically assigned generations, the final emitted
+  terminal size, diagnostic outcomes, and elapsed monotonic time.
+- Falsified when: a received size is skipped, a stale generation is applied,
+  final settling leaves the 100–250 ms window, or the final frame differs from
+  the final reported geometry.
+- Diagnostics: seed, generation trace, reported/render geometry, outcomes,
+  p95 update latency, final-settle latency, and bounded terminal bytes.
+
+## HYP-INPUT-01 — Text reaches the surface but never semantic diagnostics
+
+- Claim: Unicode keyboard and paste text is delivered unchanged to the surface,
+  while diagnostics retain only byte and grapheme counts.
+- Fault model: input is normalized/truncated before use, or query/path/secret
+  content leaks into an event, visual state, or report.
+- Setup or generator: fixed multilingual canaries and generated valid UTF-8 text
+  delivered as key-run and paste messages.
+- Independent oracle: byte equality at the surface, independent grapheme counts,
+  and raw persisted-byte absence of every canary.
+- Falsified when: surface text differs, counts differ, or any canary appears in
+  persisted/exported diagnostics.
+- Diagnostics: input length and grapheme count only; failing content is never
+  printed or persisted.
+
+## HYP-ASYNC-01 — Latest request generation exclusively owns visible state
+
+- Claim: starting work for an existing request key cancels the prior context,
+  and only the latest generation can update the surface.
+- Fault model: an old result overwrites new state, cancellation targets the new
+  request, or correlations cross between generations.
+- Setup or generator: controlled work functions complete in reverse order with
+  distinct opaque correlations and cancellation observation channels.
+- Independent oracle: generated order, latest generation number, cancellation
+  channel, and the surface's accepted result history.
+- Falsified when: the old context remains live, a stale result reaches Update,
+  or the accepted result/correlation is not the latest.
+- Diagnostics: request key, generations, opaque correlations, outcomes, and
+  accepted-result count; result values are omitted.
+
+## HYP-DIAG-SEMANTIC-01 — Plugin diagnostics accept only semantic state
+
+- Claim: the public recording boundary accepts only validated static IDs,
+  allowlisted outcomes, nonnegative measurements, geometry, and a text-free
+  visual projection.
+- Fault model: a free-form field becomes recordable, malformed IDs or negative
+  values persist, or caller-owned state aliases retained recorder data.
+- Setup or generator: compile-time `SemanticSink` conformance, malformed ID and
+  measurement tables, a complete visual projection, and raw log inspection.
+- Independent oracle: the declared public field set, identifier grammar,
+  literal semantic JSON keys, and absence of user-content canaries.
+- Falsified when: invalid semantic input is accepted, unexpected keys/content
+  persist, or caller mutation changes a retained event.
+- Diagnostics: rejected field category, semantic IDs, measurements, and raw-key
+  differences; no user content is emitted.
 
 ## HYP-MANIFEST-01 — Valid declarations are stable and unambiguous
 

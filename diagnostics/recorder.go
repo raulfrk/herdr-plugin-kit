@@ -196,7 +196,7 @@ func validStoredEvent(line []byte, event *Event, previousSequence uint64, previo
 	return validateEvent(*event) == nil
 }
 
-func (r *Recorder) Record(input Event) (Event, error) {
+func (r *Recorder) record(input Event) (Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
