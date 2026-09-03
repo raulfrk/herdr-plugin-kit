@@ -8,31 +8,16 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
 )
 
-const manifestVersion = 1
-
-type Design struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	LayoutSignature string `json:"layout_signature"`
-	shortName       string
-}
-
-// Treatment is a coherent set of component-level visual choices. Treatments
-// are intentionally few: the catalogue is for choosing a design, not building
-// arbitrary combinations.
-type Treatment struct {
-	ID          string
-	Name        string
-	Description string
-}
+const (
+	manifestVersion = 2
+	designID        = "bento-command"
+)
 
 type Viewport struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	KeyboardOpen bool   `json:"keyboard_open"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 type Scenario struct {
@@ -43,40 +28,30 @@ type Scenario struct {
 }
 
 type Spec struct {
-	Design   Design
 	ThemeID  string
 	Viewport Viewport
 	Scenario Scenario
 }
 
 func (s Spec) RelativePath() string {
-	return filepath.ToSlash(filepath.Join(s.Design.ID, s.ThemeID, s.Viewport.ID, s.Scenario.ID+".png"))
+	return filepath.ToSlash(filepath.Join(designID, s.ThemeID, s.Viewport.ID, s.Scenario.ID+".png"))
 }
 
 type Selection struct {
-	DesignIDs   []string
 	ThemeIDs    []string
 	ViewportIDs []string
 	ScenarioIDs []string
 }
 
-var designs = []Design{
-	{ID: "dense-palette", Name: "Dense Palette", Description: "Command-first workspace with compact rows and high information density.", LayoutSignature: "header/query/full-width-table/inline-detail", shortName: "Dense"},
-	{ID: "split-inspector", Name: "Split Inspector", Description: "Persistent navigation, results, and focused detail in separate panes.", LayoutSignature: "sidebar/master-list/detail-pane", shortName: "Split"},
-	{ID: "calm-cards", Name: "Calm Cards", Description: "Spacious task-oriented cards with progressive disclosure.", LayoutSignature: "hero/stacked-cards/action-footer", shortName: "Cards"},
-}
-
-var treatments = []Treatment{
-	{ID: "structured", Name: "Structured", Description: "Visible borders and filled selection rows."},
-	{ID: "quiet", Name: "Quiet", Description: "Tinted regions with restrained dividers."},
-	{ID: "focus-rail", Name: "Focus Rail", Description: "Strong non-colour focus marker with minimal fill."},
-}
-
 var viewports = []Viewport{
-	{ID: "wide", Name: "Wide", Width: 160, Height: 45},
-	{ID: "desktop", Name: "Desktop", Width: 110, Height: 34},
+	{ID: "minimum", Name: "Minimum", Width: 40, Height: 10},
+	{ID: "phone-keyboard", Name: "Phone + keyboard", Width: 48, Height: 18},
 	{ID: "phone", Name: "Phone", Width: 48, Height: 30},
-	{ID: "phone-keyboard", Name: "Phone + keyboard", Width: 48, Height: 18, KeyboardOpen: true},
+	{ID: "landscape-recovery", Name: "Landscape + keyboard", Width: 78, Height: 10},
+	{ID: "landscape", Name: "Landscape", Width: 78, Height: 20},
+	{ID: "standard", Name: "Standard", Width: 80, Height: 18},
+	{ID: "wide", Name: "Wide", Width: 110, Height: 24},
+	{ID: "maximum", Name: "Maximum", Width: 500, Height: 200},
 }
 
 var scenarios = []Scenario{
@@ -92,9 +67,8 @@ var scenarios = []Scenario{
 	{ID: "long-content", Name: "Long content", State: "long-content", Surfaces: []string{"recall-search", "session-switcher", "plugin-configurator", "debug-ui"}},
 }
 
-func Designs() []Design       { return slices.Clone(designs) }
-func Treatments() []Treatment { return slices.Clone(treatments) }
-func Viewports() []Viewport   { return slices.Clone(viewports) }
+func Viewports() []Viewport { return slices.Clone(viewports) }
+
 func Scenarios() []Scenario {
 	result := slices.Clone(scenarios)
 	for i := range result {
@@ -104,10 +78,6 @@ func Scenarios() []Scenario {
 }
 
 func Matrix(selection Selection) ([]Spec, error) {
-	selectedDesigns, err := selectValues(designs, selection.DesignIDs, func(v Design) string { return v.ID }, "design")
-	if err != nil {
-		return nil, err
-	}
 	selectedThemes, err := selectValues(theme.IDs(), selection.ThemeIDs, func(v string) string { return v }, "theme")
 	if err != nil {
 		return nil, err
@@ -120,13 +90,11 @@ func Matrix(selection Selection) ([]Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []Spec
-	for _, design := range selectedDesigns {
-		for _, themeID := range selectedThemes {
-			for _, viewport := range selectedViewports {
-				for _, scenario := range selectedScenarios {
-					result = append(result, Spec{Design: design, ThemeID: themeID, Viewport: viewport, Scenario: scenario})
-				}
+	result := make([]Spec, 0, len(selectedThemes)*len(selectedViewports)*len(selectedScenarios))
+	for _, themeID := range selectedThemes {
+		for _, viewport := range selectedViewports {
+			for _, scenario := range selectedScenarios {
+				result = append(result, Spec{ThemeID: themeID, Viewport: viewport, Scenario: scenario})
 			}
 		}
 	}
@@ -151,10 +119,8 @@ func selectValues[T any](available []T, requested []string, id func(T) string, k
 			delete(wanted, id(value))
 		}
 	}
-	if len(wanted) != 0 {
-		for value := range wanted {
-			return nil, fmt.Errorf("unknown %s %q", kind, value)
-		}
+	for value := range wanted {
+		return nil, fmt.Errorf("unknown %s %q", kind, value)
 	}
 	return result, nil
 }

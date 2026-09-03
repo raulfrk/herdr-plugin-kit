@@ -32,7 +32,6 @@ func runWithLive(args []string, stdout io.Writer, live func() error) error {
 	flags := flag.NewFlagSet("catalogue", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	output := flags.String("output", "", "empty output directory to create or populate")
-	design := flags.String("design", "", "comma-separated design IDs (default all)")
 	themeID := flags.String("theme", "", "comma-separated theme IDs (default all)")
 	viewport := flags.String("viewport", "", "comma-separated viewport IDs (default all)")
 	scenario := flags.String("scenario", "", "comma-separated scenario IDs (default all)")
@@ -43,12 +42,12 @@ func runWithLive(args []string, stdout io.Writer, live func() error) error {
 		return errors.New("catalogue accepts flags only")
 	}
 	if *output == "" {
-		if *design != "" || *themeID != "" || *viewport != "" || *scenario != "" {
+		if *themeID != "" || *viewport != "" || *scenario != "" {
 			return errors.New("export selectors require --output")
 		}
 		return live()
 	}
-	manifest, err := catalogue.Export(context.Background(), *output, catalogue.Selection{DesignIDs: split(*design), ThemeIDs: split(*themeID), ViewportIDs: split(*viewport), ScenarioIDs: split(*scenario)})
+	manifest, err := catalogue.Export(context.Background(), *output, catalogue.Selection{ThemeIDs: split(*themeID), ViewportIDs: split(*viewport), ScenarioIDs: split(*scenario)})
 	if err != nil {
 		return err
 	}

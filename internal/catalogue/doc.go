@@ -2,9 +2,8 @@
 // future UI consumers. It is internal tooling, not runtime plugin or
 // generated-project logic.
 //
-// HYP-CAT-001: comparing structurally different layouts across the complete
-// theme/viewport/scenario matrix reveals useful design trade-offs that isolated
-// colour studies miss.
+// HYP-CAT-001: the selected Bento Command / Structured layout remains complete
+// and inspectable across the complete theme/viewport/scenario matrix.
 //
 // HYP-CAT-002: fixed-cell composition with explicit responsive branches keeps
 // every study inspectable when a phone keyboard reduces the available height.

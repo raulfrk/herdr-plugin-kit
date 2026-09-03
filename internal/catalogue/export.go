@@ -26,25 +26,22 @@ type Manifest struct {
 }
 
 type ManifestEntry struct {
-	Path            string   `json:"path"`
-	SHA256          string   `json:"sha256"`
-	DesignID        string   `json:"design"`
-	LayoutSignature string   `json:"layout_signature"`
-	ThemeID         string   `json:"theme"`
-	ViewportID      string   `json:"viewport"`
-	ScenarioID      string   `json:"scenario"`
-	State           string   `json:"state"`
-	Surfaces        []string `json:"surfaces"`
-	CellWidth       int      `json:"cell_width"`
-	CellHeight      int      `json:"cell_height"`
-	PixelWidth      int      `json:"pixel_width"`
-	PixelHeight     int      `json:"pixel_height"`
+	Path        string   `json:"path"`
+	SHA256      string   `json:"sha256"`
+	ThemeID     string   `json:"theme"`
+	ViewportID  string   `json:"viewport"`
+	ScenarioID  string   `json:"scenario"`
+	State       string   `json:"state"`
+	Surfaces    []string `json:"surfaces"`
+	CellWidth   int      `json:"cell_width"`
+	CellHeight  int      `json:"cell_height"`
+	PixelWidth  int      `json:"pixel_width"`
+	PixelHeight int      `json:"pixel_height"`
 }
 
 type ContactSheetManifest struct {
 	Path        string   `json:"path"`
 	SHA256      string   `json:"sha256"`
-	DesignID    string   `json:"design"`
 	ThemeID     string   `json:"theme"`
 	ViewportID  string   `json:"viewport"`
 	Scenarios   []string `json:"scenarios"`
@@ -85,8 +82,8 @@ func Export(ctx context.Context, outputDir string, selection Selection) (Manifes
 		if err := writeRelative(stagingDir, spec.RelativePath(), encoded); err != nil {
 			return Manifest{}, err
 		}
-		manifest.Entries = append(manifest.Entries, ManifestEntry{Path: spec.RelativePath(), SHA256: digest(encoded), DesignID: spec.Design.ID, LayoutSignature: spec.Design.LayoutSignature, ThemeID: spec.ThemeID, ViewportID: spec.Viewport.ID, ScenarioID: spec.Scenario.ID, State: spec.Scenario.State, Surfaces: append([]string(nil), spec.Scenario.Surfaces...), CellWidth: spec.Viewport.Width, CellHeight: spec.Viewport.Height, PixelWidth: spec.Viewport.Width * view.PNGCellWidth, PixelHeight: spec.Viewport.Height * view.PNGCellHeight})
-		key := strings.Join([]string{spec.Design.ID, spec.ThemeID, spec.Viewport.ID}, "/")
+		manifest.Entries = append(manifest.Entries, ManifestEntry{Path: spec.RelativePath(), SHA256: digest(encoded), ThemeID: spec.ThemeID, ViewportID: spec.Viewport.ID, ScenarioID: spec.Scenario.ID, State: spec.Scenario.State, Surfaces: append([]string(nil), spec.Scenario.Surfaces...), CellWidth: spec.Viewport.Width, CellHeight: spec.Viewport.Height, PixelWidth: spec.Viewport.Width * view.PNGCellWidth, PixelHeight: spec.Viewport.Height * view.PNGCellHeight})
+		key := strings.Join([]string{spec.ThemeID, spec.Viewport.ID}, "/")
 		images[key] = append(images[key], encoded)
 	}
 	keys := make([]string, 0, len(images))
@@ -103,12 +100,12 @@ func Export(ctx context.Context, outputDir string, selection Selection) (Manifes
 		if err != nil {
 			return Manifest{}, fmt.Errorf("contact sheet %s: %w", key, err)
 		}
-		path := filepath.ToSlash(filepath.Join("contact-sheets", parts[0], parts[1], parts[2]+".png"))
+		path := filepath.ToSlash(filepath.Join("contact-sheets", parts[0], parts[1]+".png"))
 		if err := writeRelative(stagingDir, path, encoded); err != nil {
 			return Manifest{}, err
 		}
-		scenarioIDs := selectedScenarioIDs(specs, parts[0], parts[1], parts[2])
-		manifest.ContactSheets = append(manifest.ContactSheets, ContactSheetManifest{Path: path, SHA256: digest(encoded), DesignID: parts[0], ThemeID: parts[1], ViewportID: parts[2], Scenarios: scenarioIDs, PixelWidth: width, PixelHeight: height})
+		scenarioIDs := selectedScenarioIDs(specs, parts[0], parts[1])
+		manifest.ContactSheets = append(manifest.ContactSheets, ContactSheetManifest{Path: path, SHA256: digest(encoded), ThemeID: parts[0], ViewportID: parts[1], Scenarios: scenarioIDs, PixelWidth: width, PixelHeight: height})
 	}
 	index, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -236,10 +233,10 @@ func contactSheet(encodedImages [][]byte) ([]byte, int, int, error) {
 	return output.Bytes(), width, height, nil
 }
 
-func selectedScenarioIDs(specs []Spec, design, themeID, viewport string) []string {
+func selectedScenarioIDs(specs []Spec, themeID, viewport string) []string {
 	var result []string
 	for _, spec := range specs {
-		if spec.Design.ID == design && spec.ThemeID == themeID && spec.Viewport.ID == viewport {
+		if spec.ThemeID == themeID && spec.Viewport.ID == viewport {
 			result = append(result, spec.Scenario.ID)
 		}
 	}
@@ -251,6 +248,6 @@ func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeT
 var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><title>Herdr UI catalogue</title><style>body{font:14px sans-serif;margin:2rem;background:#111;color:#eee}img{max-width:100%;border:1px solid #555}section{margin:2rem 0}code{color:#9dd}</style></head><body>
 <h1>Herdr UI catalogue</h1><p>{{len .Entries}} scenarios · {{len .ContactSheets}} contact sheets · deterministic manifest v{{.Version}}</p>
-{{range .ContactSheets}}<section><h2>{{.DesignID}} / {{.ThemeID}} / {{.ViewportID}}</h2><p><code>{{range $i, $v := .Scenarios}}{{if $i}}, {{end}}{{$v}}{{end}}</code></p><a href="{{.Path}}"><img src="{{.Path}}" alt="{{.DesignID}} {{.ThemeID}} {{.ViewportID}} contact sheet"></a></section>{{end}}
+{{range .ContactSheets}}<section><h2>{{.ThemeID}} / {{.ViewportID}}</h2><p><code>{{range $i, $v := .Scenarios}}{{if $i}}, {{end}}{{$v}}{{end}}</code></p><a href="{{.Path}}"><img src="{{.Path}}" alt="{{.ThemeID}} {{.ViewportID}} contact sheet"></a></section>{{end}}
 </body></html>
 `))
