@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -239,6 +240,116 @@ func TestPropertyObservationCoherence(t *testing.T) {
 			rt.Fatalf("assessment=%+v error=%v", got, err)
 		}
 	})
+}
+
+func TestAssessmentRejectsEveryCrossSampleIdentityAndSemanticChange(t *testing.T) {
+	base := validWireAgent("w:p")
+	tests := []struct {
+		name   string
+		mutate func(*wireAgent)
+		text   string
+		want   Assessment
+	}{
+		{"kind", func(a *wireAgent) { a.Agent = "claude" }, "Ask Codex", Assessment{}}, {"workspace", func(a *wireAgent) { a.WorkspaceID = "w2" }, "Ask Codex", Assessment{}},
+		{"tab", func(a *wireAgent) { a.TabID = "w1:t2" }, "Ask Codex", Assessment{}}, {"pane", func(a *wireAgent) { a.PaneID = "w:p2" }, "Ask Codex", Assessment{}},
+		{"host status", func(a *wireAgent) { a.AgentStatus = "working" }, "Ask Codex", Assessment{Status: Unknown, Reason: Unsettled}}, {"semantic", func(*wireAgent) {}, "running command", Assessment{Status: Unknown, Reason: Unsettled}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			second := base
+			tc.mutate(&second)
+			results := append(oneObservation(t, base, base, "Ask Codex"), oneObservation(t, second, second, tc.text)...)
+			got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, base))
+			if !errors.Is(err, ErrStaleReport) || got != tc.want {
+				t.Fatalf("assessment=%+v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestSessionIdentityEqualityRequiresPresenceAndAllFields(t *testing.T) {
+	base := Agent{SessionName: "named", Kind: "codex", WorkspaceID: "w", TabID: "t", PaneID: "p", Session: &SessionRef{Source: "source", Agent: "codex", Kind: "id", Value: "value"}}
+	if !sameImmutable(base, base) {
+		t.Fatal("identical identity rejected")
+	}
+	without := base
+	without.Session = nil
+	if sameImmutable(base, without) || sameImmutable(without, base) {
+		t.Fatal("session presence ignored")
+	}
+	for _, mutate := range []func(*Agent){func(a *Agent) { a.SessionName = "other" }, func(a *Agent) { a.Session.Source = "other" }, func(a *Agent) { a.Session.Agent = "other" }, func(a *Agent) { a.Session.Kind = "other" }, func(a *Agent) { a.Session.Value = "other" }} {
+		changed := base
+		session := *base.Session
+		changed.Session = &session
+		mutate(&changed)
+		if sameImmutable(base, changed) {
+			t.Fatalf("changed identity matched: %+v", changed)
+		}
+	}
+}
+
+func TestTargetAndSessionValidationBoundaries(t *testing.T) {
+	valid := mustPublic(t, validWireAgent("w:p"))
+	for _, mutate := range []func(*Agent){func(a *Agent) { a.Kind = "" }, func(a *Agent) { a.WorkspaceID = "" }, func(a *Agent) { a.TabID = "" }, func(a *Agent) { a.Status = "waiting" }, func(a *Agent) { a.PaneID = strings.Repeat("p", maxIdentityBytes+1) }, func(a *Agent) { a.PaneID = "p\nother" }} {
+		target := valid
+		mutate(&target)
+		if validateTarget(target) == nil {
+			t.Fatalf("invalid target accepted: %+v", target)
+		}
+	}
+	valid.PaneID = strings.Repeat("p", maxIdentityBytes)
+	if err := validateTarget(valid); err != nil {
+		t.Fatalf("maximum pane ID rejected: %v", err)
+	}
+	for _, field := range []string{"source", "agent", "kind", "value"} {
+		session := SessionRef{Source: "source", Agent: "agent", Kind: "kind", Value: "value"}
+		switch field {
+		case "source":
+			session.Source = ""
+		case "agent":
+			session.Agent = ""
+		case "kind":
+			session.Kind = ""
+		case "value":
+			session.Value = ""
+		}
+		if validateSession(session) == nil {
+			t.Fatalf("empty %s accepted", field)
+		}
+	}
+	if err := validateBounded("optional", "", 1, true); err != nil {
+		t.Fatalf("empty optional rejected: %v", err)
+	}
+}
+
+func TestDetectionAndTailExactBoundaries(t *testing.T) {
+	a := validWireAgent("w:p")
+	exact := strings.Repeat("x", MaxDetectionBytes)
+	results := observationResults(t, a, exact, a, exact)
+	got, err := (Probe{Host: Host{Runner: &scriptedRunner{results: results}}, Settle: time.Nanosecond}).Assess(context.Background(), mustPublic(t, a))
+	if err != nil || !got.Stable || got.Status != Unknown || got.Reason != Unrecognized {
+		t.Fatalf("assessment=%+v error=%v", got, err)
+	}
+	sixty := make([]string, DetectionLines)
+	for i := range sixty {
+		sixty[i] = fmt.Sprintf("line-%d", i)
+	}
+	tail := strings.Split(boundedTail(strings.Join(sixty, "\n")), "\n")
+	if len(tail) != DetectionLines || tail[0] != "line-0" {
+		t.Fatalf("60-line tail=%q", tail)
+	}
+	tail = strings.Split(boundedTail(strings.Join(append([]string{"discard"}, sixty...), "\n")), "\n")
+	if len(tail) != DetectionLines || tail[0] != "line-0" {
+		t.Fatalf("61-line tail=%q", tail)
+	}
+	twelve := append([]string{"queued follow-up inputs"}, make([]string, classifierLines-1)...)
+	if !strings.Contains(normalize(strings.Join(twelve, "\n")), "queued follow-up inputs") {
+		t.Fatal("12-line marker lost")
+	}
+	thirteen := append([]string{"queued follow-up inputs", "ordinary"}, make([]string, classifierLines-1)...)
+	if strings.Contains(normalize(strings.Join(thirteen, "\n")), "queued follow-up inputs") {
+		t.Fatal("old marker retained")
+	}
 }
 
 func observationResults(t *testing.T, a wireAgent, textA string, b wireAgent, textB string) []command.Result {

@@ -4,7 +4,10 @@
     "documentstore/",
     "diagnostics/",
     "runtime/actionhost/",
+    "runtime/agenthost/",
     "runtime/command/",
+    "runtime/internal/herdrcmd/",
+    "runtime/internal/herdrid/",
     "runtime/interop/",
     "runtime/sessionhost/",
     "ui/snapshot/"
