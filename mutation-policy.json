@@ -4,7 +4,8 @@
     "runtime/actionhost/",
     "runtime/command/",
     "runtime/interop/",
-    "runtime/sessionhost/"
+    "runtime/sessionhost/",
+    "ui/snapshot/"
   ],
   "critical": {
     "adjusted_efficacy": 100,
