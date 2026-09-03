@@ -117,6 +117,23 @@ read-only `plugin action list`, `plugin log list`, and `session list --json`
 output. Tests use injected runners and do not create, invoke, stop, or delete
 live Herdr resources.
 
+## HYP-AGENT-STATUS-01 — Agent status requires a coherent Codex-aware sample
+
+- Claim: agent enumeration and focus preserve exact current/named-session
+  identity, while status is reported only after two coherent observations 400
+  ms apart; Codex terminal semantics take precedence over Herdr's host status.
+- Fault model: pane-ID reuse, cross-session focus, stale host state, terminal
+  queue/question/composer misclassification, or raw terminal text escaping.
+- Setup or generator: strict Herdr 0.8.2 fixtures, current and named sessions,
+  two-sample identity/state transitions, and bounded 60-line terminal tails.
+- Independent oracle: exact identity tuples, explicit semantic status fixtures,
+  command call order, and exported-value inspection for terminal sentinels.
+- Falsified when: an incoherent sample is stable, the wrong pane/session is
+  focused, a semantic state is misclassified, bounds are exceeded, or raw text
+  reaches a public result or diagnostic.
+- Diagnostics: opaque identity, status/reason, sample outcome, and command
+  stage only; terminal contents and paths are never recorded.
+
 ## HYP-RESP-01 — Every terminal size resolves to one bounded layout
 
 - Claim: every reported size resolves deterministically to recovery, compact,
