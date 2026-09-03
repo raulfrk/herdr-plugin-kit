@@ -769,7 +769,7 @@ func TestReportLimitsAndEveryTruncationStage(t *testing.T) {
 		ConfigMetadata:   map[string]any{"config": strings.Repeat("c", 700)},
 		ManifestMetadata: map[string]any{"manifest": strings.Repeat("m", 700)},
 	}
-	seen := map[string]bool{}
+	exactStageSizes := map[string]int{}
 	for limit := 1024; limit <= config.MaxReportBytes; limit += 64 {
 		options.MaxBytes = limit
 		encoded, err := recorder.Export(options)
@@ -783,13 +783,33 @@ func TestReportLimitsAndEveryTruncationStage(t *testing.T) {
 		if err := json.Unmarshal(encoded, &report); err != nil {
 			t.Fatal(err)
 		}
-		for _, reason := range report.TruncationReasons {
-			seen[reason] = true
+		if len(report.TruncationReasons) > 0 {
+			stage := report.TruncationReasons[len(report.TruncationReasons)-1]
+			if exactStageSizes[stage] == 0 {
+				exactStageSizes[stage] = len(encoded)
+			}
 		}
 	}
 	for _, reason := range []string{"oldest_events_omitted", "embedded_snapshots_omitted", "metadata_omitted", "oversized_last_event_omitted"} {
-		if !seen[reason] {
-			t.Errorf("no bounded report demonstrated %q", reason)
+		stageSize, ok := exactStageSizes[reason]
+		if !ok {
+			t.Fatalf("no report completed at truncation stage %q", reason)
+		}
+		if stageSize < 1024 {
+			continue
+		}
+		exactOptions := options
+		exactOptions.MaxBytes = stageSize
+		encoded, err := recorder.Export(exactOptions)
+		if err != nil {
+			t.Fatalf("exact %s stage error = %v", reason, err)
+		}
+		var exactReport diagnostics.Report
+		if err := json.Unmarshal(encoded, &exactReport); err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) != stageSize || !contains(exactReport.TruncationReasons, reason) {
+			t.Fatalf("exact %s stage = size %d reasons %v", reason, len(encoded), exactReport.TruncationReasons)
 		}
 	}
 	full, err := recorder.Export(diagnostics.ReportOptions{EmbedSnapshots: true, ConfigMetadata: options.ConfigMetadata, ManifestMetadata: options.ManifestMetadata})
