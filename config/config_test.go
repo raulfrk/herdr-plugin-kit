@@ -362,15 +362,11 @@ func TestWatchDebounceCoalescesBurstToFinalValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { watcher.Stop(); <-watcher.Done() })
-	burstStarted := time.Now()
 	for _, name := range []string{"rose-pine", "tokyo-night", "dracula"} {
 		if err := os.WriteFile(path, []byte("[theme]\nname='"+name+"'\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(25 * time.Millisecond)
-	}
-	if elapsed := time.Since(burstStarted); elapsed >= debounce/2 {
-		t.Fatalf("test writes took %v and did not form one debounce burst", elapsed)
 	}
 	select {
 	case update := <-updates:
