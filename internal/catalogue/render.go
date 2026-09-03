@@ -208,6 +208,16 @@ func scenarioSample(s Scenario) sample {
 		base.status, base.rows, base.detail = "Recoverable error | retry available", []string{"! Recall index did not respond", "▌ Retry", "Open diagnostic event"}, []string{"! Could not refresh results", "The previous data is unchanged.", "Retry now"}
 	case "long-content":
 		base.query, base.status = "A deliberately long query with Unicode 東京 café 🧭", "Long values truncate at grapheme boundaries"
+		base.rows = longLines("Result", 220)
+		base.detail = longLines("Detail", 220)
 	}
 	return base
+}
+
+func longLines(label string, count int) []string {
+	lines := make([]string, count)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("%s %03d · %s", label, index+1, strings.Repeat("Unicode 東京 café 🧭 · ", 30))
+	}
+	return lines
 }

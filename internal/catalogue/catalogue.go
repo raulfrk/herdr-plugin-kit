@@ -91,7 +91,7 @@ func Matrix(selection Selection) ([]Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make([]Spec, 0, len(selectedThemes)*len(selectedViewports)*len(selectedScenarios))
+	var result []Spec
 	for _, themeID := range selectedThemes {
 		for _, viewport := range selectedViewports {
 			for _, scenario := range selectedScenarios {

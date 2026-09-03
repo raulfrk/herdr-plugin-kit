@@ -64,3 +64,132 @@ func TestLiveCatalogueEditingHUDAndHelp(t *testing.T) {
 		t.Fatal("help missing")
 	}
 }
+
+func TestLiveCatalogueNavigationAndExitSemantics(t *testing.T) {
+	live := NewLiveSurface()
+	update := func(event shell.Event) []shell.Effect {
+		t.Helper()
+		return live.Update(shell.EventContext{}, event)
+	}
+
+	update(shell.TextEvent{Text: "P"})
+	if live.plugin != len(pluginSurfaces)-1 || live.state != 0 || live.selected != 1 {
+		t.Fatalf("reverse surface = %+v", live)
+	}
+	update(shell.TextEvent{Text: "p"})
+	update(shell.TextEvent{Text: "S"})
+	if live.plugin != 0 || live.state != len(live.currentPlugin().States)-1 {
+		t.Fatalf("surface/state = %d/%d", live.plugin, live.state)
+	}
+	update(shell.TextEvent{Text: "s"})
+	update(shell.TextEvent{Text: "T"})
+	if live.state != 0 || live.theme != len(theme.IDs())-1 {
+		t.Fatalf("state/theme = %d/%d", live.state, live.theme)
+	}
+	update(shell.TextEvent{Text: "t"})
+
+	update(shell.KeyEvent{Code: shell.KeyTab})
+	update(shell.KeyEvent{Code: shell.KeyRight})
+	if live.active != stateAxis || live.state != 1 {
+		t.Fatalf("state field = %d/%d", live.active, live.state)
+	}
+	update(shell.KeyEvent{Code: shell.KeyTab})
+	update(shell.KeyEvent{Code: shell.KeyLeft})
+	if live.active != themeAxis || live.theme != len(theme.IDs())-1 {
+		t.Fatalf("theme field = %d/%d", live.active, live.theme)
+	}
+	update(shell.KeyEvent{Code: shell.KeyTab})
+	update(shell.KeyEvent{Code: shell.KeyLeft})
+	if live.active != pluginAxis || live.plugin != len(pluginSurfaces)-1 || live.state != 0 || live.selected != 1 {
+		t.Fatalf("plugin field reset = %+v", live)
+	}
+
+	update(shell.KeyEvent{Code: shell.KeyUp})
+	if live.selected != 0 {
+		t.Fatalf("selection up = %d", live.selected)
+	}
+	update(shell.KeyEvent{Code: shell.KeyUp})
+	if live.selected != 5 {
+		t.Fatalf("selection wrapped = %d", live.selected)
+	}
+	update(shell.KeyEvent{Code: shell.KeyDown})
+	if live.selected != 0 {
+		t.Fatalf("selection down = %d", live.selected)
+	}
+
+	update(shell.KeyEvent{Code: shell.KeyEnter})
+	if live.state != 1 {
+		t.Fatalf("enter state = %d", live.state)
+	}
+	update(shell.KeyEvent{Code: shell.KeyBackspace})
+	if live.state != 0 {
+		t.Fatalf("back state = %d", live.state)
+	}
+
+	update(shell.TextEvent{Text: "?"})
+	if effects := update(shell.KeyEvent{Code: shell.KeyEscape}); len(effects) != 0 || live.help {
+		t.Fatalf("help escape effects=%v help=%t", effects, live.help)
+	}
+	update(shell.TextEvent{Text: "/"})
+	update(shell.TextEvent{Text: "query"})
+	if effects := update(shell.KeyEvent{Code: shell.KeyEscape}); len(effects) != 0 || live.editing || live.query != "query" {
+		t.Fatalf("editing escape effects=%v editing=%t query=%q", effects, live.editing, live.query)
+	}
+	if effects := update(shell.KeyEvent{Code: shell.KeyEscape}); len(effects) != 1 {
+		t.Fatalf("root escape effects=%v", effects)
+	}
+	if effects := update(shell.TextEvent{Text: "q"}); len(effects) != 1 {
+		t.Fatalf("q effects=%v", effects)
+	}
+	if effects := update(shell.KeyEvent{Code: shell.KeyCtrlC}); len(effects) != 1 {
+		t.Fatalf("ctrl-c effects=%v", effects)
+	}
+}
+
+func TestLiveCatalogueResponsiveCopyAndDiagnosticState(t *testing.T) {
+	live := NewLiveSurface()
+	layout := responsive.Resolve(responsive.Size{Columns: 69, Rows: 18})
+	live.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: 9})
+	live.Update(shell.EventContext{}, shell.TextEvent{Text: "h"})
+	frame, err := live.Render(shell.RenderContext{Layout: layout, ResizeGeneration: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := view.ANSI(frame)
+	if !strings.Contains(plain, "HUD 69x18") || !strings.Contains(plain, "? help · Tab field · ←→ change") {
+		t.Fatalf("compact HUD/help missing: %q", plain)
+	}
+	state := live.DiagnosticState()
+	if state.Geometry.ReportedColumns != 69 || state.Geometry.ReportedRows != 18 || state.Geometry.RenderColumns != 69 || state.Geometry.RenderRows != 18 || state.ResizeGeneration != 9 || state.State.String() != "query.hud" {
+		t.Fatalf("diagnostic state = %+v", state)
+	}
+
+	live.Update(shell.EventContext{}, shell.TextEvent{Text: "h"})
+	wide := responsive.Resolve(responsive.Size{Columns: 70, Rows: 19})
+	frame, err = live.Render(shell.RenderContext{Layout: wide})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain = view.ANSI(frame)
+	if !strings.Contains(plain, "Bento Command / Structured") || !strings.Contains(plain, "←/→ change · / search · Esc quit") {
+		t.Fatalf("standard status/help missing: %q", plain)
+	}
+
+	for range 5 {
+		live.Update(shell.EventContext{}, shell.TextEvent{Text: "s"})
+	}
+	if got := live.DiagnosticState(); !got.HasError {
+		t.Fatalf("error diagnostic = %+v", got)
+	}
+	live.Update(shell.EventContext{}, shell.TextEvent{Text: "/"})
+	if got := live.DiagnosticState(); !got.Pending {
+		t.Fatalf("editing diagnostic = %+v", got)
+	}
+}
+
+func TestLongContentFixtureExercisesFullViewport(t *testing.T) {
+	data := scenarioSample(Scenario{ID: "long-content"})
+	if len(data.rows) != 220 || len(data.detail) != 220 || !strings.Contains(data.rows[219], "Result 220") || !strings.Contains(data.detail[219], "Detail 220") {
+		t.Fatalf("long fixture rows/detail = %d/%d", len(data.rows), len(data.detail))
+	}
+}

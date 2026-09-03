@@ -87,6 +87,9 @@ func TestFinalMatrixGolden(t *testing.T) {
 	if len(theme.IDs()) != want.ThemeCount || len(specs) != want.Entries {
 		t.Fatalf("themes/specs = %d/%d", len(theme.IDs()), len(specs))
 	}
+	if want.Sheets != len(theme.IDs())*len(viewports) {
+		t.Fatalf("contact sheets = %d, want %d", want.Sheets, len(theme.IDs())*len(viewports))
+	}
 	if specs[0].RelativePath() != "bento-command/catppuccin/minimum/picker-search-selected.png" || specs[len(specs)-1].RelativePath() != "bento-command/vesper/maximum/long-content.png" {
 		t.Fatalf("matrix endpoints = %q .. %q", specs[0].RelativePath(), specs[len(specs)-1].RelativePath())
 	}
@@ -230,6 +233,10 @@ func TestExportHonorsThemeViewportAndScenarioFilters(t *testing.T) {
 	if manifest.Entries[0].Path != "bento-command/nord/phone-keyboard/error.png" {
 		t.Fatal(manifest.Entries[0].Path)
 	}
+	entry := manifest.Entries[0]
+	if entry.ThemeID != "nord" || entry.ViewportID != "phone-keyboard" || entry.ScenarioID != "error" || entry.State != "error" || entry.CellWidth != 48 || entry.CellHeight != 18 || entry.PixelWidth != 48*view.PNGCellWidth || entry.PixelHeight != 18*view.PNGCellHeight {
+		t.Fatalf("manifest entry = %+v", entry)
+	}
 	if _, err := os.Stat(filepath.Join(output, manifest.Entries[0].Path)); err != nil {
 		t.Fatal(err)
 	}
@@ -239,5 +246,18 @@ func TestExportHonorsThemeViewportAndScenarioFilters(t *testing.T) {
 	if _, err := catalogue.Matrix(catalogue.Selection{ThemeIDs: []string{"unknown"}}); err == nil || !strings.Contains(err.Error(), "unknown theme") {
 		t.Fatalf("filter error = %v", err)
 	}
-	_ = view.PNGCellWidth
+}
+
+func TestRenderRejectsUnknownViewportAndScenario(t *testing.T) {
+	valid := catalogue.Spec{ThemeID: "catppuccin", Viewport: catalogue.Viewports()[0], Scenario: catalogue.Scenarios()[0]}
+	unknownViewport := valid
+	unknownViewport.Viewport.ID = "missing"
+	if _, err := catalogue.Render(unknownViewport); err == nil || !strings.Contains(err.Error(), "viewport") {
+		t.Fatalf("unknown viewport error = %v", err)
+	}
+	unknownScenario := valid
+	unknownScenario.Scenario.ID = "missing"
+	if _, err := catalogue.Render(unknownScenario); err == nil || !strings.Contains(err.Error(), "scenario") {
+		t.Fatalf("unknown scenario error = %v", err)
+	}
 }
