@@ -14,10 +14,11 @@ const (
 )
 
 type Viewport struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Width  int    `json:"width"`
-	Height int    `json:"height"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	KeyboardOpen bool   `json:"keyboard_open"`
 }
 
 type Scenario struct {
@@ -44,10 +45,10 @@ type Selection struct {
 }
 
 var viewports = []Viewport{
-	{ID: "minimum", Name: "Minimum", Width: 40, Height: 10},
-	{ID: "phone-keyboard", Name: "Phone + keyboard", Width: 48, Height: 18},
+	{ID: "minimum", Name: "Minimum", Width: 40, Height: 10, KeyboardOpen: true},
+	{ID: "phone-keyboard", Name: "Phone + keyboard", Width: 48, Height: 18, KeyboardOpen: true},
 	{ID: "phone", Name: "Phone", Width: 48, Height: 30},
-	{ID: "landscape-recovery", Name: "Landscape + keyboard", Width: 78, Height: 10},
+	{ID: "landscape-recovery", Name: "Landscape + keyboard", Width: 78, Height: 10, KeyboardOpen: true},
 	{ID: "landscape", Name: "Landscape", Width: 78, Height: 20},
 	{ID: "standard", Name: "Standard", Width: 80, Height: 18},
 	{ID: "wide", Name: "Wide", Width: 110, Height: 24},
