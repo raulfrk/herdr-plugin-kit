@@ -81,8 +81,9 @@ func TestClassifyTerminalFirstAndHostFallback(t *testing.T) {
 		{"question", "codex", "working", "Please choose one [y/n] · esc to cancel", Blocked, Question},
 		{"narrow background wait", "codex", "idle", "background termin… running", Working, TerminalWait},
 		{"stale done ready composer", "codex", "done", "Ask Codex", Idle, Composer},
-		{"stale blocked empty composer", "codex", "blocked", "", Idle, Composer},
-		{"idle without composer", "codex", "idle", "ordinary completed output", Unknown, HostReport},
+		{"stale blocked ready composer", "codex", "blocked", "› Ask Codex", Idle, Composer},
+		{"empty detection is not a composer", "codex", "idle", "", Unknown, Unrecognized},
+		{"idle without composer", "codex", "idle", "ordinary completed output", Unknown, Unrecognized},
 		{"done fallback", "codex", "done", "ordinary completed output", Done, HostReport},
 		{"mixed agent host report", "claude", "working", "Ask Codex", Working, HostReport},
 	}
@@ -105,7 +106,7 @@ func TestChangingTextSameClassificationAndStableStatusSeqSucceeds(t *testing.T) 
 	if err != nil || !got.Stable || got.Status != Working || got.Reason != TerminalWait {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
-	if len(runner.calls) != 6 || !reflect.DeepEqual(runner.calls[0][1:], []string{"agent", "list"}) || !reflect.DeepEqual(runner.calls[1][1:], []string{"agent", "read", "w:p", "--source", "detection", "--lines", "60", "--format", "text"}) {
+	if len(runner.calls) != 6 || !reflect.DeepEqual(runner.calls[0][1:], []string{"agent", "list"}) || !reflect.DeepEqual(runner.calls[1][1:], []string{"pane", "read", "w:p", "--source", "detection", "--lines", "60", "--format", "text"}) {
 		t.Fatalf("observation calls=%q", runner.calls)
 	}
 }
@@ -145,6 +146,21 @@ func TestPaneReplacementAndStaleTargetReject(t *testing.T) {
 		if !errors.Is(err, ErrStaleReport) {
 			t.Fatalf("error=%v", err)
 		}
+	}
+}
+
+func TestNamedSessionIdentityCannotCrossHosts(t *testing.T) {
+	a := mustPublic(t, validWireAgent("w:p"))
+	a.SessionName = "alpha"
+	runner := &scriptedRunner{}
+	if _, err := (Host{Runner: runner, Session: "beta"}).Focus(context.Background(), a); err == nil {
+		t.Fatal("cross-session focus target accepted")
+	}
+	if _, err := (Probe{Host: Host{Runner: runner, Session: "beta"}}).Assess(context.Background(), a); err == nil {
+		t.Fatal("cross-session assessment target accepted")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("cross-session target executed %d commands", len(runner.calls))
 	}
 }
 func TestCancellationDuringSettle(t *testing.T) {

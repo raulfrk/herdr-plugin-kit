@@ -27,6 +27,7 @@ var ErrStaleReport = errors.New("agent report changed during probe")
 
 type SessionRef struct{ Source, Agent, Kind, Value string }
 type Agent struct {
+	SessionName                                                string
 	Kind, Name, DisplayName, Title, Status, CWD, ForegroundCWD string
 	WorkspaceID, TabID, PaneID                                 string
 	Focused                                                    bool
@@ -51,6 +52,8 @@ const (
 	TerminalWait Reason = "codex_terminal_wait"
 	Composer     Reason = "codex_ready_composer"
 	HostReport   Reason = "host_report"
+	Unsettled    Reason = "unsettled"
+	Unrecognized Reason = "unrecognized"
 )
 
 type Assessment struct {
@@ -86,6 +89,7 @@ func (h Host) List(ctx context.Context) ([]Agent, error) {
 			return nil, fmt.Errorf("list agents: duplicate pane_id at agents[%d]", i)
 		}
 		seen[a.PaneID] = struct{}{}
+		a.SessionName = h.Session
 		agents[i] = a
 	}
 	return agents, nil
@@ -93,6 +97,9 @@ func (h Host) List(ctx context.Context) ([]Agent, error) {
 func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 	if err := validateTarget(target); err != nil {
 		return Agent{}, fmt.Errorf("focus agent: %w", err)
+	}
+	if target.SessionName != h.Session {
+		return Agent{}, errors.New("focus agent: Herdr session identity changed")
 	}
 	var response agentInfoResponse
 	if err := h.runJSON(ctx, []string{"agent", "focus", target.PaneID}, &response); err != nil {
@@ -105,6 +112,7 @@ func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 	if err != nil {
 		return Agent{}, fmt.Errorf("focus agent: %w", err)
 	}
+	a.SessionName = h.Session
 	if !a.Focused || !sameImmutable(target, a) {
 		return Agent{}, errors.New("focus agent: returned agent identity changed")
 	}
@@ -113,6 +121,9 @@ func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
 	if err := validateTarget(target); err != nil {
 		return Assessment{}, fmt.Errorf("assess agent: %w", err)
+	}
+	if target.SessionName != p.Host.Session {
+		return Assessment{}, errors.New("assess agent: Herdr session identity changed")
 	}
 	first, err := p.observe(ctx, target, true)
 	if err != nil {
@@ -128,7 +139,7 @@ func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
 	a := Assessment{Status: second.status, Reason: second.reason}
 	a.Stable = sameImmutable(first.agent, second.agent) && first.agent.Status == second.agent.Status && first.agent.StateChangeSeq == second.agent.StateChangeSeq && first.status == second.status && first.reason == second.reason
 	if !a.Stable {
-		return a, ErrStaleReport
+		return Assessment{Status: Unknown, Reason: Unsettled}, ErrStaleReport
 	}
 	return a, nil
 }
@@ -174,7 +185,7 @@ func (h Host) find(ctx context.Context, pane string) (Agent, error) {
 	return Agent{}, ErrStaleReport
 }
 func (h Host) readDetection(ctx context.Context, pane string) (string, error) {
-	args, err := h.args([]string{"agent", "read", pane, "--source", "detection", "--lines", "60", "--format", "text"})
+	args, err := h.args([]string{"pane", "read", pane, "--source", "detection", "--lines", "60", "--format", "text"})
 	if err != nil {
 		return "", err
 	}
@@ -238,7 +249,11 @@ func classify(a Agent, screen string) (Status, Reason) {
 	case isReadyComposer(tail):
 		return Idle, Composer
 	default:
-		return hostStatus(a.Status), HostReport
+		status := hostStatus(a.Status)
+		if status == Unknown {
+			return Unknown, Unrecognized
+		}
+		return status, HostReport
 	}
 }
 func boundedTail(s string) string {
@@ -264,7 +279,7 @@ func containsAny(s string, ms ...string) bool {
 	return false
 }
 func isReadyComposer(s string) bool {
-	return s == "" || containsAny(s, "ask codex", "tab to queue", "tab-to-queue") || strings.HasSuffix(s, "›") || strings.HasSuffix(s, ">")
+	return containsAny(s, "ask codex", "tab to queue", "tab-to-queue") || strings.HasSuffix(s, "›") || strings.HasSuffix(s, ">")
 }
 func hostStatus(s string) Status {
 	switch s {
@@ -279,7 +294,7 @@ func hostStatus(s string) Status {
 	}
 }
 func sameImmutable(a, b Agent) bool {
-	return a.Kind == b.Kind && a.WorkspaceID == b.WorkspaceID && a.TabID == b.TabID && a.PaneID == b.PaneID && sameSession(a.Session, b.Session)
+	return a.SessionName == b.SessionName && a.Kind == b.Kind && a.WorkspaceID == b.WorkspaceID && a.TabID == b.TabID && a.PaneID == b.PaneID && sameSession(a.Session, b.Session)
 }
 func sameSession(a, b *SessionRef) bool {
 	if a == nil || b == nil {
@@ -293,6 +308,11 @@ func validateTarget(a Agent) error {
 	}
 	if a.Kind == "" || a.WorkspaceID == "" || a.TabID == "" || !validHostStatus(a.Status) {
 		return errors.New("agent target identity/status is invalid")
+	}
+	if a.SessionName != "" {
+		if err := herdrid.ValidateSessionName(a.SessionName); err != nil {
+			return err
+		}
 	}
 	if a.Session != nil {
 		return validateSession(*a.Session)
@@ -342,25 +362,28 @@ type wireSession struct {
 	Value  string `json:"value"`
 }
 type wireAgent struct {
-	Agent                 string            `json:"agent"`
-	AgentSession          *wireSession      `json:"agent_session,omitempty"`
-	AgentStatus           string            `json:"agent_status"`
-	CWD                   string            `json:"cwd,omitempty"`
-	DisplayAgent          string            `json:"display_agent,omitempty"`
-	Focused               bool              `json:"focused"`
-	ForegroundCWD         string            `json:"foreground_cwd,omitempty"`
-	InteractiveReady      bool              `json:"interactive_ready,omitempty"`
-	Name                  string            `json:"name,omitempty"`
-	PaneID                string            `json:"pane_id"`
-	Revision              uint64            `json:"revision"`
-	StateChangeSeq        uint64            `json:"state_change_seq"`
-	TabID                 string            `json:"tab_id"`
-	TerminalID            string            `json:"terminal_id,omitempty"`
-	TerminalTitle         string            `json:"terminal_title,omitempty"`
-	TerminalTitleStripped string            `json:"terminal_title_stripped,omitempty"`
-	Title                 string            `json:"title,omitempty"`
-	Tokens                map[string]string `json:"tokens,omitempty"`
-	WorkspaceID           string            `json:"workspace_id"`
+	Agent                  string            `json:"agent"`
+	AgentSession           *wireSession      `json:"agent_session,omitempty"`
+	AgentStatus            string            `json:"agent_status"`
+	CWD                    string            `json:"cwd,omitempty"`
+	DisplayAgent           string            `json:"display_agent,omitempty"`
+	Focused                bool              `json:"focused"`
+	ForegroundCWD          string            `json:"foreground_cwd,omitempty"`
+	InteractiveReady       bool              `json:"interactive_ready,omitempty"`
+	LaunchPending          bool              `json:"launch_pending,omitempty"`
+	Name                   string            `json:"name,omitempty"`
+	PaneID                 string            `json:"pane_id"`
+	Revision               uint64            `json:"revision"`
+	ScreenDetectionSkipped bool              `json:"screen_detection_skipped,omitempty"`
+	StateChangeSeq         uint64            `json:"state_change_seq"`
+	StateLabels            map[string]string `json:"state_labels,omitempty"`
+	TabID                  string            `json:"tab_id"`
+	TerminalID             string            `json:"terminal_id,omitempty"`
+	TerminalTitle          string            `json:"terminal_title,omitempty"`
+	TerminalTitleStripped  string            `json:"terminal_title_stripped,omitempty"`
+	Title                  string            `json:"title,omitempty"`
+	Tokens                 map[string]string `json:"tokens,omitempty"`
+	WorkspaceID            string            `json:"workspace_id"`
 }
 
 func (a wireAgent) public() (Agent, error) {
