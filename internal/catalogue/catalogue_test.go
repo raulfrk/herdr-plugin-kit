@@ -218,9 +218,33 @@ func TestHYPCAT002RepresentativeContactSheetsPreserveReviewArtifact(t *testing.T
 		viewportID string
 	}{
 		{designID: "dense-palette", themeID: "catppuccin", viewportID: "wide"},
-		{designID: "split-inspector", themeID: "nord", viewportID: "desktop"},
-		{designID: "calm-cards", themeID: "dracula", viewportID: "phone"},
+		{designID: "dense-palette", themeID: "gruvbox", viewportID: "desktop"},
+		{designID: "dense-palette", themeID: "tokyo-night", viewportID: "phone"},
 		{designID: "dense-palette", themeID: "vesper", viewportID: "phone-keyboard"},
+		{designID: "split-inspector", themeID: "rose-pine", viewportID: "wide"},
+		{designID: "split-inspector", themeID: "nord", viewportID: "desktop"},
+		{designID: "split-inspector", themeID: "solarized", viewportID: "phone"},
+		{designID: "split-inspector", themeID: "one-dark", viewportID: "phone-keyboard"},
+		{designID: "calm-cards", themeID: "catppuccin-latte", viewportID: "wide"},
+		{designID: "calm-cards", themeID: "kanagawa", viewportID: "desktop"},
+		{designID: "calm-cards", themeID: "dracula", viewportID: "phone"},
+		{designID: "calm-cards", themeID: "terminal", viewportID: "phone-keyboard"},
+	}
+	pairs := make(map[string]bool, len(cases))
+	for _, tc := range cases {
+		pair := tc.designID + "/" + tc.viewportID
+		if pairs[pair] {
+			t.Fatalf("duplicate contact-sheet pair %q", pair)
+		}
+		pairs[pair] = true
+	}
+	for _, design := range catalogue.Designs() {
+		for _, viewport := range catalogue.Viewports() {
+			pair := design.ID + "/" + viewport.ID
+			if !pairs[pair] {
+				t.Fatalf("missing contact-sheet pair %q", pair)
+			}
+		}
 	}
 	for _, tc := range cases {
 		path := strings.Join([]string{"contact-sheets", tc.designID, tc.themeID, tc.viewportID + ".png"}, "/")

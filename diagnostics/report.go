@@ -120,7 +120,7 @@ func fitReport(report *Report, limit int) ([]byte, error) {
 			return data, nil
 		}
 	}
-	if len(data) > limit && len(report.Events) != 0 {
+	if len(report.Events) != 0 {
 		addReason(report, "oversized_last_event_omitted")
 		report.Events = nil
 		data, _ = encode()

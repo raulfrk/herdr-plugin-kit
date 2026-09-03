@@ -577,7 +577,7 @@ func TestHealthReportsExactUsageAndIndependentPressureSignals(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := testConfig(filepath.Join(t.TempDir(), "private"))
 			config.MaxEvents = test.maxEvents
-			config.MaxBytes = 1024
+			config.MaxBytes = 1025
 			config.Now = func() time.Time { return now }
 			recorder := openRecorder(t, config)
 			envelope := diagnostics.Event{Version: diagnostics.EventSchemaVersion, Sequence: 1, Time: now, Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic}
@@ -593,7 +593,7 @@ func TestHealthReportsExactUsageAndIndependentPressureSignals(t *testing.T) {
 				t.Fatal(err)
 			}
 			health := recorder.Health()
-			if health.Events != 1 || health.Bytes != int64(test.bytes) || health.UsageRatio != float64(test.bytes)/1024 || health.Pressure != test.pressure || health.Dropped != 0 {
+			if health.Events != 1 || health.Bytes != int64(test.bytes) || health.UsageRatio != float64(test.bytes)/1025 || health.Pressure != test.pressure || health.Dropped != 0 {
 				t.Fatalf("health = %#v", health)
 			}
 		})
@@ -948,7 +948,7 @@ func TestCyclicDetailsAndMetadataFailBeforeRecursiveRedaction(t *testing.T) {
 
 func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 	recorder := openRecorder(t, testConfig(filepath.Join(t.TempDir(), "private")))
-	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+	for _, value := range []any{math.NaN(), math.Inf(1), math.Inf(-1), float32(math.Inf(1)), float32(math.NaN())} {
 		if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "number", Details: map[string]any{"value": value}}); err == nil || !strings.Contains(err.Error(), "non-finite") {
 			t.Errorf("non-finite value %v error = %v", value, err)
 		}
@@ -966,6 +966,19 @@ func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "depth-17", Details: nested(17)}); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("depth 17 error = %v", err)
 	}
+	nestedSlices := func(depth int) map[string]any {
+		var value any = "leaf"
+		for range depth {
+			value = []any{value}
+		}
+		return map[string]any{"items": value}
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-16", Details: nestedSlices(15)}); err != nil {
+		t.Fatalf("slice depth 16 rejected: %v", err)
+	}
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "slice-depth-17", Details: nestedSlices(16)}); err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("slice depth 17 error = %v", err)
+	}
 	items := make([]any, 4094)
 	for index := range items {
 		items[index] = index
@@ -982,6 +995,12 @@ func TestJSONDetailComplexityBoundariesAndNumbers(t *testing.T) {
 	cycle[longKey] = cycle
 	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "bounded path", Details: cycle}); err == nil || !strings.Contains(err.Error(), strings.Repeat("k", 64)+"...") || strings.Contains(err.Error(), longKey) {
 		t.Fatalf("bounded validation path error = %v", err)
+	}
+	exactKey := strings.Repeat("e", 64)
+	exactCycle := map[string]any{}
+	exactCycle[exactKey] = exactCycle
+	if _, err := recorder.Record(diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Message: "exact path", Details: exactCycle}); err == nil || !strings.Contains(err.Error(), exactKey) || strings.Contains(err.Error(), exactKey+"...") {
+		t.Fatalf("exact validation path error = %v", err)
 	}
 }
 

@@ -94,26 +94,31 @@ func DefaultConfig(directory string) Config {
 }
 
 func (config Config) Validate() error {
-	switch {
-	case config.Directory == "":
+	if config.Directory == "" {
 		return errors.New("diagnostics directory is empty")
-	case config.MaxEvents <= 0:
-		return errors.New("max events must be positive")
-	case config.MaxBytes < 1024:
-		return errors.New("max bytes must be at least 1024")
-	case config.MaxBytes > 1<<30:
-		return errors.New("max bytes must not exceed 1 GiB")
-	case config.MaxAge <= 0:
-		return errors.New("max age must be positive")
-	case config.MaxDetailBytes <= 0:
-		return errors.New("max detail bytes must be positive")
-	case config.MaxSnapshotBytes <= 0:
-		return errors.New("max snapshot bytes must be positive")
-	case config.MaxReportBytes < 1024:
-		return errors.New("max report bytes must be at least 1024")
-	default:
-		return nil
 	}
+	if config.MaxEvents <= 0 {
+		return errors.New("max events must be positive")
+	}
+	if config.MaxBytes < 1024 {
+		return errors.New("max bytes must be at least 1024")
+	}
+	if config.MaxBytes > 1<<30 {
+		return errors.New("max bytes must not exceed 1 GiB")
+	}
+	if config.MaxAge <= 0 {
+		return errors.New("max age must be positive")
+	}
+	if config.MaxDetailBytes <= 0 {
+		return errors.New("max detail bytes must be positive")
+	}
+	if config.MaxSnapshotBytes <= 0 {
+		return errors.New("max snapshot bytes must be positive")
+	}
+	if config.MaxReportBytes < 1024 {
+		return errors.New("max report bytes must be at least 1024")
+	}
+	return nil
 }
 
 func validateEvent(event Event) error {

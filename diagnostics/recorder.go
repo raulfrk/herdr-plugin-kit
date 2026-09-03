@@ -386,19 +386,15 @@ func (r *Recorder) rewrite() error {
 	}
 	remove = false
 	r.file, err = os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
+	return errors.Join(err, syncDirectory(r.config.Directory))
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	directory, err := os.Open(r.config.Directory)
-	if err != nil {
-		return err
-	}
-	err = directory.Sync()
-	closeErr := directory.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
+	return errors.Join(directory.Sync(), directory.Close())
 }
 
 func (r *Recorder) Cleanup() error {
