@@ -217,15 +217,12 @@ func renderCatalogueHelp(size responsive.Size, themeID string) (*view.Frame, err
 	}
 	frame.Fill(0, 0, size.Columns, size.Rows, view.Style{Background: palette.Background})
 	for row, line := range []string{"CATALOGUE HELP", "p/P surface · s/S state", "t/T theme · Tab field · ←→ change", "↑↓ select · / search · Backspace delete/back", "Enter next / commit search · h HUD", "? / Esc close help · q / Ctrl-C quit"} {
-		if row >= size.Rows {
-			break
-		}
 		style := view.Style{Foreground: palette.Text, Background: palette.Background}
 		if row == 0 {
 			style.Foreground, style.Background, style.Bold = palette.Accent, palette.PanelBackground, true
 			frame.Fill(0, row, size.Columns, 1, style)
 		}
-		frame.PutText(1, row, fit(line, max(0, size.Columns-2)), style)
+		frame.PutText(1, row, fit(line, size.Columns-2), style)
 	}
 	return frame, nil
 }

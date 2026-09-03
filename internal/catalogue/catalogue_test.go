@@ -31,6 +31,12 @@ type golden struct {
 	Entries           int               `json:"entry_count"`
 	Sheets            int               `json:"contact_sheet_count"`
 	MatrixFrameHashes map[string]string `json:"matrix_frame_hashes"`
+	ContactSheet      struct {
+		Path        string `json:"path"`
+		SHA256      string `json:"sha256"`
+		PixelWidth  int    `json:"pixel_width"`
+		PixelHeight int    `json:"pixel_height"`
+	} `json:"representative_contact_sheet"`
 }
 
 func loadGolden(t *testing.T) (string, golden) {
@@ -45,6 +51,17 @@ func loadGolden(t *testing.T) (string, golden) {
 		t.Fatal(err)
 	}
 	return path, want
+}
+
+func writeGolden(t *testing.T, path string, value golden) {
+	t.Helper()
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestFinalMatrixGolden(t *testing.T) {
@@ -100,13 +117,7 @@ func TestFinalMatrixFramesMatchReviewedVisualContract(t *testing.T) {
 	got := matrixFrameHashes(t)
 	if os.Getenv("HERDR_UPDATE_CATALOGUE_GOLDEN") == "1" {
 		want.MatrixFrameHashes = got
-		encoded, err := json.MarshalIndent(want, "", "  ")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeGolden(t, path, want)
 		return
 	}
 	if !reflect.DeepEqual(got, want.MatrixFrameHashes) {
@@ -222,19 +233,22 @@ func TestFinalCommandRendersEveryThemeViewportAndScenario(t *testing.T) {
 }
 
 func TestExportHonorsThemeViewportAndScenarioFilters(t *testing.T) {
+	fixturePath, fixture := loadGolden(t)
 	output := filepath.Join(t.TempDir(), "catalogue")
-	manifest, err := catalogue.Export(context.Background(), output, catalogue.Selection{ThemeIDs: []string{"nord"}, ViewportIDs: []string{"phone-keyboard"}, ScenarioIDs: []string{"error"}})
+	manifest, err := catalogue.Export(context.Background(), output, catalogue.Selection{ThemeIDs: []string{"nord"}, ViewportIDs: []string{"phone-keyboard"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Entries) != 1 || len(manifest.ContactSheets) != 1 {
+	if len(manifest.Entries) != len(catalogue.Scenarios()) || len(manifest.ContactSheets) != 1 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
-	if manifest.Entries[0].Path != "bento-command/nord/phone-keyboard/error.png" {
-		t.Fatal(manifest.Entries[0].Path)
+	var entry catalogue.ManifestEntry
+	for _, candidate := range manifest.Entries {
+		if candidate.ScenarioID == "error" {
+			entry = candidate
+		}
 	}
-	entry := manifest.Entries[0]
-	if entry.ThemeID != "nord" || entry.ViewportID != "phone-keyboard" || entry.ScenarioID != "error" || entry.State != "error" || entry.CellWidth != 48 || entry.CellHeight != 18 || entry.PixelWidth != 48*view.PNGCellWidth || entry.PixelHeight != 18*view.PNGCellHeight {
+	if entry.Path != "bento-command/nord/phone-keyboard/error.png" || entry.ThemeID != "nord" || entry.ViewportID != "phone-keyboard" || entry.ScenarioID != "error" || entry.State != "error" || entry.CellWidth != 48 || entry.CellHeight != 18 || entry.PixelWidth != 48*view.PNGCellWidth || entry.PixelHeight != 18*view.PNGCellHeight {
 		t.Fatalf("manifest entry = %+v", entry)
 	}
 	if _, err := os.Stat(filepath.Join(output, manifest.Entries[0].Path)); err != nil {
@@ -242,6 +256,25 @@ func TestExportHonorsThemeViewportAndScenarioFilters(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(output, manifest.ContactSheets[0].Path)); err != nil {
 		t.Fatal(err)
+	}
+	sheet := manifest.ContactSheets[0]
+	sheetBytes, err := os.ReadFile(filepath.Join(output, sheet.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(sheetBytes)
+	actualHash := hex.EncodeToString(sum[:])
+	if sheet.SHA256 != actualHash || !reflect.DeepEqual(sheet.Scenarios, fixture.Scenarios) {
+		t.Fatalf("contact sheet = %+v hash=%s", sheet, actualHash)
+	}
+	if os.Getenv("HERDR_UPDATE_CATALOGUE_GOLDEN") == "1" {
+		fixture.ContactSheet.Path = sheet.Path
+		fixture.ContactSheet.SHA256 = actualHash
+		fixture.ContactSheet.PixelWidth = sheet.PixelWidth
+		fixture.ContactSheet.PixelHeight = sheet.PixelHeight
+		writeGolden(t, fixturePath, fixture)
+	} else if sheet.Path != fixture.ContactSheet.Path || actualHash != fixture.ContactSheet.SHA256 || sheet.PixelWidth != fixture.ContactSheet.PixelWidth || sheet.PixelHeight != fixture.ContactSheet.PixelHeight {
+		t.Fatalf("contact sheet = %+v hash=%s, want %+v", sheet, actualHash, fixture.ContactSheet)
 	}
 	if _, err := catalogue.Matrix(catalogue.Selection{ThemeIDs: []string{"unknown"}}); err == nil || !strings.Contains(err.Error(), "unknown theme") {
 		t.Fatalf("filter error = %v", err)
@@ -259,5 +292,20 @@ func TestRenderRejectsUnknownViewportAndScenario(t *testing.T) {
 	unknownScenario.Scenario.ID = "missing"
 	if _, err := catalogue.Render(unknownScenario); err == nil || !strings.Contains(err.Error(), "scenario") {
 		t.Fatalf("unknown scenario error = %v", err)
+	}
+	for _, mutate := range []func(*catalogue.Spec){
+		func(spec *catalogue.Spec) { spec.Viewport.Width = 0 },
+		func(spec *catalogue.Spec) { spec.Viewport.Height = 0 },
+	} {
+		invalid := valid
+		mutate(&invalid)
+		if _, err := catalogue.Render(invalid); err == nil || !strings.Contains(err.Error(), "viewport") {
+			t.Fatalf("invalid geometry error = %v", err)
+		}
+	}
+	for _, unsafe := range []string{"", ".", "..", "nested/id"} {
+		if _, err := catalogue.Matrix(catalogue.Selection{ThemeIDs: []string{unsafe}}); err == nil || !strings.Contains(err.Error(), "unsafe theme ID") {
+			t.Fatalf("unsafe theme %q error = %v", unsafe, err)
+		}
 	}
 }

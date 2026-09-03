@@ -161,5 +161,11 @@
     "vesper/phone-keyboard": "f712e4b9cb2aab53add5a783ac8f94ac3e47cb4a514cd1a99eebcfe9dc9d35c9",
     "vesper/standard": "a14215dec9d1fb574208ff1b506825dfd5d61089da3a256ab3dc4cb49d88a94f",
     "vesper/wide": "b4438cc0d45aec47ac237f7f1615856a03e6ced22db97499e9f57dbff6f951ba"
+  },
+  "representative_contact_sheet": {
+    "path": "contact-sheets/nord/phone-keyboard.png",
+    "sha256": "2127dbd3f6653cde0a8a13fcc6dd834e72d0575d86ccc818b307730e0df7946d",
+    "pixel_width": 200,
+    "pixel_height": 392
   }
 }

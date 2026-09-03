@@ -159,6 +159,16 @@ func TestLiveCatalogueResponsiveCopyAndDiagnosticState(t *testing.T) {
 	if !strings.Contains(plain, "HUD 69x18") || !strings.Contains(plain, "? help · Tab field · ←→ change") {
 		t.Fatalf("compact HUD/help missing: %q", plain)
 	}
+	plainStatus := NewLiveSurface()
+	if got := plainStatus.status(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 110, Rows: 18})}, "Results", "catppuccin"); got != "Results · catppuccin" {
+		t.Fatalf("18-row status = %q", got)
+	}
+	if got := plainStatus.status(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 110, Rows: 19})}, "Results", "catppuccin"); got != "Results · catppuccin · Bento Command / Structured" {
+		t.Fatalf("19-row status = %q", got)
+	}
+	if navigationHelp(69) != "? help · Tab field · ←→ change" || navigationHelp(70) != "? help · Tab field · ←/→ change · / search · Esc quit" {
+		t.Fatal("navigation copy boundary changed")
+	}
 	state := live.DiagnosticState()
 	if state.Geometry.ReportedColumns != 69 || state.Geometry.ReportedRows != 18 || state.Geometry.RenderColumns != 69 || state.Geometry.RenderRows != 18 || state.ResizeGeneration != 9 || state.State.String() != "query.hud" {
 		t.Fatalf("diagnostic state = %+v", state)
@@ -184,6 +194,42 @@ func TestLiveCatalogueResponsiveCopyAndDiagnosticState(t *testing.T) {
 	live.Update(shell.EventContext{}, shell.TextEvent{Text: "/"})
 	if got := live.DiagnosticState(); !got.Pending {
 		t.Fatalf("editing diagnostic = %+v", got)
+	}
+	frame, err = live.Render(shell.RenderContext{Layout: wide})
+	if err != nil || !strings.Contains(view.ANSI(frame), "▏") {
+		t.Fatalf("editing cursor missing: %v", err)
+	}
+	configError := NewLiveSurface()
+	configError.plugin, configError.state = 3, 1
+	if got := configError.DiagnosticState(); !got.HasError || got.State.String() != "validation-error.plain" {
+		t.Fatalf("validation diagnostic = %+v", got)
+	}
+}
+
+func TestLiveCatalogueExactLayoutTransitions(t *testing.T) {
+	palette, _ := theme.Builtin("catppuccin")
+	data := sample{title: strings.Repeat("T", 200), query: strings.Repeat("Q", 200), status: strings.Repeat("S", 200), help: strings.Repeat("H", 200), rows: longLines("Row", 220), detail: longLines("Detail", 220), selected: 0}
+	for _, size := range []responsive.Size{{Columns: 80, Rows: 19}, {Columns: 100, Rows: 24}} {
+		frame, err := renderSample(Spec{ThemeID: "catppuccin", Viewport: Viewport{ID: "live", Width: size.Columns, Height: size.Rows}}, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.Width() != size.Columns || frame.Height() != size.Rows {
+			t.Fatalf("%+v frame = %dx%d", size, frame.Width(), frame.Height())
+		}
+		if size.Columns == 80 {
+			cell, _ := frame.CellAt(53, 8)
+			if cell.Style.Background != palette.Surface {
+				t.Fatalf("80-column detail boundary = %+v", cell)
+			}
+		}
+		if size.Columns == 100 {
+			left, _ := frame.CellAt(2, 1)
+			start, _ := frame.CellAt(4, 1)
+			if left.Text != "" || start.Text != "T" {
+				t.Fatalf("100-column margin = left %+v start %+v", left, start)
+			}
+		}
 	}
 }
 
