@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"image/png"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +34,7 @@ type matrixFixture struct {
 	ThemeCount         int               `json:"theme_count"`
 	EntryCount         int               `json:"entry_count"`
 	ContactSheetCount  int               `json:"contact_sheet_count"`
+	MatrixFrameHashes  map[string]string `json:"matrix_frame_hashes"`
 	RenderHashes       map[string]string `json:"render_hashes"`
 	ContactSheetHashes map[string]string `json:"contact_sheet_hashes"`
 }
@@ -210,6 +214,90 @@ func TestHYPCAT002RepresentativeFramesPreserveContentAndVisualDesign(t *testing.
 	}
 }
 
+func TestHYPCAT002MatrixFrameFingerprints(t *testing.T) {
+	fixture := loadFixture(t)
+	specs, err := catalogue.Matrix(catalogue.Selection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendInteger := func(data []byte, value int) []byte {
+		return binary.BigEndian.AppendUint64(data, uint64(value))
+	}
+	appendString := func(data []byte, value string) []byte {
+		data = appendInteger(data, len(value))
+		return append(data, value...)
+	}
+	appendBool := func(data []byte, value bool) []byte {
+		if value {
+			return append(data, 1)
+		}
+		return append(data, 0)
+	}
+	digests := make(map[string]hash.Hash)
+	keys := make([]string, 0, fixture.ContactSheetCount)
+	for _, spec := range specs {
+		key := strings.Join([]string{spec.Design.ID, spec.ThemeID, spec.Viewport.ID}, "/")
+		digest := digests[key]
+		if digest == nil {
+			digest = sha256.New()
+			digest.Write([]byte("herdr-catalogue-frame-contact-sheet-v1\x00"))
+			digests[key] = digest
+			keys = append(keys, key)
+		}
+		frame, err := catalogue.Render(spec)
+		if err != nil {
+			t.Fatalf("%s: %v", spec.RelativePath(), err)
+		}
+		encoded := make([]byte, 0, frame.Width()*frame.Height()*32)
+		encoded = appendString(encoded, spec.RelativePath())
+		encoded = appendInteger(encoded, frame.Width())
+		encoded = appendInteger(encoded, frame.Height())
+		for y := 0; y < frame.Height(); y++ {
+			for x := 0; x < frame.Width(); x++ {
+				cell, ok := frame.CellAt(x, y)
+				if !ok {
+					t.Fatalf("%s missing cell at %d,%d", spec.RelativePath(), x, y)
+				}
+				encoded = appendString(encoded, cell.Text)
+				encoded = appendString(encoded, string(cell.Style.Foreground))
+				encoded = appendString(encoded, string(cell.Style.Background))
+				encoded = appendInteger(encoded, cell.Width)
+				encoded = appendBool(encoded, cell.Continuation)
+				encoded = appendBool(encoded, cell.Style.Bold)
+				encoded = appendBool(encoded, cell.Style.Dim)
+				encoded = appendBool(encoded, cell.Style.Underline)
+			}
+		}
+		digest.Write(encoded)
+	}
+	for _, key := range keys {
+		if _, ok := fixture.MatrixFrameHashes[key]; !ok {
+			t.Errorf("matrix frame hashes missing key %q (got %s)", key, hex.EncodeToString(digests[key].Sum(nil)))
+		}
+	}
+	extra := make([]string, 0)
+	for key := range fixture.MatrixFrameHashes {
+		if _, ok := digests[key]; !ok {
+			extra = append(extra, key)
+		}
+	}
+	sort.Strings(extra)
+	for _, key := range extra {
+		t.Errorf("matrix frame hashes contain extra key %q", key)
+	}
+	if t.Failed() {
+		return
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			gotHash := hex.EncodeToString(digests[key].Sum(nil))
+			if gotHash != fixture.MatrixFrameHashes[key] {
+				t.Fatalf("frame hash = %s, want %s", gotHash, fixture.MatrixFrameHashes[key])
+			}
+		})
+	}
+}
+
 func TestHYPCAT002RepresentativeContactSheetsPreserveReviewArtifact(t *testing.T) {
 	fixture := loadFixture(t)
 	cases := []struct {
@@ -308,6 +396,11 @@ func TestHYPCAT003ExportIsDeterministicInspectableAndRefusesUnsafeTargets(t *tes
 	for i, entry := range first.Entries {
 		if entry.Path != wantSpecs[i].RelativePath() {
 			t.Fatalf("entry %d path = %q, want matrix path %q", i, entry.Path, wantSpecs[i].RelativePath())
+		}
+		wantPixelWidth := entry.CellWidth * view.PNGCellWidth
+		wantPixelHeight := entry.CellHeight * view.PNGCellHeight
+		if entry.PixelWidth != wantPixelWidth || entry.PixelHeight != wantPixelHeight {
+			t.Fatalf("%s manifest pixels = %dx%d, want %dx%d", entry.Path, entry.PixelWidth, entry.PixelHeight, wantPixelWidth, wantPixelHeight)
 		}
 		data, err := os.ReadFile(filepath.Join(firstDir, filepath.FromSlash(entry.Path)))
 		if err != nil {
