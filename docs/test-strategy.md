@@ -31,9 +31,10 @@ invert-logical enabled. Assignment, bitwise, loop-control, and self-assignment
 mutators remain disabled initially. Only generated files and vendor content may
 be excluded; handwritten code may not be excluded.
 
-Critical code comprises manifests, subprocess lifecycle, action and session
-hosts, interoperability, diagnostics/redaction/reservations, document storage,
-scaffold atomicity and generated-project validation. Critical code requires
+Critical code comprises manifests, subprocess lifecycle, action, session, and
+agent hosts (including the Codex-aware status assessment), interoperability,
+diagnostics/redaction/reservations, document storage, scaffold atomicity and
+generated-project validation. Critical code requires
 100% adjusted efficacy and 100% mutant coverage,
 with no actionable LIVED, TIMED OUT, or NOT COVERED mutants. Other handwritten
 code requires at least 85% adjusted efficacy and 90% mutant coverage, with no
@@ -472,37 +473,36 @@ panel_bg = "reset"
 - Diagnostics: only already-redacted output, sensitive key pattern index, and
   Rapid seed/minimized value shape (never the generated secret itself).
 
-## HYP-CAT-01 — The review catalogue covers every committed design dimension
+## HYP-CAT-01 — The final review catalogue covers every committed dimension
 
-- Claim: the catalogue matrix is the deterministic Cartesian product of three
-  structurally distinct design families, every built-in Herdr theme, the wide,
-  desktop, phone, and phone-with-keyboard viewports, and every committed UI
-  scenario. Each planned plugin surface and each required state appears in at
-  least one scenario.
+- Claim: the catalogue matrix is the deterministic Cartesian product of the
+  selected Bento Command design, every built-in Herdr theme, eight supported
+  boundary/device viewports, and every committed UI scenario. Each planned
+  plugin surface and each required state appears in at least one scenario.
 - Fault model: a new theme or scenario silently omitted from review, unstable
-  ordering, duplicate layout families, or a future consumer represented only by
-  a happy-path screen.
+  ordering, a keyboard-open fixture losing its provenance, or a future consumer
+  represented only by a happy-path screen.
 - Setup or generator: the checked-in matrix fixture plus the live built-in theme
-  catalogue and published design, viewport, scenario, state, and surface IDs.
-- Independent oracle: explicit required surface/state sets, distinct layout
-  signatures, fixed matrix endpoints, and the arithmetic product of dimensions.
+  catalogue and published viewport, scenario, state, and surface IDs.
+- Independent oracle: explicit required surface/state sets, keyboard-open flags,
+  fixed matrix endpoints, and the arithmetic product of dimensions.
 - Falsified when: a required dimension is absent, order changes unexpectedly,
-  layout signatures collide, or the product differs from the exported entries.
+  viewport provenance changes, or the product differs from the exported entries.
 - Diagnostics: the missing or unexpected ID, matrix endpoints, and dimension
   counts; no generated image bytes are needed to diagnose matrix membership.
 
 ## HYP-CAT-02 — Responsive studies remain bounded and reproducible
 
-- Claim: every family and scenario renders at the exact requested cell dimensions
-  for wide through phone-with-keyboard layouts and retains styled frame edges;
-  representative desktop and constrained-phone studies preserve meaningful state
-  text and match reviewed, byte-stable PNGs at the expected pixel dimensions.
+- Claim: every scenario renders at the exact requested cell dimensions from
+  `40x10` through `500x200` and retains styled frame edges; every theme,
+  viewport, and scenario preserves the reviewed cell text, style, Unicode width,
+  continuation, and dimensions in a stable semantic fingerprint.
 - Fault model: desktop-only coordinates, content drawn outside a short viewport,
   nondeterministic rendering, or a theme ignored by the renderer.
-- Setup or generator: all family/viewport/scenario combinations under one theme,
-  followed by a representative screen under every built-in theme.
-- Independent oracle: frame dimensions and corner cells, PNG decoder bounds,
-  repeated-byte equality, and palette equality at a known background cell.
+- Setup or generator: all viewport/scenario combinations under one theme,
+  followed by every built-in theme and the checked-in 96-group fingerprint.
+- Independent oracle: frame dimensions and corner cells plus a canonical
+  serialization of each cell's content, style, width, and continuation state.
 - Falsified when: rendering fails, dimensions drift, an edge is lost, repeated
   PNG bytes differ, or a supported theme does not contribute its own palette.
 - Diagnostics: the design/theme/viewport/scenario path and observed frame or PNG
@@ -527,21 +527,21 @@ panel_bg = "reset"
 ## HYP-CAT-04 — Live review reflects the delivered terminal
 
 - Claim: the interactive catalogue runs through the production shell, renders
-  each design, component treatment, plugin surface, flow state, built-in theme,
-  and named viewport fixture, and remains operable with six task rows at
-  `40x10`. Its unclipped compact footer opens a complete `40x10` navigation
-  guide. Its HUD shows the reported and bounded render geometry, resize
-  generation, and final settled state.
+  the selected Bento Command treatment for each plugin surface, flow state, and
+  built-in theme, and remains operable at `40x10`. Its unclipped compact footer
+  opens a complete `40x10` navigation guide. Its HUD shows the reported and
+  bounded render geometry, resize generation, and final settled state.
 - Fault model: a static-only or desktop-only review hides short-height failures;
   a resize HUD reports a guessed keyboard size; a design dimension is present
   in metadata but cannot be reached; or text editing splits a grapheme.
 - Setup or generator: direct shell events over every live catalogue axis,
   compact and representative render contexts, Unicode/IME-style committed text,
-  and the checked-in viewport fixture catalogue.
+  checked-in viewport fixtures, and the labelled iPhone landscape → portrait
+  keyboard-open → keyboard-closed → keyboard-open review sequence.
 - Independent oracle: exact public axis IDs, frame dimensions, six populated
   compact task rows, visible non-colour selection markers, the complete help
-  text at minimum size, grapheme-aware deletion, and HUD text derived from
-  `responsive.Layout`.
+  text at minimum size, grapheme-aware deletion, HUD text derived from
+  `responsive.Layout`, and settled semantic geometry events from the device.
 - Falsified when: a choice or state is unreachable, a compact task row budget is
   lost, the final frame differs from the latest delivered geometry, query text
   corrupts, or the HUD substitutes a fixture for observed terminal size.
