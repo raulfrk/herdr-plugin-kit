@@ -91,7 +91,7 @@ func containsScenario(id string) bool {
 func (c canvas) renderDense(spec Spec, data sample) {
 	w, h := c.frame.Width(), c.frame.Height()
 	c.fill(0, 0, w, 2, c.palette.SidebarBackground)
-	c.text(2, 0, w-4, "HERDR / "+strings.ToUpper(data.title), view.Style{Foreground: c.palette.Text, Background: c.palette.SidebarBackground, Bold: true})
+	c.text(2, 0, w, "HERDR / "+strings.ToUpper(data.title), view.Style{Foreground: c.palette.Text, Background: c.palette.SidebarBackground, Bold: true})
 	c.text(2, 1, w-4, spec.ThemeID+"  |  "+spec.Viewport.Name+"  |  "+data.status, view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
 	c.box(1, 3, w-2, 3, c.palette.PanelBackground, c.palette.Border)
 	c.text(3, 4, w-6, "> "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground})
@@ -99,8 +99,8 @@ func (c canvas) renderDense(spec Spec, data sample) {
 		left := w * 3 / 5
 		c.box(1, 7, left-1, h-9, c.palette.PanelBackground, c.palette.Border)
 		c.box(left+1, 7, w-left-2, h-9, c.palette.Surface, c.palette.Border)
-		c.rows(3, 8, left-5, h-11, data.rows, true)
-		c.details(left+3, 8, w-left-6, h-11, data.detail)
+		c.rows(3, 8, left-5, len(data.rows), data.rows, true)
+		c.details(left+3, 8, w-left-6, len(data.detail), data.detail)
 	} else {
 		detailHeight := max(4, (h-8)/3)
 		listHeight := h - 9 - detailHeight
@@ -109,7 +109,7 @@ func (c canvas) renderDense(spec Spec, data sample) {
 		c.box(1, 7+listHeight, w-2, detailHeight, c.palette.Surface, c.palette.Border)
 		c.details(3, 8+listHeight, w-6, max(1, detailHeight-2), data.detail)
 	}
-	c.text(2, h-1, w-4, "j/k navigate   enter inspect   esc close", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+	c.text(2, h-1, w, "j/k navigate   enter inspect   esc close", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
 func (c canvas) renderSplit(spec Spec, data sample) {
@@ -118,33 +118,33 @@ func (c canvas) renderSplit(spec Spec, data sample) {
 		nav := max(18, w/6)
 		master := max(32, w/3)
 		c.fill(0, 0, nav, h, c.palette.SidebarBackground)
-		c.text(2, 1, nav-4, "HERDR", view.Style{Foreground: c.palette.Accent, Background: c.palette.SidebarBackground, Bold: true})
+		c.text(2, 1, nav, "HERDR", view.Style{Foreground: c.palette.Accent, Background: c.palette.SidebarBackground, Bold: true})
 		for i, item := range []string{"Search", "Switchers", "Configure", "Diagnostics"} {
 			style := view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground}
 			if strings.Contains(strings.ToLower(data.title), strings.ToLower(item[:min(6, len(item))])) || i == 0 {
 				style = view.Style{Foreground: c.palette.Text, Background: c.palette.ActiveRowBackground, Bold: true}
 			}
 			c.fill(1, 4+i*2, nav-2, 1, style.Background)
-			c.text(3, 4+i*2, nav-6, item, style)
+			c.text(3, 4+i*2, nav, item, style)
 		}
 		c.fill(nav, 0, master, h, c.palette.PanelBackground)
-		c.text(nav+2, 1, master-4, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
+		c.text(nav+2, 1, master, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
 		c.text(nav+2, 3, master-4, "> "+data.query, view.Style{Foreground: c.palette.Muted, Background: c.palette.Surface})
-		c.rows(nav+2, 5, master-4, h-7, data.rows, true)
-		c.fill(nav+master, 0, w-nav-master, h, c.palette.Background)
-		c.details(nav+master+3, 2, w-nav-master-6, h-5, data.detail)
-		c.text(nav+master+3, h-2, w-nav-master-6, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.Background, Bold: true})
+		c.rows(nav+2, 5, master-4, len(data.rows), data.rows, true)
+		c.fill(nav+master, 0, w, h, c.palette.Background)
+		c.details(nav+master+3, 2, w-nav-master-6, len(data.detail), data.detail)
+		c.text(nav+master+3, h-2, w, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.Background, Bold: true})
 		return
 	}
 	c.fill(0, 0, w, 3, c.palette.SidebarBackground)
-	c.text(2, 0, w-4, "HERDR  "+data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.SidebarBackground, Bold: true})
-	c.text(2, 1, w-4, "Search | Configure | Debug", view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
+	c.text(2, 0, w, "HERDR  "+data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.SidebarBackground, Bold: true})
+	c.text(2, 1, w, "Search | Configure | Debug", view.Style{Foreground: c.palette.Muted, Background: c.palette.SidebarBackground})
 	c.text(2, 3, w-4, "> "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.Surface})
 	masterHeight := max(4, (h-5)*2/5)
 	c.rows(2, 5, w-4, masterHeight, data.rows, true)
-	c.fill(0, 5+masterHeight, w, h-5-masterHeight, c.palette.PanelBackground)
+	c.fill(0, 5+masterHeight, w, h, c.palette.PanelBackground)
 	c.details(2, 6+masterHeight, w-4, h-8-masterHeight, data.detail)
-	c.text(2, h-1, w-4, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.PanelBackground, Bold: true})
+	c.text(2, h-1, w, data.status, view.Style{Foreground: c.palette.Green, Background: c.palette.PanelBackground, Bold: true})
 }
 
 func (c canvas) renderCards(spec Spec, data sample) {
@@ -153,7 +153,7 @@ func (c canvas) renderCards(spec Spec, data sample) {
 	if w >= 100 {
 		margin = 5
 	}
-	c.text(margin, 1, w-2*margin, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.Background, Bold: true})
+	c.text(margin, 1, w, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.Background, Bold: true})
 	c.text(margin, 2, w-2*margin, "A calm workspace for "+strings.Join(spec.Scenario.Surfaces, ", "), view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 	c.box(margin, 4, w-2*margin, 4, c.palette.PanelBackground, c.palette.Border)
 	c.text(margin+2, 5, w-2*margin-4, data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground})
@@ -164,8 +164,8 @@ func (c canvas) renderCards(spec Spec, data sample) {
 		cardW := (w - 2*margin - gap) / 2
 		c.box(margin, 9, cardW, available, c.palette.PanelBackground, c.palette.Border)
 		c.box(margin+cardW+gap, 9, w-margin-(margin+cardW+gap), available, c.palette.Surface, c.palette.Border)
-		c.rows(margin+2, 10, cardW-4, available-2, data.rows, false)
-		c.details(margin+cardW+gap+2, 10, cardW-4, available-2, data.detail)
+		c.rows(margin+2, 10, cardW-4, len(data.rows), data.rows, false)
+		c.details(margin+cardW+gap+2, 10, cardW-4, len(data.detail), data.detail)
 	} else {
 		firstH := max(3, available/2)
 		c.box(margin, 9, w-2*margin, firstH, c.palette.PanelBackground, c.palette.Border)
@@ -175,7 +175,7 @@ func (c canvas) renderCards(spec Spec, data sample) {
 		c.box(margin, secondY, w-2*margin, secondH, c.palette.Surface, c.palette.Border)
 		c.details(margin+2, secondY+1, w-2*margin-4, max(1, secondH-2), data.detail)
 	}
-	c.text(margin, h-1, w-2*margin, "Review sample · static data", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+	c.text(margin, h-1, w, "Review sample · static data", view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
 func (c canvas) rows(x, y, width, height int, rows []string, selected bool) {
