@@ -1,6 +1,7 @@
 {
   "critical_paths": [
     "manifest/",
+    "documentstore/",
     "diagnostics/",
     "runtime/actionhost/",
     "runtime/command/",

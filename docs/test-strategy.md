@@ -232,6 +232,50 @@ live Herdr resources.
   identity or bounds are not enforced, or cancellation fails to end waiting.
 - Diagnostics: plugin/action/interface/method IDs, opaque receipt ID, response
   length, and typed category only; payload content is omitted.
+
+## HYP-DOCUMENTSTORE-01 — Checked replacement is confined and durable
+
+- Claim: a write beneath an opened root publishes only when the current
+  SHA-256 revision equals the caller's expectation, never follows a symlink or
+  accepts a special file, preserves replacement metadata, and completes file
+  fsync, rename, then directory fsync while holding the cooperative lock.
+- Fault model: path traversal or symlink escape, lost-update overwrite,
+  partial publication, metadata drift, unlocked rename, or reordered/omitted
+  durability operations.
+- Setup or generator: canonical and hostile root-relative paths, stale and
+  zero revisions, regular/symlink/FIFO targets, injected syscall failures, and
+  a Rapid state model of 1–30 checked writes.
+- Independent oracle: paths and bytes read directly through the filesystem,
+  independently computed SHA-256 revisions, pre-write stat metadata, a literal
+  fsync/rename trace, and a competing nonblocking lock acquisition at rename.
+- Falsified when: bytes escape the root, an invalid target is accepted, a stale
+  write publishes, returned bytes/revision/metadata differ, temporary files
+  survive failure, or durability and lock ordering differs from the contract.
+- Diagnostics: minimized operation trace, path category, revision/result,
+  syscall stage, metadata tuple, and remaining temporary filenames; document
+  contents are omitted.
+
+## HYP-DOCUMENTSTORE-02 — Cooperative access is coherent and cancelable
+
+- Claim: participating readers observe one complete revision, competing
+  writers serialize and reject a stale revision, cancellation bounds lock
+  waiting, and `Close` excludes new work while waiting for active work.
+- Fault model: split reads across a rename, writers bypass the sidecar lock,
+  lock polling ignores context, or the root descriptor closes during an active
+  operation.
+- Setup or generator: two stores on one root, concurrent fixed-size alternating
+  writes and reads under the race detector, concurrent first-lock publication
+  under a restrictive umask, a deliberately held lock, and a write paused
+  immediately before rename while `Close` races it.
+- Independent oracle: membership in the two complete byte fixtures, revision
+  recomputation, channel-observed operation ordering, bounded context deadline,
+  and `ErrClosed` after close.
+- Falsified when: a mixed document is observed, both stale writers publish,
+  cancellation exceeds its bound, close returns before active publication, or
+  post-close work reaches the filesystem.
+- Diagnostics: operation ordering, elapsed cancellation time, revision tuple,
+  and race report; document contents are represented only by fixture identity.
+
 ## Visual/config hypothesis register
 
 ### Theme configuration reference
