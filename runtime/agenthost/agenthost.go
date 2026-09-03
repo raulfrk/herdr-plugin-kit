@@ -17,11 +17,13 @@ import (
 const (
 	DetectionLines    = 60
 	MaxDetectionBytes = 64 << 10
-	DefaultSettle     = 400 * time.Millisecond
 	maxIdentityBytes  = 256
 	maxPathBytes      = 4096
 	classifierLines   = 12
 )
+
+// DefaultSettle returns the quiet interval required between status samples.
+func DefaultSettle() time.Duration { return 400 * time.Millisecond }
 
 var ErrStaleReport = errors.New("agent report changed during probe")
 
@@ -219,7 +221,7 @@ func (h Host) args(a []string) ([]string, error) {
 }
 func (p Probe) settle() time.Duration {
 	if p.Settle <= 0 {
-		return DefaultSettle
+		return DefaultSettle()
 	}
 	return p.Settle
 }
@@ -258,16 +260,12 @@ func classify(a Agent, screen string) (Status, Reason) {
 }
 func boundedTail(s string) string {
 	lines := strings.Split(s, "\n")
-	if len(lines) > DetectionLines {
-		lines = lines[len(lines)-DetectionLines:]
-	}
+	lines = lines[max(0, len(lines)-DetectionLines):]
 	return strings.Join(lines, "\n")
 }
 func normalize(s string) string {
 	lines := strings.Split(boundedTail(s), "\n")
-	if len(lines) > classifierLines {
-		lines = lines[len(lines)-classifierLines:]
-	}
+	lines = lines[max(0, len(lines)-classifierLines):]
 	return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, "\n")), " "))
 }
 func containsAny(s string, ms ...string) bool {

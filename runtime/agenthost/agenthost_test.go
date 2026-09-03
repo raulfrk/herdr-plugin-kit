@@ -212,7 +212,7 @@ func TestListRejectsUnsupportedStatusAndOversizedFields(t *testing.T) {
 	}
 }
 func TestDefaultSettleAndInvalidHostSession(t *testing.T) {
-	if got := (Probe{}).settle(); got != 400*time.Millisecond {
+	if got := (Probe{}).settle(); got != DefaultSettle() || got != 400*time.Millisecond {
 		t.Fatalf("settle=%v", got)
 	}
 	runner := &scriptedRunner{}
