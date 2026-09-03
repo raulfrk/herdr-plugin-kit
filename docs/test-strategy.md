@@ -65,13 +65,19 @@ Do not pass Gremlins v0.6.0 --test-cpu: it emits a malformed Go argument.
 Do not rely on its threshold exit status; mutationgate independently parses
 the JSON and applies this policy. The runner verifies the executable's embedded
 module version is exactly v0.6.0. Mutation workers are capped at half the
-available logical CPUs. The mutation-process timeout coefficient is 100 so a
-bounded application-level termination assertion can identify an infinite scan
-before the outer process timeout. Mutation and live Herdr/device tests share
+available logical CPUs. The mutation-process timeout coefficient is 3, which
+leaves normal tests several complete baseline durations while bounding an
+unexpected infinite mutant. Mutation and live Herdr/device tests share
 the same exclusive lock and must never overlap. Separate mutation jobs may run in
 parallel only for disjoint packages. Because Gremlins diff mode skips files
 introduced directly after an empty root, that bootstrap comparison is rejected
 with an instruction to run the full suite.
+
+On 2026-09-03 a disposable calibration with a deliberately infinite loop
+reported the mutant as `TIMED OUT` and completed in 6.3 seconds at coefficient
+3, while all finite mutants completed. With DocumentStore's observed 31-second
+baseline this bounds a stuck worker at roughly 93 seconds. `TIMED OUT` remains
+a hard gate failure at every tier.
 
 After each run, before/after SHA-256 manifests for every tracked file must
 match and the worktree must contain no tracked or untracked drift. The Gremlins

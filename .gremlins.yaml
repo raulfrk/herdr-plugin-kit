@@ -1,7 +1,7 @@
 unleash:
   integration: false
   workers: 0
-  timeout-coefficient: 100
+  timeout-coefficient: 3
   threshold:
     efficacy: 0
     mutant-coverage: 0

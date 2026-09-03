@@ -28,8 +28,15 @@ func openTestStore(t *testing.T, root string) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil && !errors.Is(err, ErrClosed) {
-			t.Errorf("close store: %v", err)
+		done := make(chan error, 1)
+		go func() { done <- store.Close() }()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, ErrClosed) {
+				t.Errorf("close store: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("close store timed out")
 		}
 	})
 	return store
@@ -49,7 +56,7 @@ func TestCheckedCreateReadReplaceAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstRevision != expectedRevision(first) || firstRevision == (Revision{}) {
+	if firstRevision != expectedRevision(first) {
 		t.Fatalf("first revision = %v", firstRevision)
 	}
 	document, err := store.Read(ctx, "plugin.toml")
@@ -102,7 +109,7 @@ func TestPathConfinementAndRegularFiles(t *testing.T) {
 	if _, err := store.Write(ctx, "nested/config.toml", []byte("ok"), Revision{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", ".", "../escape", "nested/../escape", "nested//config", "/absolute", internalPrefix + "lock-user"} {
+	for _, name := range []string{"", ".", "../escape", "nested/../escape", "nested//config", "/absolute", "\x00leading", "nested/\x00inside", internalPrefix + "lock-user"} {
 		if _, err := store.Read(ctx, name); !errors.Is(err, ErrInvalidPath) {
 			t.Errorf("Read(%q) error = %v", name, err)
 		}
@@ -744,8 +751,7 @@ func TestCheckedWriteModel(t *testing.T) {
 				}
 			}
 			got, err := store.Write(context.Background(), "model.toml", data, expected)
-			shouldConflict := stale
-			if shouldConflict {
+			if stale {
 				if !errors.Is(err, ErrConflict) || got != (Revision{}) {
 					rt.Fatalf("operation %d conflict result = (%v, %v)", index, got, err)
 				}

@@ -121,13 +121,14 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 	}
 
 	current, metadata, err := readRegular(ctx, parent, base)
-	switch {
-	case err == nil && (expected == Revision{} || revision(current) != expected):
-		return Revision{}, ErrConflict
-	case errors.Is(err, os.ErrNotExist) && expected != (Revision{}):
-		return Revision{}, ErrConflict
-	case err != nil && !errors.Is(err, os.ErrNotExist):
+	if errors.Is(err, os.ErrNotExist) {
+		if expected != (Revision{}) {
+			return Revision{}, ErrConflict
+		}
+	} else if err != nil {
 		return Revision{}, err
+	} else if expected == (Revision{}) || revision(current) != expected {
+		return Revision{}, ErrConflict
 	}
 
 	temporary, tempFD, err := createTemp(parent)
@@ -179,12 +180,12 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 func (s *Store) openParent(name string) (int, string, func(), error) {
 	parentName, base, err := splitName(name)
 	if err != nil {
-		return -1, "", nil, err
+		return 0, "", nil, err
 	}
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return -1, "", nil, ErrClosed
+		return 0, "", nil, ErrClosed
 	}
 	how := &unix.OpenHow{
 		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
@@ -193,7 +194,7 @@ func (s *Store) openParent(name string) (int, string, func(), error) {
 	fd, err := unix.Openat2(s.rootFD, parentName, how)
 	if err != nil {
 		s.mu.RUnlock()
-		return -1, "", nil, pathError("open document parent", name, err)
+		return 0, "", nil, pathError("open document parent", name, err)
 	}
 	return fd, base, func() { unix.Close(fd); s.mu.RUnlock() }, nil
 }
@@ -212,23 +213,26 @@ func splitName(name string) (string, string, error) {
 func openLock(parent int, base string, publish func(int, string, int, string, uint) error) (int, error) {
 	name := lockName(base)
 	fd, err := openExistingLock(parent, name, base)
-	if err == nil || !errors.Is(err, os.ErrNotExist) {
-		return fd, err
+	if err == nil {
+		return fd, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
 	}
 	temporary, candidate, err := createPrivateTemp(parent, unix.O_RDWR, "lock")
 	if err != nil {
-		return -1, fmt.Errorf("prepare document lock: %w", err)
+		return 0, fmt.Errorf("prepare document lock: %w", err)
 	}
 	if err := unix.Fchmod(candidate, ownerOnly); err != nil {
-		return -1, errors.Join(fmt.Errorf("set owner-only document lock mode: %w", err), discardCandidate(parent, temporary, candidate))
+		return 0, errors.Join(fmt.Errorf("set owner-only document lock mode: %w", err), discardCandidate(parent, temporary, candidate))
 	}
 	if err := publish(parent, temporary, parent, name, unix.RENAME_NOREPLACE); err == nil {
 		return candidate, nil
 	} else if !errors.Is(err, unix.EEXIST) {
-		return -1, errors.Join(fmt.Errorf("publish document lock: %w", err), discardCandidate(parent, temporary, candidate))
+		return 0, errors.Join(fmt.Errorf("publish document lock: %w", err), discardCandidate(parent, temporary, candidate))
 	}
 	if err := discardCandidate(parent, temporary, candidate); err != nil {
-		return -1, err
+		return 0, err
 	}
 	return openExistingLock(parent, name, base)
 }
@@ -237,18 +241,18 @@ func openExistingLock(parent int, name, base string) (int, error) {
 	fd, err := unix.Openat(parent, name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return -1, fmt.Errorf("open document lock: %w", ErrNotRegular)
+			return 0, fmt.Errorf("open document lock: %w", ErrNotRegular)
 		}
-		return -1, pathError("open document lock", base, err)
+		return 0, pathError("open document lock", base, err)
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		unix.Close(fd)
-		return -1, fmt.Errorf("stat document lock: %w", err)
+		return 0, fmt.Errorf("stat document lock: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return -1, fmt.Errorf("document lock: %w", ErrNotRegular)
+		return 0, fmt.Errorf("document lock: %w", ErrNotRegular)
 	}
 	return fd, nil
 }
@@ -277,7 +281,7 @@ func flockContext(ctx context.Context, fd, operation int) error {
 		if !errors.Is(err, unix.EWOULDBLOCK) {
 			return fmt.Errorf("lock document: %w", err)
 		}
-		timer := time.NewTimer(5 * time.Millisecond)
+		timer := time.NewTimer(time.Millisecond)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -314,8 +318,9 @@ func readRegular(ctx context.Context, parent int, base string) ([]byte, *unix.St
 }
 
 func readAllContext(ctx context.Context, file *os.File) ([]byte, error) {
-	data := make([]byte, 0, 32*1024)
-	buffer := make([]byte, 32*1024)
+	const bufferSize = 32768
+	data := make([]byte, 0, bufferSize)
+	buffer := make([]byte, bufferSize)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -339,7 +344,7 @@ func createPrivateTemp(parent, access int, kind string) (string, int, error) {
 	for range 100 {
 		var random [8]byte
 		if _, err := rand.Read(random[:]); err != nil {
-			return "", -1, fmt.Errorf("name temporary document: %w", err)
+			return "", 0, fmt.Errorf("name temporary document: %w", err)
 		}
 		name := fmt.Sprintf("%stmp-%s-%x", internalPrefix, kind, random[:])
 		fd, err := unix.Openat(parent, name, access|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, ownerOnly)
@@ -347,10 +352,10 @@ func createPrivateTemp(parent, access int, kind string) (string, int, error) {
 			return name, fd, nil
 		}
 		if !errors.Is(err, unix.EEXIST) {
-			return "", -1, fmt.Errorf("create temporary document: %w", err)
+			return "", 0, fmt.Errorf("create temporary document: %w", err)
 		}
 	}
-	return "", -1, errors.New("create temporary document: exhausted temporary names")
+	return "", 0, errors.New("create temporary document: exhausted temporary names")
 }
 
 func writeAll(fd int, data []byte) error {
