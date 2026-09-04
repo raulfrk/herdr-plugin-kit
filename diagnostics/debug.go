@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"math/bits"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -127,13 +129,7 @@ func (r *Recorder) Debug(query DebugQuery) (DebugPage, error) {
 	page := DebugPage{Page: query.Page, PageSize: query.PageSize, Health: debugHealth(r.health)}
 	page.Sessions = debugSessions(r.records)
 	matching := make([]DebugEvent, 0, min(len(r.records), query.PageSize))
-	const maxInt64 = int64(^uint64(0) >> 1)
-	start := int64(len(r.records))
-	if int64(query.Page) <= maxInt64/int64(query.PageSize) {
-		start = int64(query.Page) * int64(query.PageSize)
-	} else {
-		start = int64(len(r.records))
-	}
+	start := debugPageStart(query.Page, query.PageSize, len(r.records))
 	for index := len(r.records) - 1; index >= 0; index-- {
 		projected, ok := projectDebugEvent(r.records[index].event)
 		if !ok || !matchesDebug(projected, query) {
@@ -147,7 +143,7 @@ func (r *Recorder) Debug(query DebugQuery) (DebugPage, error) {
 	}
 	page.Events = matching
 	page.HasPrev = query.Page > 0
-	page.HasNext = start < int64(page.Total) && int64(page.Total)-start > int64(query.PageSize)
+	page.HasNext = int64(page.Total)-start > int64(query.PageSize)
 	return page, nil
 }
 
@@ -209,7 +205,7 @@ func (r *Recorder) ExportDebug(options DebugExportOptions) ([]byte, error) {
 		report.TruncationReasons = []string{"oldest_events_omitted"}
 		data, _ = encode()
 	}
-	if len(data) > limit && len(report.Sessions) > 0 {
+	if len(data) > limit {
 		report.Sessions = nil
 		report.Truncated = true
 		report.TruncationReasons = append(report.TruncationReasons, "session_index_omitted")
@@ -219,6 +215,14 @@ func (r *Recorder) ExportDebug(options DebugExportOptions) ([]byte, error) {
 		return nil, errors.New("debug report byte limit is too small for the bounded report envelope")
 	}
 	return data, nil
+}
+
+func debugPageStart(page, pageSize, total int) int64 {
+	high, low := bits.Mul64(uint64(page), uint64(pageSize))
+	if high != 0 {
+		return int64(total)
+	}
+	return int64(min(low, uint64(total)))
 }
 
 func debugHealth(health Health) DebugHealth {
@@ -252,11 +256,11 @@ func debugSessions(records []storedEvent) []DebugSession {
 	for _, session := range byID {
 		sessions = append(sessions, session)
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		if !sessions[i].Last.Equal(sessions[j].Last) {
-			return sessions[i].Last.After(sessions[j].Last)
+	slices.SortFunc(sessions, func(left, right DebugSession) int {
+		if newest := right.Last.Compare(left.Last); newest != 0 {
+			return newest
 		}
-		return sessions[i].ID.String() < sessions[j].ID.String()
+		return strings.Compare(left.ID.String(), right.ID.String())
 	})
 	return sessions
 }
@@ -303,8 +307,10 @@ func projectSemanticDetails(event *DebugEvent, details map[string]any) {
 	event.Count, _ = intDetail(details["count"])
 	event.Bytes, _ = intDetail(details["bytes"])
 	event.Graphemes, _ = intDetail(details["graphemes"])
-	if nanoseconds, ok := int64Detail(details["duration_ns"]); ok && nanoseconds >= 0 {
-		event.Duration = time.Duration(nanoseconds)
+	if nanoseconds, ok := int64Detail(details["duration_ns"]); ok {
+		if nanoseconds >= 0 {
+			event.Duration = time.Duration(nanoseconds)
+		}
 	}
 	event.Geometry.ReportedColumns, _ = intDetail(details["reported_columns"])
 	event.Geometry.ReportedRows, _ = intDetail(details["reported_rows"])

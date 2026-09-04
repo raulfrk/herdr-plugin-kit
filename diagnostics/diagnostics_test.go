@@ -146,6 +146,34 @@ func TestRecordNormalizesSchemaAndRedactsEveryTextPath(t *testing.T) {
 	}
 }
 
+func TestRecordClampsAClockRegressionToTheLastEventTime(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	firstTime := time.Date(2026, 9, 3, 10, 30, 0, 0, time.UTC)
+	times := []time.Time{firstTime, firstTime, firstTime.Add(-time.Minute)}
+	config := testConfig(directory)
+	config.Now = func() time.Time {
+		now := times[0]
+		if len(times) > 1 {
+			times = times[1:]
+		}
+		return now
+	}
+	recorder := openRecorder(t, config)
+
+	for _, message := range []string{"first", "clock moved backward"} {
+		if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{
+			Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: message,
+		}); err != nil {
+			t.Fatalf("Record(%q) error = %v", message, err)
+		}
+	}
+
+	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	if len(events) != 2 || !events[0].Time.Equal(firstTime) || !events[1].Time.Equal(firstTime) {
+		t.Fatalf("event times after clock regression = %#v", events)
+	}
+}
+
 func TestUISnapshotBudgetCoversNameAndText(t *testing.T) {
 	config := testConfig(filepath.Join(t.TempDir(), "private"))
 	config.MaxSnapshotBytes = 32

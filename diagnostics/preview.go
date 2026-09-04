@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,13 +13,21 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
-const previewRegistryName = "registry.json"
+const (
+	previewRegistryName     = "registry.json"
+	MaxPreviewBytes         = int64(1 << 30)
+	MaxPreviewRegistryBytes = int64(64 << 20)
+)
 
 type PreviewLimits struct {
 	MaxCount int
@@ -41,6 +50,7 @@ type PreviewStore struct {
 	mu      sync.Mutex
 	root    string
 	rootFS  *os.Root
+	rootDir *os.File
 	limits  PreviewLimits
 	entries map[uint64]PreviewEntry
 	bytes   int64
@@ -51,7 +61,7 @@ func OpenPreviewStore(stateDirectory string, limits PreviewLimits) (*PreviewStor
 	if stateDirectory == "" {
 		return nil, errors.New("preview state directory is empty")
 	}
-	if limits.MaxCount <= 0 || limits.MaxBytes <= 0 {
+	if limits.MaxCount <= 0 || limits.MaxBytes <= 0 || limits.MaxBytes > MaxPreviewBytes {
 		return nil, errors.New("preview limits must be positive")
 	}
 	abs, err := filepath.Abs(stateDirectory)
@@ -69,26 +79,62 @@ func OpenPreviewStore(stateDirectory string, limits PreviewLimits) (*PreviewStor
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create preview directory: %w", err)
 	}
-	if err := os.Chmod(root, 0o700); err != nil {
-		return nil, fmt.Errorf("secure preview directory: %w", err)
-	}
-	if err := ensureDirectory(root); err != nil {
+	rootFS, rootDir, err := openPreviewRoot(root)
+	if err != nil {
 		return nil, err
 	}
-	rootFS, err := os.OpenRoot(root)
-	if err != nil {
-		return nil, fmt.Errorf("open preview directory: %w", err)
-	}
-	store := &PreviewStore{root: root, rootFS: rootFS, limits: limits, entries: make(map[uint64]PreviewEntry)}
+	store := &PreviewStore{root: root, rootFS: rootFS, rootDir: rootDir, limits: limits, entries: make(map[uint64]PreviewEntry)}
 	if err := store.secureRoot(); err != nil {
-		_ = rootFS.Close()
+		_ = store.closeResources()
+		return nil, err
+	}
+	if err := store.lockRoot(); err != nil {
+		_ = store.closeResources()
 		return nil, err
 	}
 	if err := store.loadRegistry(); err != nil {
-		_ = rootFS.Close()
+		_ = store.closeResources()
 		return nil, err
 	}
 	return store, nil
+}
+
+func openPreviewRoot(path string) (*os.Root, *os.File, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open preview directory: %w", err)
+	}
+	opened, err := directory.Stat()
+	if err != nil {
+		_ = directory.Close()
+		return nil, nil, fmt.Errorf("inspect opened preview directory: %w", err)
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		_ = directory.Close()
+		return nil, nil, fmt.Errorf("inspect preview directory: %w", err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(opened, current) {
+		_ = directory.Close()
+		return nil, nil, errors.New("preview directory must be a stable real directory")
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		_ = directory.Close()
+		return nil, nil, fmt.Errorf("open confined preview directory: %w", err)
+	}
+	anchored, err := root.Stat(".")
+	if err != nil || !os.SameFile(opened, anchored) {
+		_ = root.Close()
+		_ = directory.Close()
+		return nil, nil, errors.New("preview directory changed while opening")
+	}
+	if err := directory.Chmod(0o700); err != nil {
+		_ = root.Close()
+		_ = directory.Close()
+		return nil, nil, fmt.Errorf("secure preview directory: %w", err)
+	}
+	return root, directory, nil
 }
 
 func (store *PreviewStore) Close() error {
@@ -98,7 +144,22 @@ func (store *PreviewStore) Close() error {
 		return nil
 	}
 	store.closed = true
-	return store.rootFS.Close()
+	return store.closeResources()
+}
+
+func (store *PreviewStore) lockRoot() error {
+	if err := unix.Flock(int(store.rootDir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return errors.New("preview store is already open")
+		}
+		return fmt.Errorf("lock preview store: %w", err)
+	}
+	return nil
+}
+
+func (store *PreviewStore) closeResources() error {
+	unlockErr := unix.Flock(int(store.rootDir.Fd()), unix.LOCK_UN)
+	return errors.Join(unlockErr, store.rootDir.Close(), store.rootFS.Close())
 }
 
 func ensureDirectory(path string) error {
@@ -106,7 +167,10 @@ func ensureDirectory(path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect preview directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("preview directory must be a real directory")
+	}
+	if !info.IsDir() {
 		return errors.New("preview directory must be a real directory")
 	}
 	return nil
@@ -149,7 +213,7 @@ func (store *PreviewStore) Put(sequence uint64, state VisualState) (PreviewEntry
 	if len(store.entries) >= store.limits.MaxCount {
 		return PreviewEntry{}, errors.New("preview count limit reached")
 	}
-	if entry.Bytes > store.limits.MaxBytes-store.bytes {
+	if exceedsByteLimit(store.bytes, entry.Bytes, store.limits.MaxBytes) {
 		return PreviewEntry{}, errors.New("preview byte limit reached")
 	}
 	if err := store.secureRoot(); err != nil {
@@ -193,7 +257,10 @@ func (store *PreviewStore) Read(entry PreviewEntry, state VisualState) ([]byte, 
 		return nil, ErrClosed
 	}
 	registered, ok := store.entries[entry.Sequence]
-	if !ok || registered != entry {
+	if !ok {
+		return nil, errors.New("preview is not registered")
+	}
+	if registered != entry {
 		return nil, errors.New("preview is not registered")
 	}
 	return store.readLocked(entry, state)
@@ -207,24 +274,15 @@ func (store *PreviewStore) readLocked(entry PreviewEntry, state VisualState) ([]
 	if entry.RelativePath != canonicalPreviewPath(entry.Sequence, entry.VisualDigest) {
 		return nil, errors.New("preview path is not canonical")
 	}
+	return store.readRegisteredFile(entry)
+}
+
+func (store *PreviewStore) readRegisteredFile(entry PreviewEntry) ([]byte, error) {
 	if err := store.secureRoot(); err != nil {
 		return nil, err
 	}
 	name := filepath.Base(filepath.FromSlash(entry.RelativePath))
-	info, err := store.rootFS.Lstat(name)
-	if err != nil {
-		return nil, fmt.Errorf("inspect preview: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, errors.New("preview must be a regular file")
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("preview permissions are not owner-only")
-	}
-	if info.Size() != entry.Bytes || info.Size() < 0 || info.Size() > store.limits.MaxBytes {
-		return nil, errors.New("preview size does not match")
-	}
-	data, err := store.rootFS.ReadFile(name)
+	data, err := store.readAnchoredRegular(name, store.limits.MaxBytes, entry.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("read preview: %w", err)
 	}
@@ -257,14 +315,7 @@ func (store *PreviewStore) secureRoot() error {
 }
 
 func (store *PreviewStore) loadRegistry() error {
-	info, statErr := store.rootFS.Lstat(previewRegistryName)
-	if statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0) {
-		return errors.New("preview registry must be an owner-only regular file")
-	}
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect preview registry: %w", statErr)
-	}
-	data, err := store.rootFS.ReadFile(previewRegistryName)
+	data, err := store.readAnchoredRegular(previewRegistryName, MaxPreviewRegistryBytes, -1)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -288,13 +339,55 @@ func (store *PreviewStore) loadRegistry() error {
 		if entry.RelativePath != canonicalPreviewPath(entry.Sequence, entry.VisualDigest) {
 			return errors.New("preview registry contains a noncanonical path")
 		}
-		if entry.Bytes > store.limits.MaxBytes-store.bytes {
+		if exceedsByteLimit(store.bytes, entry.Bytes, store.limits.MaxBytes) {
 			return errors.New("preview registry exceeds byte limit")
+		}
+		if _, err := store.readRegisteredFile(entry); err != nil {
+			return fmt.Errorf("validate registered preview: %w", err)
 		}
 		store.entries[entry.Sequence] = entry
 		store.bytes += entry.Bytes
 	}
 	return nil
+}
+
+func (store *PreviewStore) readAnchoredRegular(name string, maxBytes, expectedBytes int64) ([]byte, error) {
+	file, err := store.rootFS.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return readOpenedRegular(file, maxBytes, expectedBytes)
+}
+
+func readOpenedRegular(file *os.File, maxBytes, expectedBytes int64) ([]byte, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("file must be regular")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("file permissions are not owner-only")
+	}
+	if info.Size() < 0 || info.Size() > maxBytes {
+		return nil, errors.New("file size exceeds limit")
+	}
+	if expectedBytes >= 0 && info.Size() != expectedBytes {
+		return nil, errors.New("file size does not match")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New("file grew beyond limit while reading")
+	}
+	if expectedBytes >= 0 && int64(len(data)) != expectedBytes {
+		return nil, errors.New("file size changed while reading")
+	}
+	return data, nil
 }
 
 func (store *PreviewStore) writeRegistryLocked() error {
@@ -305,13 +398,23 @@ func (store *PreviewStore) writeRegistryLocked() error {
 	for _, entry := range store.entries {
 		entries = append(entries, entry)
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Sequence < entries[j].Sequence })
+	slices.SortFunc(entries, func(left, right PreviewEntry) int { return cmp.Compare(left.Sequence, right.Sequence) })
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return fmt.Errorf("encode preview registry: %w", err)
 	}
+	if err := validatePreviewRegistrySize(len(data)); err != nil {
+		return err
+	}
 	if err := writeAtomic(store.rootFS, previewRegistryName, data, 0o600); err != nil {
 		return fmt.Errorf("store preview registry: %w", err)
+	}
+	return nil
+}
+
+func validatePreviewRegistrySize(size int) error {
+	if int64(size) > MaxPreviewRegistryBytes {
+		return errors.New("preview registry exceeds byte limit")
 	}
 	return nil
 }
@@ -368,16 +471,21 @@ func hashBytes(data []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func exceedsByteLimit(used, added, limit int64) bool {
+	total, carry := bits.Add64(uint64(used), uint64(added), 0)
+	if carry != 0 {
+		return true
+	}
+	return total > uint64(limit)
+}
+
 func validSHA256(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
 }
 
 func canonicalPreviewPath(sequence uint64, digest string) string {
-	prefix := digest
-	if len(prefix) > 16 {
-		prefix = prefix[:16]
-	}
+	prefix := digest[:min(len(digest), 16)]
 	return filepath.ToSlash(filepath.Join("snapshots", fmt.Sprintf("%020d-%s.png", sequence, prefix)))
 }
 
@@ -394,10 +502,11 @@ func renderSemanticPreview(state VisualState) ([]byte, error) {
 	}
 	draw.Draw(canvas, image.Rect(12, 38, 16, 160), image.NewUniform(accent), image.Point{}, draw.Src)
 	rows := min(max(state.ItemCount, 1), 6)
+	selectedRow := min(state.SelectedIndex, rows-1)
 	for row := range rows {
 		top := 40 + row*20
 		shade := color.RGBA{R: 69, G: 71, B: 90, A: 255}
-		if row == min(state.SelectedIndex, rows-1) {
+		if row == selectedRow {
 			shade = color.RGBA{R: 88, G: 91, B: 112, A: 255}
 		}
 		draw.Draw(canvas, image.Rect(24, top, 206, top+14), image.NewUniform(shade), image.Point{}, draw.Src)

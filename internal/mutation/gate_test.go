@@ -310,6 +310,32 @@ func TestEquivalentApprovalAdjustsOnlyActionableMetric(t *testing.T) {
 	}
 }
 
+func TestEquivalentApprovalDoesNotMatchSkippedMutant(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "example.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("package internal\n")
+	if err := os.WriteFile(path, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := Equivalent{
+		File: "internal/example.go", Line: 4, Column: 11, Symbol: "Add",
+		Mutant: "ARITHMETIC_BASE", Original: "a + b", Replacement: "a - b",
+		SourceHash: fmt.Sprintf("%x", sha256.Sum256(source)), Hypothesis: "HYP-MUTATION-01",
+		Proof: "same result", Reviewer: "reviewer@example.invalid",
+	}
+	report := Report{Files: []ReportFile{{
+		FileName:  "internal/example.go",
+		Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11}},
+	}}}
+	if _, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}); err == nil ||
+		!strings.Contains(err.Error(), "does not match a LIVED mutant") {
+		t.Fatalf("skipped equivalent error = %v", err)
+	}
+}
+
 func TestEquivalentSourceHashMismatchFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "internal", "example.go")

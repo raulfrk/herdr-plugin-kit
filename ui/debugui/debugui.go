@@ -93,7 +93,7 @@ func New(options Options) (*Surface, error) {
 func (surface *Surface) Update(events shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
 	case shell.ResizeEvent:
-		if event.Generation < surface.resizeGeneration {
+		if event.Generation <= surface.resizeGeneration {
 			return nil
 		}
 		surface.layout = event.Layout
@@ -262,11 +262,23 @@ func (surface *Surface) appendDraft(text string) {
 		if len(surface.draft) == 64 {
 			return
 		}
-		first := len(surface.draft) == 0
-		if (first && value >= 'a' && value <= 'z') || (!first && ((value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '.' || value == '_' || value == '-')) {
+		if validDraftByte(value, len(surface.draft) == 0) {
 			surface.draft += string(value)
 		}
 	}
+}
+
+func validDraftByte(value byte, first bool) bool {
+	if value >= 'a' && value <= 'z' {
+		return true
+	}
+	if first {
+		return false
+	}
+	if value >= '0' && value <= '9' {
+		return true
+	}
+	return value == '.' || value == '_' || value == '-'
 }
 
 func (surface *Surface) startExport(events shell.EventContext) []shell.Effect {
