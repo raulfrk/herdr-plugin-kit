@@ -32,7 +32,7 @@ func TestLiveCatalogueKeepsSurfacesStatesAndFinalPresentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := view.ANSI(frame)
-	if frame.Width() != 48 || frame.Height() != 18 || !strings.Contains(plain, "Bento Command") || !strings.Contains(plain, "▌") {
+	if frame.Width() != 48 || frame.Height() != 18 || !strings.Contains(plain, "Bento Command") || !strings.Contains(plain, "Search sessions") || !strings.Contains(plain, "▌") {
 		t.Fatalf("final compact command frame missing required cues")
 	}
 }
@@ -62,6 +62,18 @@ func TestLiveCatalogueEditingHUDAndHelp(t *testing.T) {
 	}
 	if !strings.Contains(view.ANSI(frame), "CATALOGUE HELP") {
 		t.Fatal("help missing")
+	}
+}
+
+func TestLiveCatalogueIgnoresStaleAndDuplicateResizeGenerations(t *testing.T) {
+	live := NewLiveSurface()
+	newest := responsive.Resolve(responsive.Size{Columns: 110, Rows: 24})
+	older := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
+	live.Update(shell.EventContext{}, shell.ResizeEvent{Layout: newest, Generation: 2})
+	live.Update(shell.EventContext{}, shell.ResizeEvent{Layout: older, Generation: 1})
+	live.Update(shell.EventContext{}, shell.ResizeEvent{Layout: older, Generation: 2})
+	if live.layout != newest || live.resizeGeneration != 2 {
+		t.Fatalf("stale or duplicate resize committed: layout=%+v generation=%d", live.layout, live.resizeGeneration)
 	}
 }
 

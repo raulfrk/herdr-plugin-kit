@@ -67,6 +67,9 @@ func NewLiveSurface() *LiveSurface { return &LiveSurface{selected: 1} }
 func (surface *LiveSurface) Update(_ shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
 	case shell.ResizeEvent:
+		if event.Generation <= surface.resizeGeneration {
+			return nil
+		}
 		surface.layout, surface.resizeGeneration = event.Layout, event.Generation
 	case shell.TextEvent:
 		if surface.editing {

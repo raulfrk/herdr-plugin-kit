@@ -87,42 +87,44 @@ func (c canvas) renderCommand(data sample) {
 	if w >= 100 {
 		margin = 4
 	}
+	innerWidth := w - margin*2
 	c.fill(0, 0, w, 3, c.palette.PanelBackground)
-	c.text(margin, 1, w-2*margin, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
-	c.text(margin, 2, w-2*margin, data.status, view.Style{Foreground: c.palette.Muted, Background: c.palette.PanelBackground})
-	c.fill(margin, 4, w-2*margin, 3, c.palette.PanelBackground)
+	c.text(margin, 1, innerWidth, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
+	c.text(margin, 2, innerWidth, data.status, view.Style{Foreground: c.palette.Muted, Background: c.palette.PanelBackground})
+	c.fill(margin, 4, innerWidth, 3, c.palette.PanelBackground)
 	c.fill(margin, 4, 1, 3, c.palette.Accent)
-	c.text(margin+3, 5, w-2*margin-5, "⌕  "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
+	c.text(margin+3, 5, innerWidth-5, "⌕  "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
 	contentTop := 8
 	if w < 80 {
 		listHeight := min(len(data.rows), max(3, h-contentTop-6))
-		c.rows(margin, contentTop, w-2*margin, listHeight, data.rows, data.selected)
+		c.rows(margin, contentTop, innerWidth, listHeight, data.rows, data.selected)
 		detailY := contentTop + listHeight + 1
-		c.fill(margin, detailY, w-2*margin, max(0, h-detailY-3), c.palette.Surface)
-		c.details(margin+2, detailY+1, w-2*margin-4, max(0, h-detailY-5), data.detail)
+		c.fill(margin, detailY, innerWidth, max(0, h-detailY-3), c.palette.Surface)
+		c.details(margin+2, detailY+1, innerWidth-4, max(0, h-detailY-5), data.detail)
 	} else {
 		gap := 2
-		available := w - 2*margin - gap
+		available := innerWidth - gap
 		mainWidth := available * 2 / 3
 		metaX := margin + mainWidth + gap
 		c.rows(margin, contentTop, mainWidth, min(len(data.rows), h-contentTop-3), data.rows, data.selected)
 		c.fill(metaX, contentTop, available-mainWidth, h-contentTop-3, c.palette.Surface)
 		c.details(metaX+2, contentTop+2, available-mainWidth-4, h-contentTop-5, data.detail)
 	}
-	c.text(margin, h-2, w-2*margin, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
-	c.text(margin, h-1, w-2*margin, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+	c.text(margin, h-2, innerWidth, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+	c.text(margin, h-1, innerWidth, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
 func (c canvas) renderCompact(data sample) {
 	w, h := c.frame.Width(), c.frame.Height()
+	innerWidth := w - 2
 	c.fill(0, 0, w, 1, c.palette.PanelBackground)
-	c.text(1, 0, w-2, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
+	c.text(1, 0, innerWidth, data.title, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground, Bold: true})
 	c.fill(0, 1, w, 1, c.palette.PanelBackground)
-	c.text(1, 1, w-2, "⌕ "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground})
-	c.rows(1, 2, w-2, h-4, data.rows, data.selected)
+	c.text(1, 1, innerWidth, "⌕ "+data.query, view.Style{Foreground: c.palette.Text, Background: c.palette.PanelBackground})
+	c.rows(1, 2, innerWidth, h-4, data.rows, data.selected)
 	c.fill(0, h-2, w, 2, c.palette.Background)
-	c.text(1, h-2, w-2, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
-	c.text(1, h-1, w-2, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
+	c.text(1, h-2, innerWidth, data.status, view.Style{Foreground: c.palette.Accent, Background: c.palette.Background, Bold: true})
+	c.text(1, h-1, innerWidth, data.help, view.Style{Foreground: c.palette.Muted, Background: c.palette.Background})
 }
 
 func (c canvas) rows(x, y, width, height int, rows []string, selected int) {
