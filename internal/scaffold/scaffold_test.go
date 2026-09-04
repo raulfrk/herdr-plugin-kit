@@ -62,6 +62,20 @@ func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
 	if bytes.Contains(goMod, []byte("replace")) || !bytes.Contains(goMod, []byte(KitModule+" "+KitVersion)) {
 		t.Fatalf("generated go.mod = %s", goMod)
 	}
+	readme, _ := os.ReadFile(filepath.Join(output, "README.md"))
+	wantBuild := "go build -mod=mod -buildvcs=false -o ./plugin ./cmd/" + options.ID
+	if !bytes.Contains(readme, []byte(wantBuild)) {
+		t.Fatalf("generated README does not document %q", wantBuild)
+	}
+	var herdr herdrManifest
+	herdrData, _ := os.ReadFile(filepath.Join(output, "herdr-plugin.toml"))
+	if err := toml.Unmarshal(herdrData, &herdr); err != nil {
+		t.Fatal(err)
+	}
+	wantBuildArgs := []string{"go", "build", "-mod=mod", "-buildvcs=false", "-o", "./plugin", "./cmd/" + options.ID}
+	if !slices.Equal(herdr.Build[0].Command, wantBuildArgs) {
+		t.Fatalf("generated build command = %q, want %q", herdr.Build[0].Command, wantBuildArgs)
+	}
 	license, _ := os.ReadFile(filepath.Join(output, "LICENSE"))
 	wantLicense, _ := templates.ReadFile("templates/LICENSE")
 	if !bytes.Equal(license, wantLicense) {

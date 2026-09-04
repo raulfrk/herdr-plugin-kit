@@ -375,9 +375,10 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 	if err != nil {
 		return err
 	}
+	buildCommand := generatedBuildCommand("./plugin", options.ID)
 	readme := "# " + options.Name + "\n\n" + options.Description + "\n\n" +
 		"Generated with Herdr Plugin Kit v0.1.0.\n\n" +
-		"Build with `go build -o ./plugin ./cmd/" + options.ID + "`, then link this directory with Herdr. " +
+		"Build with `" + strings.Join(buildCommand, " ") + "`, then link this directory with Herdr. " +
 		"The generated starter is a deterministic searchable plugin: it demonstrates provider-owned fuzzy ranking, opaque cursor paging, Unicode, stable ties, disabled results, and observable activation. " +
 		"The main and diagnostics views are responsive from 40x10 through 500x200; press d to switch views, or Alt+D while editing search text. " +
 		"The Debug UI registers semantic previews and exports a bounded owner-only `debug-report.json`; activation writes an owner-only `last-activation.json` receipt under `HERDR_PLUGIN_STATE_DIR`. " +
@@ -406,7 +407,7 @@ func generatedHerdrManifest(options Options) herdrManifest {
 	return herdrManifest{
 		ID: options.ID, Name: options.Name, Version: Version, MinHerdrVersion: HerdrVersion,
 		Description: options.Description, Platforms: []string{"linux"},
-		Build: []herdrCommand{{Command: []string{"go", "build", "-o", binary, "./cmd/" + options.ID}}},
+		Build: []herdrCommand{{Command: generatedBuildCommand(binary, options.ID)}},
 		Actions: []herdrAction{
 			{ID: "open", Title: "Open " + options.Name, Contexts: contexts, Command: []string{binary, "action", "open"}},
 			{ID: "debug", Title: "Open " + options.Name + " diagnostics", Contexts: contexts, Command: []string{binary, "action", "debug"}},
@@ -416,6 +417,10 @@ func generatedHerdrManifest(options Options) herdrManifest {
 			{ID: "main", Title: options.Name, Placement: "overlay", Command: []string{binary, "ui"}},
 		},
 	}
+}
+
+func generatedBuildCommand(binary, pluginID string) []string {
+	return []string{"go", "build", "-mod=mod", "-buildvcs=false", "-o", binary, "./cmd/" + pluginID}
 }
 
 func writeFile(root *os.Root, name string, data []byte) error {
@@ -786,7 +791,7 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 	if len(herdr.Build) != 1 {
 		return errors.New("Herdr manifest must declare one build command")
 	}
-	if !slices.Equal(herdr.Build[0].Command, []string{"go", "build", "-o", binary, "./cmd/" + kit.PluginID}) {
+	if !slices.Equal(herdr.Build[0].Command, generatedBuildCommand(binary, kit.PluginID)) {
 		return errors.New("Herdr build must be the argv-only generated Go build")
 	}
 	wantActions := []string{"open", "debug", "health"}
