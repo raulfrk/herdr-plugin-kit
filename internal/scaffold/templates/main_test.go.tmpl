@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -112,6 +113,41 @@ func TestExampleActivationAndDebugExportAreOwnerOnlyDocuments(t *testing.T) {
 	}
 }
 
+func TestGeneratedOpenActionsUseFocusedFullSizePopup(t *testing.T) {
+	directory := t.TempDir()
+	capture := filepath.Join(directory, "arguments")
+	herdr := filepath.Join(directory, "herdr")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HERDR_TEST_CAPTURE\"\n"
+	if err := os.WriteFile(herdr, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", herdr)
+	t.Setenv("HERDR_TEST_CAPTURE", capture)
+	base := []string{
+		"plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "main",
+		"--placement", "popup", "--width", "100%", "--height", "100%",
+	}
+	for _, test := range []struct {
+		action string
+		extra  []string
+	}{
+		{action: "open"},
+		{action: "debug", extra: []string{"--env", "HERDR_PLUGIN_START_VIEW=debug"}},
+	} {
+		if err := runAction(test.action); err != nil {
+			t.Fatalf("%s action: %v", test.action, err)
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := append(append(append([]string{}, base...), test.extra...), "--focus")
+		if got := strings.Split(strings.TrimSpace(string(data)), "\n"); !slices.Equal(got, want) {
+			t.Fatalf("%s arguments = %q, want %q", test.action, got, want)
+		}
+	}
+}
+
 func TestPreviewingSinkRegistersTheRecordedSemanticState(t *testing.T) {
 	directory := t.TempDir()
 	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(directory))
@@ -201,6 +237,8 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 		{Columns: 39, Rows: 9}, {Columns: 40, Rows: 10}, {Columns: 48, Rows: 18},
 		{Columns: 48, Rows: 30}, {Columns: 78, Rows: 10}, {Columns: 78, Rows: 20},
 		{Columns: 80, Rows: 18}, {Columns: 110, Rows: 24}, {Columns: 500, Rows: 200},
+		// Approved live iPhone measurements: keyboard open, keyboard closed, and landscape.
+		{Columns: 70, Rows: 37}, {Columns: 70, Rows: 67}, {Columns: 148, Rows: 39},
 		{Columns: 5000, Rows: 2000},
 	}
 	for _, themeID := range theme.IDs() {

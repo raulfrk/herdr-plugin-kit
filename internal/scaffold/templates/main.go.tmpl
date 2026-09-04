@@ -238,10 +238,14 @@ func runAction(action string) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		arguments := []string{"plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "main"}
+		arguments := []string{
+			"plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "main",
+			"--placement", "popup", "--width", "100%", "--height", "100%",
+		}
 		if action == "debug" {
 			arguments = append(arguments, "--env", "HERDR_PLUGIN_START_VIEW=debug")
 		}
+		arguments = append(arguments, "--focus")
 		_, err := (command.ExecRunner{}).Run(ctx, herdr, arguments)
 		return err
 	case "health":
