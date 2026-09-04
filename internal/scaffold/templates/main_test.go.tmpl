@@ -337,6 +337,22 @@ func TestGeneratedShellSuppressesSameTextQueryBurst(t *testing.T) {
 	}
 }
 
+func TestResourcesCloseReportsEveryCleanupFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", root)
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", root)
+	resources, err := openResources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.documents.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.Close(); !errors.Is(err, documentstore.ErrClosed) {
+		t.Fatalf("Close() error = %v, want document-store close failure", err)
+	}
+}
+
 func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *testing.T) {
 	stateDirectory := t.TempDir()
 	diagnosticDirectory := filepath.Join(stateDirectory, "diagnostics")

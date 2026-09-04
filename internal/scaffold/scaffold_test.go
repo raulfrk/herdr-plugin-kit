@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/raulfrk/herdr-plugin-kit/manifest"
 )
 
 func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
@@ -282,6 +285,108 @@ func TestGenerateNeverOverwritesAndConcurrentPublicationHasOneWinner(t *testing.
 	})
 }
 
+func TestRollbackPublishedRemovesOnlyThePublishedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	destinationName := "plugin"
+	destination := filepath.Join(parent, destinationName)
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "owned"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publishedIdentity, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDirectory, parentRoot, err := openStableDirectory(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parentDirectory.Close()
+	defer parentRoot.Close()
+	if err := rollbackPublished(parentDirectory, parentRoot, destinationName, publishedIdentity); err != nil {
+		t.Fatalf("rollbackPublished() error = %v", err)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("rollback entries = %v, error = %v", entries, err)
+	}
+}
+
+func TestStableDirectoryChecksRejectSubstitutedPaths(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real")
+	otherPath := filepath.Join(root, "other")
+	if err := os.Mkdir(realPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(otherPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.Open(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if !sameDirectoryAtPath(realPath, opened) {
+		t.Fatal("stable directory was rejected")
+	}
+	for name, path := range map[string]string{
+		"missing": filepath.Join(root, "missing"),
+		"file":    filepath.Join(root, "file"),
+		"other":   otherPath,
+		"symlink": filepath.Join(root, "link"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "file" {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "symlink" {
+				if err := os.Symlink(realPath, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if sameDirectoryAtPath(path, opened) {
+				t.Fatalf("substituted path %s was accepted", path)
+			}
+		})
+	}
+	if _, _, err := openStableDirectory(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("missing directory was accepted")
+	}
+	if _, _, err := openStableDirectory(filepath.Join(root, "file")); err == nil {
+		t.Fatal("regular file was accepted as a directory")
+	}
+	if _, _, err := openStableDirectory(filepath.Join(root, "link")); err == nil {
+		t.Fatal("symlink was accepted as a stable directory")
+	}
+}
+
+func TestFileHelpersReportIncompleteWork(t *testing.T) {
+	directory := t.TempDir()
+	directoryFile, root, err := openStableDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryFile.Close()
+	defer root.Close()
+	if err := writeFile(root, "value", []byte("exact")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(directory, "value")); err != nil || string(data) != "exact" {
+		t.Fatalf("written data = %q, error = %v", data, err)
+	}
+	if err := writeFile(root, "value", []byte("replacement")); err == nil {
+		t.Fatal("exclusive write replaced an existing file")
+	}
+	if err := syncDirectory(root, ".", "missing"); err == nil {
+		t.Fatal("directory sync ignored a missing requested directory")
+	}
+}
+
 func TestGenerateRejectsInvalidOptionsWithoutPublishing(t *testing.T) {
 	parent := t.TempDir()
 	for name, options := range map[string]Options{
@@ -415,6 +520,11 @@ func TestValidateRejectsEveryCrossContractDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"missing generated test": func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "cmd", "example.valid", "main_test.go")); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"catalogue leak": func(t *testing.T, root string) {
 			directory := filepath.Join(root, "catalogue")
 			if err := os.Mkdir(directory, 0o755); err != nil {
@@ -436,6 +546,190 @@ func TestValidateRejectsEveryCrossContractDrift(t *testing.T) {
 				t.Fatal("contract drift passed validation")
 			}
 		})
+	}
+}
+
+func TestContractValidatorRejectsEveryIndependentManifestDrift(t *testing.T) {
+	type mutation func(*manifest.Manifest, *herdrManifest)
+	tests := map[string]mutation{
+		"Herdr ID":                 func(_ *manifest.Manifest, h *herdrManifest) { h.ID = "changed" },
+		"Herdr name":               func(_ *manifest.Manifest, h *herdrManifest) { h.Name = "changed" },
+		"Herdr version":            func(_ *manifest.Manifest, h *herdrManifest) { h.Version = "9.0.0" },
+		"Herdr description":        func(_ *manifest.Manifest, h *herdrManifest) { h.Description = "changed" },
+		"minimum Herdr":            func(_ *manifest.Manifest, h *herdrManifest) { h.MinHerdrVersion = "9.0.0" },
+		"Herdr platform":           func(_ *manifest.Manifest, h *herdrManifest) { h.Platforms = []string{"darwin"} },
+		"kit version":              func(k *manifest.Manifest, _ *herdrManifest) { k.Version = "9.0.0" },
+		"kit arguments":            func(k *manifest.Manifest, _ *herdrManifest) { k.Args = []string{"extra"} },
+		"kit executable":           func(k *manifest.Manifest, _ *herdrManifest) { k.Executable = "other" },
+		"build count":              func(_ *manifest.Manifest, h *herdrManifest) { h.Build = nil },
+		"build command":            func(_ *manifest.Manifest, h *herdrManifest) { h.Build[0].Command = []string{"other"} },
+		"capabilities":             func(k *manifest.Manifest, _ *herdrManifest) { k.Capabilities = []string{"diagnostics"} },
+		"kit action count":         func(k *manifest.Manifest, _ *herdrManifest) { k.Actions = k.Actions[:2] },
+		"kit extra action":         func(k *manifest.Manifest, _ *herdrManifest) { k.Actions = append(k.Actions, k.Actions[0]) },
+		"Herdr action count":       func(_ *manifest.Manifest, h *herdrManifest) { h.Actions = h.Actions[:2] },
+		"Herdr extra action":       func(_ *manifest.Manifest, h *herdrManifest) { h.Actions = append(h.Actions, h.Actions[0]) },
+		"kit action ID":            func(k *manifest.Manifest, _ *herdrManifest) { k.Actions[0].ID = "changed" },
+		"Herdr action ID":          func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].ID = "changed" },
+		"kit action title":         func(k *manifest.Manifest, _ *herdrManifest) { k.Actions[0].Title = "changed" },
+		"Herdr action title":       func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Title = "changed" },
+		"kit action description":   func(k *manifest.Manifest, _ *herdrManifest) { k.Actions[0].Description = "changed" },
+		"Herdr action description": func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Description = "changed" },
+		"action contexts":          func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Contexts = []string{"global"} },
+		"action command":           func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Command = []string{"other"} },
+		"interface count":          func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces = nil },
+		"extra interface":          func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces = append(k.Interfaces, k.Interfaces[0]) },
+		"interface contract":       func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces[0].Version = 2 },
+		"pane count":               func(_ *manifest.Manifest, h *herdrManifest) { h.Panes = nil },
+		"pane ID":                  func(_ *manifest.Manifest, h *herdrManifest) { h.Panes[0].ID = "changed" },
+		"pane title":               func(_ *manifest.Manifest, h *herdrManifest) { h.Panes[0].Title = "changed" },
+		"pane placement":           func(_ *manifest.Manifest, h *herdrManifest) { h.Panes[0].Placement = "split" },
+		"pane command":             func(_ *manifest.Manifest, h *herdrManifest) { h.Panes[0].Command = []string{"other"} },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			options := Options{ID: "example.valid", Name: "Valid", Description: "Description"}
+			kit := generatedManifest(options)
+			herdr := generatedHerdrManifest(options)
+			mutate(&kit, &herdr)
+			if err := validateContracts(kit, herdr); err == nil {
+				t.Fatal("independent manifest drift passed validation")
+			}
+		})
+	}
+}
+
+func TestSourceValidatorRejectsEveryHealthShapeDrift(t *testing.T) {
+	validFields := `Version: interop.Version, Interface: "health", InterfaceVersion: 1, Method: "check", Payload: json.RawMessage("{\"ok\":true}")`
+	valid := "return interop.ActionResponse{" + validFields + "}"
+	tests := map[string]string{
+		"missing function":           "",
+		"empty body":                 "func healthResponse() any {}",
+		"two statements":             "func healthResponse() any { value := 1; " + valid + " }",
+		"not return":                 "func healthResponse() any { panic(\"bad\") }",
+		"no result":                  "func healthResponse() { return }",
+		"two results":                "func healthResponse() (any, any) { return value, value }",
+		"not composite":              "func healthResponse() any { return value }",
+		"wrong response type":        "func healthResponse() any { return other.Response{" + validFields + "} }",
+		"positional field":           "func healthResponse() any { return interop.ActionResponse{interop.Version} }",
+		"non-identifier key":         "func healthResponse() any { return interop.ActionResponse{(Version): interop.Version} }",
+		"duplicate field":            "func healthResponse() any { return interop.ActionResponse{" + validFields + ", Version: interop.Version} }",
+		"missing field":              "func healthResponse() any { return interop.ActionResponse{Version: interop.Version} }",
+		"extra field":                "func healthResponse() any { return interop.ActionResponse{" + validFields + ", Extra: 1} }",
+		"wrong Version":              "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "interop.Version", "other.Version", 1) + "} }",
+		"wrong Version name":         "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "interop.Version", "interop.Other", 1) + "} }",
+		"nested Version selector":    "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "interop.Version", "outer.interop.Version", 1) + "} }",
+		"bare Version":               "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "interop.Version", "Version", 1) + "} }",
+		"wrong Interface":            "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `"health"`, `"other"`, 1) + "} }",
+		"non-string Interface":       "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `"health"`, `1`, 1) + "} }",
+		"non-literal Interface":      "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `"health"`, `value`, 1) + "} }",
+		"wrong interface version":    "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "InterfaceVersion: 1", "InterfaceVersion: 2", 1) + "} }",
+		"string interface version":   "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "InterfaceVersion: 1", `InterfaceVersion: "1"`, 1) + "} }",
+		"non-literal version":        "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, "InterfaceVersion: 1", "InterfaceVersion: value", 1) + "} }",
+		"wrong Method":               "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `"check"`, `"other"`, 1) + "} }",
+		"wrong Payload":              "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `true`, `false`, 1) + "} }",
+		"Payload not a call":         "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `json.RawMessage("{\"ok\":true}")`, `value`, 1) + "} }",
+		"Payload without argument":   "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `json.RawMessage("{\"ok\":true}")`, `json.RawMessage()`, 1) + "} }",
+		"Payload with two arguments": "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `json.RawMessage("{\"ok\":true}")`, `json.RawMessage("a", "b")`, 1) + "} }",
+		"wrong Payload function":     "func healthResponse() any { return interop.ActionResponse{" + strings.Replace(validFields, `json.RawMessage("{\"ok\":true}")`, `other.RawMessage("{\"ok\":true}")`, 1) + "} }",
+	}
+	for name, health := range tests {
+		t.Run(name, func(t *testing.T) {
+			source := "package main\nconst ( pluginID = \"example.valid\"; pluginName = \"Valid\" )\n" + health
+			file, err := parser.ParseFile(token.NewFileSet(), "main.go", source, 0)
+			if err != nil {
+				t.Fatalf("test source does not parse: %v\n%s", err, source)
+			}
+			if err := validateSourceContract(file, "example.valid", "Valid"); err == nil {
+				t.Fatal("invalid healthResponse shape passed validation")
+			}
+		})
+	}
+
+	t.Run("duplicate function", func(t *testing.T) {
+		source := "package main\nconst ( pluginID = \"example.valid\"; pluginName = \"Valid\" )\n" +
+			"func healthResponse() any { " + valid + " }\nfunc healthResponse() any { " + valid + " }"
+		file, err := parser.ParseFile(token.NewFileSet(), "main.go", source, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSourceContract(file, "example.valid", "Valid"); err == nil {
+			t.Fatal("duplicate healthResponse passed validation")
+		}
+	})
+}
+
+func TestSourceValidatorRejectsMalformedPluginConstants(t *testing.T) {
+	validHealth := `func healthResponse() any { return interop.ActionResponse{Version: interop.Version, Interface: "health", InterfaceVersion: 1, Method: "check", Payload: json.RawMessage("{\"ok\":true}")} }`
+	tests := map[string]string{
+		"variables instead of constants": `var ( pluginID = "example.valid"; pluginName = "Valid" )`,
+		"unequal declaration arity":      `const ( pluginID, pluginName = "example.valid" )`,
+		"non-literal ID":                 `const ( other = "example.valid"; pluginID = other; pluginName = "Valid" )`,
+		"non-string name":                `const ( pluginID = "example.valid"; pluginName = 1 )`,
+		"duplicate ID":                   `const ( pluginID = "example.valid"; pluginID = "example.valid"; pluginName = "Valid" )`,
+	}
+	for name, declarations := range tests {
+		t.Run(name, func(t *testing.T) {
+			source := "package main\n" + declarations + "\n" + validHealth
+			file, err := parser.ParseFile(token.NewFileSet(), "main.go", source, 0)
+			if err != nil {
+				t.Fatalf("test source does not parse: %v\n%s", err, source)
+			}
+			if err := validateSourceContract(file, "example.valid", "Valid"); err == nil {
+				t.Fatal("malformed plugin constants passed validation")
+			}
+		})
+	}
+}
+
+func TestGoModValidatorRejectsEachIndependentContractDrift(t *testing.T) {
+	valid := "module example.com/herdr/example.valid\n\ngo 1.27\n\nrequire " + KitModule + " " + KitVersion + "\n"
+	if err := validateGoMod([]byte(valid), "example.valid"); err != nil {
+		t.Fatalf("valid go.mod rejected: %v", err)
+	}
+	tests := map[string]string{
+		"missing module":     "go 1.27\n\nrequire " + KitModule + " " + KitVersion + "\n",
+		"wrong module":       strings.Replace(valid, "example.valid", "example.other", 1),
+		"missing Go version": strings.Replace(valid, "go 1.27\n\n", "", 1),
+		"wrong Go version":   strings.Replace(valid, "go 1.27", "go 1.26", 1),
+		"wrong kit module":   strings.Replace(valid, KitModule, "example.com/other", 1),
+		"wrong kit version":  strings.Replace(valid, KitVersion, "v9.0.0", 1),
+		"indirect kit":       strings.Replace(valid, KitVersion, KitVersion+" // indirect", 1),
+		"duplicate kit":      valid + "require " + KitModule + " " + KitVersion + "\n",
+	}
+	for name, data := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := validateGoMod([]byte(data), "example.valid"); err == nil {
+				t.Fatal("invalid go.mod passed validation")
+			}
+		})
+	}
+}
+
+func TestReadRegularAcceptsTheLimitAndRejectsLargerOrNonFiles(t *testing.T) {
+	directory := t.TempDir()
+	directoryFile, root, err := openStableDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryFile.Close()
+	defer root.Close()
+	if err := os.WriteFile(filepath.Join(directory, "limit"), bytes.Repeat([]byte("x"), maxFileBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := readRegular(root, "limit"); err != nil || len(data) != maxFileBytes {
+		t.Fatalf("limit-sized file length = %d, error = %v", len(data), err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "large"), bytes.Repeat([]byte("x"), maxFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRegular(root, "large"); err == nil {
+		t.Fatal("oversized file passed validation")
+	}
+	if err := os.Mkdir(filepath.Join(directory, "subdirectory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRegular(root, "subdirectory"); err == nil {
+		t.Fatal("directory passed regular-file validation")
 	}
 }
 

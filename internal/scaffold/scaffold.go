@@ -184,16 +184,24 @@ func rollbackPublished(parentDirectory *os.File, parentRoot *os.Root, destinatio
 	}
 
 	quarantined, err := parentRoot.Stat(quarantineName)
-	if err != nil || !os.SameFile(quarantined, publishedIdentity) {
+	if err != nil {
 		restoreErr := publishNoReplace(parentDirectory, quarantineName, destinationName)
-		return fmt.Errorf("published output identity changed; replacement preserved (inspect: %v, restore: %v)", err, restoreErr)
+		return fmt.Errorf("inspect rollback quarantine (restore: %v): %w", restoreErr, err)
+	}
+	if !os.SameFile(quarantined, publishedIdentity) {
+		restoreErr := publishNoReplace(parentDirectory, quarantineName, destinationName)
+		return fmt.Errorf("published output identity changed; replacement preserved (restore: %v)", restoreErr)
 	}
 	quarantineRoot, err := parentRoot.OpenRoot(quarantineName)
 	if err != nil {
 		return fmt.Errorf("open rollback quarantine: %w", err)
 	}
 	anchored, err := quarantineRoot.Stat(".")
-	if err != nil || !os.SameFile(anchored, publishedIdentity) {
+	if err != nil {
+		_ = quarantineRoot.Close()
+		return fmt.Errorf("inspect rollback quarantine root: %w", err)
+	}
+	if !os.SameFile(anchored, publishedIdentity) {
 		_ = quarantineRoot.Close()
 		return errors.New("rollback quarantine identity changed")
 	}
@@ -205,7 +213,10 @@ func rollbackPublished(parentDirectory *os.File, parentRoot *os.Root, destinatio
 		return fmt.Errorf("close rollback quarantine: %w", err)
 	}
 	current, err := parentRoot.Stat(quarantineName)
-	if err != nil || !os.SameFile(current, publishedIdentity) {
+	if err != nil {
+		return fmt.Errorf("inspect rollback quarantine before removal: %w", err)
+	}
+	if !os.SameFile(current, publishedIdentity) {
 		return errors.New("rollback quarantine changed before removal")
 	}
 	if err := parentRoot.Remove(quarantineName); err != nil {
@@ -234,11 +245,20 @@ func clearRoot(root *os.Root) error {
 
 func sameDirectoryAtPath(path string, opened *os.File) bool {
 	current, err := os.Lstat(path)
-	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() {
+	if err != nil {
+		return false
+	}
+	if current.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if !current.IsDir() {
 		return false
 	}
 	info, err := opened.Stat()
-	return err == nil && os.SameFile(current, info)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(current, info)
 }
 
 func openStableDirectory(path string) (*os.File, *os.Root, error) {
@@ -252,7 +272,19 @@ func openStableDirectory(path string) (*os.File, *os.Root, error) {
 		return nil, nil, err
 	}
 	current, err := os.Lstat(path)
-	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(opened, current) {
+	if err != nil {
+		_ = directory.Close()
+		return nil, nil, err
+	}
+	if current.Mode()&os.ModeSymlink != 0 {
+		_ = directory.Close()
+		return nil, nil, errors.New("directory must not be a symlink")
+	}
+	if !current.IsDir() {
+		_ = directory.Close()
+		return nil, nil, errors.New("path must be a directory")
+	}
+	if !os.SameFile(opened, current) {
 		_ = directory.Close()
 		return nil, nil, errors.New("directory must be a stable real directory")
 	}
@@ -262,7 +294,12 @@ func openStableDirectory(path string) (*os.File, *os.Root, error) {
 		return nil, nil, err
 	}
 	anchored, err := root.Stat(".")
-	if err != nil || !os.SameFile(opened, anchored) {
+	if err != nil {
+		_ = root.Close()
+		_ = directory.Close()
+		return nil, nil, err
+	}
+	if !os.SameFile(opened, anchored) {
 		_ = root.Close()
 		_ = directory.Close()
 		return nil, nil, errors.New("directory changed while opening")
@@ -386,13 +423,9 @@ func writeFile(root *os.Root, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	writeErr := func() error {
-		if _, err := file.Write(data); err != nil {
-			return err
-		}
-		return file.Sync()
-	}()
-	return errors.Join(writeErr, file.Close())
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	return errors.Join(writeErr, syncErr, file.Close())
 }
 
 func syncDirectory(root *os.Root, names ...string) error {
@@ -518,27 +551,34 @@ func validateOpened(rootFS *os.Root) error {
 	if err := validateSourceContract(parsedSource, kitManifest.PluginID, kitManifest.Name); err != nil {
 		return fmt.Errorf("%s: %w", sourceName, err)
 	}
-	if _, err := readRegular(rootFS, filepath.Join("cmd", kitManifest.PluginID, "main_test.go")); err != nil {
-		return err
-	}
-	return nil
+	_, err = readRegular(rootFS, filepath.Join("cmd", kitManifest.PluginID, "main_test.go"))
+	return err
 }
 
 func validateSourceContract(file *ast.File, pluginID, pluginName string) error {
 	constants := map[string]string{}
 	for _, declaration := range file.Decls {
 		general, ok := declaration.(*ast.GenDecl)
-		if !ok || general.Tok != token.CONST {
+		if !ok {
+			continue
+		}
+		if general.Tok != token.CONST {
 			continue
 		}
 		for _, specification := range general.Specs {
 			value, ok := specification.(*ast.ValueSpec)
-			if !ok || len(value.Names) != len(value.Values) {
+			if !ok {
+				continue
+			}
+			if len(value.Names) != len(value.Values) {
 				continue
 			}
 			for index, name := range value.Names {
 				literal, ok := value.Values[index].(*ast.BasicLit)
-				if !ok || literal.Kind != token.STRING {
+				if !ok {
+					continue
+				}
+				if literal.Kind != token.STRING {
 					continue
 				}
 				decoded, err := strconv.Unquote(literal.Value)
@@ -552,14 +592,20 @@ func validateSourceContract(file *ast.File, pluginID, pluginName string) error {
 			}
 		}
 	}
-	if constants["pluginID"] != pluginID || constants["pluginName"] != pluginName {
-		return errors.New("pluginID or pluginName differs from the manifests")
+	if constants["pluginID"] != pluginID {
+		return errors.New("pluginID differs from the manifests")
+	}
+	if constants["pluginName"] != pluginName {
+		return errors.New("pluginName differs from the manifests")
 	}
 
 	var health *ast.FuncDecl
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Name.Name != "healthResponse" {
+		if !ok {
+			continue
+		}
+		if function.Name.Name != "healthResponse" {
 			continue
 		}
 		if health != nil {
@@ -567,15 +613,27 @@ func validateSourceContract(file *ast.File, pluginID, pluginName string) error {
 		}
 		health = function
 	}
-	if health == nil || health.Body == nil || len(health.Body.List) != 1 {
+	if health == nil {
+		return errors.New("healthResponse is missing")
+	}
+	if health.Body == nil {
+		return errors.New("healthResponse must have a body")
+	}
+	if len(health.Body.List) != 1 {
 		return errors.New("healthResponse must contain one return statement")
 	}
 	returned, ok := health.Body.List[0].(*ast.ReturnStmt)
-	if !ok || len(returned.Results) != 1 {
+	if !ok {
+		return errors.New("healthResponse body must be a return statement")
+	}
+	if len(returned.Results) != 1 {
 		return errors.New("healthResponse must return one action response")
 	}
 	response, ok := returned.Results[0].(*ast.CompositeLit)
-	if !ok || !isSelector(response.Type, "interop", "ActionResponse") {
+	if !ok {
+		return errors.New("healthResponse must return a composite literal")
+	}
+	if !isSelector(response.Type, "interop", "ActionResponse") {
 		return errors.New("healthResponse must return interop.ActionResponse")
 	}
 	fields := map[string]ast.Expr{}
@@ -585,15 +643,31 @@ func validateSourceContract(file *ast.File, pluginID, pluginName string) error {
 			return errors.New("healthResponse fields must be unique and named")
 		}
 		name, named := field.Key.(*ast.Ident)
-		if !named || fields[name.Name] != nil {
+		if !named {
+			return errors.New("healthResponse field names must be identifiers")
+		}
+		if fields[name.Name] != nil {
 			return errors.New("healthResponse fields must be unique and named")
 		}
 		fields[name.Name] = field.Value
 	}
-	if len(fields) != 5 || !isSelector(fields["Version"], "interop", "Version") ||
-		!isString(fields["Interface"], "health") || !isInteger(fields["InterfaceVersion"], "1") ||
-		!isString(fields["Method"], "check") || !isRawMessage(fields["Payload"], `{"ok":true}`) {
-		return errors.New("healthResponse differs from the health interface contract")
+	if len(fields) != 5 {
+		return errors.New("healthResponse must contain exactly five fields")
+	}
+	if !isSelector(fields["Version"], "interop", "Version") {
+		return errors.New("healthResponse Version differs from the health interface contract")
+	}
+	if !isString(fields["Interface"], "health") {
+		return errors.New("healthResponse Interface differs from the health interface contract")
+	}
+	if !isInteger(fields["InterfaceVersion"], "1") {
+		return errors.New("healthResponse InterfaceVersion differs from the health interface contract")
+	}
+	if !isString(fields["Method"], "check") {
+		return errors.New("healthResponse Method differs from the health interface contract")
+	}
+	if !isRawMessage(fields["Payload"], `{"ok":true}`) {
+		return errors.New("healthResponse Payload differs from the health interface contract")
 	}
 	return nil
 }
@@ -604,26 +678,53 @@ func isSelector(expression ast.Expr, packageName, name string) bool {
 		return false
 	}
 	identifier, identified := selector.X.(*ast.Ident)
-	return identified && identifier.Name == packageName && selector.Sel.Name == name
+	if !identified {
+		return false
+	}
+	if identifier.Name != packageName {
+		return false
+	}
+	return selector.Sel.Name == name
 }
 
 func isString(expression ast.Expr, want string) bool {
 	literal, ok := expression.(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
+	if !ok {
+		return false
+	}
+	if literal.Kind != token.STRING {
 		return false
 	}
 	value, err := strconv.Unquote(literal.Value)
-	return err == nil && value == want
+	if err != nil {
+		return false
+	}
+	return value == want
 }
 
 func isInteger(expression ast.Expr, want string) bool {
 	literal, ok := expression.(*ast.BasicLit)
-	return ok && literal.Kind == token.INT && literal.Value == want
+	if !ok {
+		return false
+	}
+	if literal.Kind != token.INT {
+		return false
+	}
+	return literal.Value == want
 }
 
 func isRawMessage(expression ast.Expr, want string) bool {
 	call, ok := expression.(*ast.CallExpr)
-	return ok && len(call.Args) == 1 && isSelector(call.Fun, "json", "RawMessage") && isString(call.Args[0], want)
+	if !ok {
+		return false
+	}
+	if len(call.Args) != 1 {
+		return false
+	}
+	if !isSelector(call.Fun, "json", "RawMessage") {
+		return false
+	}
+	return isString(call.Args[0], want)
 }
 
 func validateTree(root *os.Root) error {
@@ -654,43 +755,99 @@ func validateTree(root *os.Root) error {
 }
 
 func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
-	if herdr.ID != kit.PluginID || herdr.Name != kit.Name || herdr.Version != kit.Version || herdr.Description != kit.Description {
-		return errors.New("Herdr and plugin-kit manifest identities differ")
+	if herdr.ID != kit.PluginID {
+		return errors.New("Herdr and plugin-kit IDs differ")
 	}
-	if herdr.MinHerdrVersion != HerdrVersion || !slices.Equal(herdr.Platforms, []string{"linux"}) {
-		return errors.New("Herdr manifest must target Herdr 0.8.2 on Linux")
+	if herdr.Name != kit.Name {
+		return errors.New("Herdr and plugin-kit names differ")
+	}
+	if herdr.Version != kit.Version {
+		return errors.New("Herdr and plugin-kit versions differ")
+	}
+	if herdr.Description != kit.Description {
+		return errors.New("Herdr and plugin-kit descriptions differ")
+	}
+	if herdr.MinHerdrVersion != HerdrVersion {
+		return errors.New("Herdr manifest must target Herdr 0.8.2")
+	}
+	if !slices.Equal(herdr.Platforms, []string{"linux"}) {
+		return errors.New("Herdr manifest must target Linux")
 	}
 	binary := kit.Executable
-	if kit.Version != Version || len(kit.Args) != 0 || binary != "./plugin" || len(herdr.Build) != 1 ||
-		!slices.Equal(herdr.Build[0].Command, []string{"go", "build", "-o", binary, "./cmd/" + kit.PluginID}) {
+	if kit.Version != Version {
+		return errors.New("plugin-kit manifest version differs from the kit version")
+	}
+	if len(kit.Args) != 0 {
+		return errors.New("plugin executable must not have implicit arguments")
+	}
+	if binary != "./plugin" {
+		return errors.New("plugin executable must be ./plugin")
+	}
+	if len(herdr.Build) != 1 {
+		return errors.New("Herdr manifest must declare one build command")
+	}
+	if !slices.Equal(herdr.Build[0].Command, []string{"go", "build", "-o", binary, "./cmd/" + kit.PluginID}) {
 		return errors.New("Herdr build must be the argv-only generated Go build")
 	}
 	wantActions := []string{"open", "debug", "health"}
-	if !slices.Equal(kit.Capabilities, []string{"diagnostics", "responsive-ui"}) ||
-		len(kit.Actions) != len(wantActions) || len(herdr.Actions) != len(wantActions) {
-		return errors.New("generated capability or action contract differs")
+	if !slices.Equal(kit.Capabilities, []string{"diagnostics", "responsive-ui"}) {
+		return errors.New("generated capability contract differs")
+	}
+	if len(kit.Actions) != len(wantActions) {
+		return errors.New("plugin-kit manifest must declare three actions")
+	}
+	if len(herdr.Actions) != len(wantActions) {
+		return errors.New("Herdr manifest must declare three actions")
 	}
 	for index, id := range wantActions {
 		wantTitle := map[string]string{
 			"open": "Open " + kit.Name, "debug": "Open " + kit.Name + " diagnostics", "health": "Check " + kit.Name + " health",
 		}[id]
-		if kit.Actions[index].ID != id || herdr.Actions[index].ID != id ||
-			kit.Actions[index].Title != wantTitle || herdr.Actions[index].Title != wantTitle ||
-			kit.Actions[index].Description != "" || herdr.Actions[index].Description != "" ||
-			!slices.Equal(herdr.Actions[index].Contexts, []string{"global", "workspace", "tab", "pane"}) ||
-			!slices.Equal(herdr.Actions[index].Command, []string{binary, "action", id}) {
-			return fmt.Errorf("action %q differs between manifests", id)
+		if kit.Actions[index].ID != id {
+			return fmt.Errorf("plugin-kit action %q has the wrong ID", id)
+		}
+		if herdr.Actions[index].ID != id {
+			return fmt.Errorf("Herdr action %q has the wrong ID", id)
+		}
+		if kit.Actions[index].Title != wantTitle {
+			return fmt.Errorf("plugin-kit action %q has the wrong title", id)
+		}
+		if herdr.Actions[index].Title != wantTitle {
+			return fmt.Errorf("Herdr action %q has the wrong title", id)
+		}
+		if kit.Actions[index].Description != "" {
+			return fmt.Errorf("plugin-kit action %q must not have a description", id)
+		}
+		if herdr.Actions[index].Description != "" {
+			return fmt.Errorf("Herdr action %q must not have a description", id)
+		}
+		if !slices.Equal(herdr.Actions[index].Contexts, []string{"global", "workspace", "tab", "pane"}) {
+			return fmt.Errorf("Herdr action %q has the wrong contexts", id)
+		}
+		if !slices.Equal(herdr.Actions[index].Command, []string{binary, "action", id}) {
+			return fmt.Errorf("Herdr action %q has the wrong command", id)
 		}
 	}
-	if len(kit.Interfaces) != 1 || kit.Interfaces[0] != (manifest.Interface{ID: "health", Version: 1, Direction: manifest.InterfaceProvides}) {
+	if len(kit.Interfaces) != 1 {
+		return errors.New("generated plugin must provide one interface")
+	}
+	if kit.Interfaces[0] != (manifest.Interface{ID: "health", Version: 1, Direction: manifest.InterfaceProvides}) {
 		return errors.New("generated health interface contract differs")
 	}
 	if len(herdr.Panes) != 1 {
 		return errors.New("Herdr manifest must declare one routed main pane")
 	}
-	if herdr.Panes[0].ID != "main" || herdr.Panes[0].Title != kit.Name || herdr.Panes[0].Placement != "overlay" ||
-		!slices.Equal(herdr.Panes[0].Command, []string{binary, "ui"}) {
-		return errors.New("main pane must use overlay placement and the routed UI subcommand")
+	if herdr.Panes[0].ID != "main" {
+		return errors.New("main pane must have ID main")
+	}
+	if herdr.Panes[0].Title != kit.Name {
+		return errors.New("main pane title must match the plugin name")
+	}
+	if herdr.Panes[0].Placement != "overlay" {
+		return errors.New("main pane must use overlay placement")
+	}
+	if !slices.Equal(herdr.Panes[0].Command, []string{binary, "ui"}) {
+		return errors.New("main pane must use the routed UI subcommand")
 	}
 	return nil
 }
@@ -703,14 +860,30 @@ func validateGoMod(data []byte, pluginID string) error {
 	if len(file.Replace) != 0 {
 		return errors.New("go.mod must not contain a replace directive")
 	}
-	if file.Module == nil || file.Module.Mod.Path != "example.com/herdr/"+pluginID || file.Go == nil || file.Go.Version != "1.27" {
-		return errors.New("go.mod module identity or Go version differs")
+	if file.Module == nil {
+		return errors.New("go.mod must declare a module")
+	}
+	if file.Module.Mod.Path != "example.com/herdr/"+pluginID {
+		return errors.New("go.mod module identity differs")
+	}
+	if file.Go == nil {
+		return errors.New("go.mod must declare a Go version")
+	}
+	if file.Go.Version != "1.27" {
+		return errors.New("go.mod must require Go 1.27")
 	}
 	found := 0
 	for _, requirement := range file.Require {
-		if requirement.Mod.Path == KitModule && requirement.Mod.Version == KitVersion && !requirement.Indirect {
-			found++
+		if requirement.Mod.Path != KitModule {
+			continue
 		}
+		if requirement.Mod.Version != KitVersion {
+			continue
+		}
+		if requirement.Indirect {
+			continue
+		}
+		found++
 	}
 	if found != 1 {
 		return fmt.Errorf("go.mod must require %s %s", KitModule, KitVersion)
@@ -728,8 +901,8 @@ func readRegular(root *os.Root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxFileBytes {
-		return nil, fmt.Errorf("%s must be a regular file of at most %d bytes", name, maxFileBytes)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s must be a regular file", name)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxFileBytes+1))
 	if err != nil {

@@ -40,3 +40,10 @@ are recursively validated and redacted before persistence, and reports repeat
 that policy for caller-provided metadata. Redaction remains a defense in depth
 for legacy records and report metadata; it is not the primary privacy boundary
 for plugin events.
+
+Accepted events are appended synchronously, so they are immediately available
+to the Debug UI and file readers. Appends rely on the operating system's normal
+writeback while the recorder is active; `Close` synchronizes the log before
+returning. Retention rewrites synchronize their replacement before publication.
+This keeps per-event synchronization latency out of the interactive event loop
+without buffering events in a second in-process queue.

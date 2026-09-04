@@ -152,14 +152,14 @@ func TestResizeLatestGenerationSettlesAndPreservesExactDimensions(t *testing.T) 
 		probe.contexts[2].Layout.Render != (responsive.Size{Columns: 70, Rows: 30}) {
 		t.Fatalf("burst render contexts = %#v", probe.contexts)
 	}
-	model.Update(settleMessage{generation: 2})
+	model.Update(settleMessage{generation: 2, startedAt: time.Now()})
 	if model.settled {
 		t.Fatal("stale settle changed state")
 	}
 	if len(probe.contexts) != 3 {
 		t.Fatalf("stale settle rendered %d frames, want 3", len(probe.contexts))
 	}
-	model.Update(settleMessage{generation: 3})
+	model.Update(settleMessage{generation: 3, startedAt: time.Now()})
 	if !model.settled {
 		t.Fatal("current settle did not change state")
 	}
@@ -333,7 +333,10 @@ func TestTimerAndSettleDiagnosticsCarryOriginatingGeneration(t *testing.T) {
 	}
 	model.Update(timerMessage{TimerEvent{Code: code, Generation: effect.generation}})
 	model.resizeGeneration = 4
-	model.Update(settleMessage{generation: 3})
+	settleStarted := time.Now().Add(-time.Second)
+	settleDurationLower := time.Since(settleStarted)
+	model.Update(settleMessage{generation: 3, startedAt: settleStarted})
+	settleDurationUpper := time.Since(settleStarted)
 	events := sink.snapshot()
 	assert := func(eventCode, action string, generation uint64, outcome diagnostics.OutcomeCode, duration time.Duration) {
 		t.Helper()
@@ -347,7 +350,16 @@ func TestTimerAndSettleDiagnosticsCarryOriginatingGeneration(t *testing.T) {
 	}
 	assert("timer.scheduled", "refresh", 1, diagnostics.OutcomeApplied, time.Second)
 	assert("timer.fired", "refresh", 1, diagnostics.OutcomeStale, 0)
-	assert("resize.settled", "resize.settle", 3, diagnostics.OutcomeStale, 0)
+	settleFound := false
+	for _, event := range events {
+		if event.Code.String() == "resize.settled" && event.Action.String() == "resize.settle" &&
+			event.RelatedGeneration == 3 && event.Outcome == diagnostics.OutcomeStale {
+			settleFound = event.Duration >= settleDurationLower && event.Duration <= settleDurationUpper
+		}
+	}
+	if !settleFound {
+		t.Fatalf("missing stale settle with monotonic duration in %#v", events)
+	}
 }
 
 func TestKeyAndTextDiagnosticsPreserveSafeModifiers(t *testing.T) {

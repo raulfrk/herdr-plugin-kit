@@ -79,12 +79,12 @@ func run(args []string) error {
 	}
 }
 
-func runUI(debug bool) error {
+func runUI(debug bool) (result error) {
 	resources, err := openResources()
 	if err != nil {
 		return err
 	}
-	defer resources.Close()
+	defer func() { result = errors.Join(result, resources.Close()) }()
 	debugSurface, err := debugui.New(debugui.Options{
 		Recorder: resources.recorder, Previews: resources.previews,
 		Exporter: resources.exportDebug, MaxReportBytes: 64 << 10, PageSize: 100,
@@ -310,30 +310,29 @@ func openResources() (*resources, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(owner.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = owner.Close()
-		return nil, errors.New("plugin UI or debugger is already open")
+		return nil, errors.Join(errors.New("plugin UI or debugger is already open"), owner.Close())
 	}
 	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(directory))
 	if err != nil {
-		_ = owner.Close()
-		return nil, err
+		return nil, errors.Join(err, closeLockedOwner(owner))
 	}
 	previews, err := diagnostics.OpenPreviewStore(stateDirectory, diagnostics.DefaultPreviewLimits())
 	if err != nil {
-		_ = recorder.Close()
-		_ = owner.Close()
-		return nil, err
+		return nil, errors.Join(err, recorder.Close(), closeLockedOwner(owner))
 	}
 	documents, err := documentstore.Open(stateDirectory)
 	if err != nil {
-		_ = errors.Join(previews.Close(), recorder.Close(), syscall.Flock(int(owner.Fd()), syscall.LOCK_UN), owner.Close())
-		return nil, err
+		return nil, errors.Join(err, previews.Close(), recorder.Close(), closeLockedOwner(owner))
 	}
 	return &resources{recorder: recorder, previews: previews, documents: documents, owner: owner}, nil
 }
 
-func (resources *resources) Close() {
-	_ = errors.Join(resources.documents.Close(), resources.previews.Close(), resources.recorder.Close(), syscall.Flock(int(resources.owner.Fd()), syscall.LOCK_UN), resources.owner.Close())
+func (resources *resources) Close() error {
+	return errors.Join(resources.documents.Close(), resources.previews.Close(), resources.recorder.Close(), closeLockedOwner(resources.owner))
+}
+
+func closeLockedOwner(owner *os.File) error {
+	return errors.Join(syscall.Flock(int(owner.Fd()), syscall.LOCK_UN), owner.Close())
 }
 
 func (resources *resources) writeDocument(ctx context.Context, name string, data []byte) error {

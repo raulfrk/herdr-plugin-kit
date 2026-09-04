@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,12 +43,12 @@ func (surface *ptySurface) Update(_ EventContext, event Event) []Effect {
 	return nil
 }
 
-func (surface *ptySurface) Render(RenderContext) (*view.Frame, error) {
+func (surface *ptySurface) Render(context RenderContext) (*view.Frame, error) {
 	frame, err := view.NewFrame(surface.layout.Render.Columns, surface.layout.Render.Rows)
 	if err != nil {
 		return nil, err
 	}
-	frame.PutText(0, 0, fmt.Sprintf("generation=%d size=%dx%d", surface.generation, surface.layout.Reported.Columns, surface.layout.Reported.Rows), view.Style{})
+	frame.PutText(0, 0, fmt.Sprintf("generation=%d size=%dx%d settled=%t", surface.generation, surface.layout.Reported.Columns, surface.layout.Reported.Rows, context.Settled), view.Style{})
 	return frame, nil
 }
 
@@ -109,6 +110,16 @@ func (buffer *lockedBuffer) Len() int {
 	return buffer.data.Len()
 }
 
+func (buffer *lockedBuffer) stringAfter(offset int) string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	data := buffer.data.Bytes()
+	if offset > len(data) {
+		offset = len(data)
+	}
+	return string(data[offset:])
+}
+
 func (buffer *lockedBuffer) containsAfter(offset int, value string) bool {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
@@ -156,9 +167,10 @@ func TestPTYResizeOutputAndSettlementTiming(t *testing.T) {
 
 	randomRows := []uint16{10, 13, 30, 66}
 	durations := make([]time.Duration, 0, 200)
+	settleDurations := make([]time.Duration, 0, 200)
+	observedSettleDurations := make([]time.Duration, 0, 200)
+	persistedSettleDurations := make([]time.Duration, 0, 200)
 	generation := uint64(1)
-	var finalStarted time.Time
-	var settledAt time.Time
 	var logOffset int64
 	for trace := range 200 {
 		for step := range 3 {
@@ -170,33 +182,50 @@ func TestPTYResizeOutputAndSettlementTiming(t *testing.T) {
 		}
 		generation++
 		offset := output.Len()
-		finalStarted = time.Now()
+		finalStarted := time.Now()
 		setPTYSize(t, command, master, 500, 200)
-		waitForOutputAfter(t, &output, offset, fmt.Sprintf("generation=%d size=500x200", generation))
+		waitForOutputAfter(t, &output, offset, fmt.Sprintf("generation=%d size=500x200 settled=false", generation))
 		durations = append(durations, time.Since(finalStarted))
-		settledAt, logOffset = waitForSettledAfter(t, directory, generation, logOffset)
+		settleDuration, persistedAt, observedAt, nextOffset := waitForSettledAfter(t, directory, generation, logOffset)
+		logOffset = nextOffset
+		observedSettleDuration := observedAt.Sub(finalStarted)
+		persistedSettleDuration := persistedAt.Sub(finalStarted.Round(0))
+		settleDurations = append(settleDurations, settleDuration)
+		observedSettleDurations = append(observedSettleDurations, observedSettleDuration)
+		persistedSettleDurations = append(persistedSettleDurations, persistedSettleDuration)
+		if settleDuration < 100*time.Millisecond || settleDuration > 250*time.Millisecond {
+			t.Fatalf("trace %d final settle = %s (persisted wall time %s, observed at %s), want 100ms..250ms", trace, settleDuration, persistedSettleDuration, observedSettleDuration)
+		}
+		waitForOutputAfter(t, &output, offset, fmt.Sprintf("generation=%d size=500x200 settled=true", generation))
 		waitForOutputQuiescence(t, &output)
+		assertNoObsoleteGenerationAfterFinal(t, output.stringAfter(offset), generation)
 	}
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	p95Output := durations[(len(durations)*95+99)/100-1]
-	settleDuration := settledAt.Sub(finalStarted)
+	minSettle, maxSettle := settleDurations[0], settleDurations[0]
+	minObservedSettle, maxObservedSettle := observedSettleDurations[0], observedSettleDurations[0]
+	minPersistedSettle, maxPersistedSettle := persistedSettleDurations[0], persistedSettleDurations[0]
+	for _, duration := range settleDurations[1:] {
+		minSettle = min(minSettle, duration)
+		maxSettle = max(maxSettle, duration)
+	}
+	for _, duration := range observedSettleDurations[1:] {
+		minObservedSettle = min(minObservedSettle, duration)
+		maxObservedSettle = max(maxObservedSettle, duration)
+	}
+	for _, duration := range persistedSettleDurations[1:] {
+		minPersistedSettle = min(minPersistedSettle, duration)
+		maxPersistedSettle = max(maxPersistedSettle, duration)
+	}
 	evidence, _ := json.Marshal(map[string]any{
 		"traces": 200, "seed": "rows-10-13-30-66", "p95_pty_ns": p95Output.Nanoseconds(),
-		"final_settle_ns": settleDuration.Nanoseconds(),
+		"min_settle_ns": minSettle.Nanoseconds(), "max_settle_ns": maxSettle.Nanoseconds(),
+		"min_observed_settle_ns": minObservedSettle.Nanoseconds(), "max_observed_settle_ns": maxObservedSettle.Nanoseconds(),
+		"min_persisted_settle_ns": minPersistedSettle.Nanoseconds(), "max_persisted_settle_ns": maxPersistedSettle.Nanoseconds(),
 	})
 	t.Log(string(evidence))
 	if p95Output > 100*time.Millisecond {
 		t.Fatalf("p95 final resize-to-PTY = %s, want <= 100ms", p95Output)
-	}
-	if settleDuration < 100*time.Millisecond || settleDuration > 250*time.Millisecond {
-		t.Fatalf("final settle = %s, want 100ms..250ms", settleDuration)
-	}
-	finalMarker := fmt.Sprintf("generation=%d size=500x200", generation)
-	tail := output.String()
-	if index := strings.LastIndex(tail, finalMarker); index < 0 {
-		t.Fatal("final marker disappeared")
-	} else if strings.Contains(tail[index:], fmt.Sprintf("generation=%d ", generation-1)) {
-		t.Fatal("obsolete generation rendered after final frame")
 	}
 	_, _ = master.Write([]byte("q"))
 	wait := make(chan error, 1)
@@ -265,7 +294,42 @@ func waitForOutputQuiescence(t *testing.T, output *lockedBuffer) {
 	t.Fatal("PTY output did not quiesce")
 }
 
-func waitForSettledAfter(t *testing.T, directory string, generation uint64, offset int64) (time.Time, int64) {
+func assertNoObsoleteGenerationAfterFinal(t *testing.T, output string, want uint64) {
+	t.Helper()
+	const marker = "generation="
+	finalMarker := fmt.Sprintf("%s%d ", marker, want)
+	finalIndex := strings.Index(output, finalMarker)
+	if finalIndex < 0 {
+		t.Fatalf("final generation %d disappeared", want)
+	}
+	output = output[finalIndex:]
+	found := false
+	for {
+		index := strings.Index(output, marker)
+		if index < 0 {
+			break
+		}
+		output = output[index+len(marker):]
+		end := 0
+		for end < len(output) && output[end] >= '0' && output[end] <= '9' {
+			end++
+		}
+		generation, err := strconv.ParseUint(output[:end], 10, 64)
+		if err != nil {
+			t.Fatalf("invalid generation marker %q", output[:end])
+		}
+		found = true
+		if generation != want {
+			t.Fatalf("generation %d rendered during final generation %d", generation, want)
+		}
+		output = output[end:]
+	}
+	if !found {
+		t.Fatalf("final generation %d marker could not be parsed", want)
+	}
+}
+
+func waitForSettledAfter(t *testing.T, directory string, generation uint64, offset int64) (time.Duration, time.Time, time.Time, int64) {
 	t.Helper()
 	path := filepath.Join(directory, diagnostics.EventLogName)
 	deadline := time.Now().Add(2 * time.Second)
@@ -297,15 +361,21 @@ func waitForSettledAfter(t *testing.T, directory string, generation uint64, offs
 			if json.Unmarshal(line, &event) != nil || event.Message != "resize.settled" {
 				continue
 			}
-			if value, ok := event.Details["generation"].(float64); ok && uint64(value) == generation &&
-				event.Details["outcome"] == string(diagnostics.OutcomeApplied) {
-				return event.Time, offset + consumed
+			value, currentGeneration := event.Details["generation"].(float64)
+			related, originatingGeneration := event.Details["related_generation"].(float64)
+			if currentGeneration && uint64(value) == generation && originatingGeneration && uint64(related) == generation &&
+				event.Action == "resize.settle" && event.Details["outcome"] == string(diagnostics.OutcomeApplied) {
+				duration, ok := event.Details["duration_ns"].(float64)
+				if !ok || duration < 0 {
+					t.Fatalf("settled event for generation %d has invalid duration %#v", generation, event.Details["duration_ns"])
+				}
+				return time.Duration(duration), event.Time, time.Now(), offset + consumed
 			}
 		}
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("missing settled event for generation %d", generation)
-	return time.Time{}, offset
+	return 0, time.Time{}, time.Time{}, offset
 }
 
 func terminalState(t *testing.T, path string) string {

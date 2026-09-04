@@ -63,7 +63,10 @@ func NewProgram(options ProgramOptions, surface Surface) (*tea.Program, error) {
 	return tea.NewProgram(model, programOptions...), nil
 }
 
-type settleMessage struct{ generation uint64 }
+type settleMessage struct {
+	generation uint64
+	startedAt  time.Time
+}
 type resultMessage struct{ ResultEvent }
 type timerMessage struct{ TimerEvent }
 
@@ -102,6 +105,7 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	var code string
 	var outcome = diagnostics.OutcomeApplied
 	var extra tea.Cmd
+	var eventDuration time.Duration
 	needsRender := false
 
 	switch message := message.(type) {
@@ -113,7 +117,9 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		code = "resize.received"
 		needsRender = true
 		generation := model.resizeGeneration
-		extra = tea.Tick(resizeSettleDelay, func(time.Time) tea.Msg { return settleMessage{generation: generation} })
+		extra = tea.Tick(resizeSettleDelay, func(time.Time) tea.Msg {
+			return settleMessage{generation: generation, startedAt: receivedAt}
+		})
 	case tea.KeyMsg:
 		if message.Type == tea.KeyRunes {
 			event = TextEvent{Text: string(message.Runes), Paste: message.Paste, Alt: message.Alt}
@@ -136,6 +142,7 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		needsRender = true
 	case settleMessage:
 		code = "resize.settled"
+		eventDuration = receivedAt.Sub(message.startedAt)
 		settleCode, _ := NewEventCode("resize.settle")
 		diagnosticEvent = TimerEvent{Code: settleCode, Generation: message.generation}
 		if message.generation != model.resizeGeneration {
@@ -187,7 +194,7 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		diagnosticEvent = event
 	}
 	after := model.surface.DiagnosticState()
-	model.record(code, outcome, before, after, diagnosticEvent, 0)
+	model.record(code, outcome, before, after, diagnosticEvent, eventDuration)
 	commands := model.commands(effects)
 	if extra != nil {
 		commands = append(commands, extra)

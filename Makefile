@@ -4,11 +4,12 @@ BASE ?=
 .PHONY: test test-timing test-race test-properties mutation-changed mutation-full
 
 test:
-	HERDR_PLUGIN_KIT_TIMING= GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 	$(MAKE) test-timing
+	HERDR_PLUGIN_KIT_TIMING= GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./...
 
 test-timing:
-	GOFLAGS= HERDR_PLUGIN_KIT_TIMING=1 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./ui/shell -run 'Test(PTYResizeOutputAndSettlementTiming|WorstSupportedResizeBurstP95)$$' -count=1
+	GOFLAGS= HERDR_PLUGIN_KIT_TIMING=1 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./ui/shell -run '^TestWorstSupportedResizeBurstP95$$' -count=1
+	GOFLAGS= HERDR_PLUGIN_KIT_TIMING=1 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./ui/shell -run '^TestPTYResizeOutputAndSettlementTiming$$' -count=1
 
 test-race:
 	GOTOOLCHAIN=$(GOTOOLCHAIN) go test -race ./...

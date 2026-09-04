@@ -229,7 +229,7 @@ func (r *Recorder) record(input Event) (Event, error) {
 	if changed {
 		err = r.rewrite()
 	} else {
-		err = appendRecord(r.file, data)
+		_, err = r.file.Write(data)
 	}
 	if err != nil {
 		r.records = previousRecords
@@ -244,12 +244,6 @@ func (r *Recorder) record(input Event) (Event, error) {
 	r.health.Writable = true
 	r.updateUsage()
 	return event, nil
-}
-
-func appendRecord(file *os.File, data []byte) error {
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	return errors.Join(writeErr, syncErr)
 }
 
 func (r *Recorder) normalize(input Event) (Event, error) {
