@@ -547,8 +547,12 @@ func TestPreviewRegistryRejectsInvalidBoundsAndIsDeterministicallyOrdered(t *tes
 			if name == "byte overflow" {
 				limits.MaxBytes = 1
 			}
-			if _, err := OpenPreviewStore(stateDirectory, limits); err == nil {
+			_, err = OpenPreviewStore(stateDirectory, limits)
+			if err == nil {
 				t.Fatal("invalid registry entry was accepted")
+			}
+			if name == "zero bytes" && err.Error() != "preview registry contains an invalid entry" {
+				t.Fatalf("zero-byte registry diagnosis = %q", err)
 			}
 		})
 	}

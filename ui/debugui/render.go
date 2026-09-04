@@ -35,7 +35,7 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 		return frame, nil
 	}
 	if surface.screen == screenHelp {
-		putLines(frame, 1, 1, size.Columns-2, size.Rows-1, helpLines(), base)
+		putLines(frame, 1, 1, 38, 9, helpLines(), base)
 		return frame, nil
 	}
 	status := surface.status(context)
@@ -136,7 +136,7 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 		}
 		events = filtered
 		indices = filteredIndices
-		if omitted > 0 && height > 0 {
+		if omitted != 0 {
 			frame.PutText(1, top, fit(fmt.Sprintf("! %d semantic previews omitted", omitted), frame.Width()-2), view.Style{Foreground: palette.Yellow, Background: palette.Background})
 			top++
 			height--

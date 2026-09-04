@@ -44,7 +44,7 @@ type PickerOptions struct {
 	Activate Activator
 }
 
-const queryDebounce = 80 * time.Millisecond
+const queryDebounce time.Duration = 80_000_000
 
 type pickerScreen uint8
 
@@ -260,7 +260,9 @@ func (picker *Picker) key(eventContext shell.EventContext, key shell.KeyCode) []
 }
 
 func (picker *Picker) scheduleQueryLoad(eventContext shell.EventContext) []shell.Effect {
-	picker.queryRevision++
+	// A started load increments loadGeneration, so its current value is a
+	// distinct revision from every request that can still be in flight.
+	picker.queryRevision = picker.loadGeneration
 	picker.queryDirty = true
 	effect, err := eventContext.After(queryDebounce, picker.queryDebounceCode)
 	if err != nil {
@@ -308,8 +310,13 @@ func (picker *Picker) result(event shell.ResultEvent) {
 		picker.pendingLoad = false
 		if event.Result.Err != nil {
 			result, ok := event.Result.Value.(loadResult)
-			if ok && (result.query != picker.query.Text() || result.revision != picker.queryRevision) {
-				return
+			if ok {
+				if result.query != picker.query.Text() {
+					return
+				}
+				if result.revision != picker.queryRevision {
+					return
+				}
 			}
 			picker.hasError = true
 			return
@@ -424,7 +431,13 @@ func (picker *Picker) previousPage() {
 }
 
 func (picker *Picker) nextPage(eventContext shell.EventContext) []shell.Effect {
-	if picker.queryDirty || picker.pendingLoad || len(picker.pages) == 0 {
+	if picker.queryDirty {
+		return nil
+	}
+	if picker.pendingLoad {
+		return nil
+	}
+	if len(picker.pages) == 0 {
 		return nil
 	}
 	if picker.pageIndex+1 < len(picker.pages) {

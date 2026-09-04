@@ -117,13 +117,18 @@ func TestPickerNextPageBoundariesAndCachedNavigation(t *testing.T) {
 	}
 
 	picker := newPickerForTest(t)
-	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}}})
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}, Next: NewCursor("next")}})
 	picker.pendingLoad = true
-	picker.nextPage(shell.EventContext{})
-	if picker.pageIndex != 0 || picker.hasError {
+	if effects := picker.nextPage(shell.EventContext{}); len(effects) != 0 || picker.pageIndex != 0 || picker.hasError {
 		t.Fatalf("pending-load next changed state: page=%d error=%t", picker.pageIndex, picker.hasError)
 	}
 	picker.pendingLoad = false
+	picker.queryDirty = true
+	if effects := picker.nextPage(shell.EventContext{}); len(effects) != 0 || picker.pageIndex != 0 || picker.hasError {
+		t.Fatalf("dirty-query next changed state: page=%d error=%t", picker.pageIndex, picker.hasError)
+	}
+	picker.queryDirty = false
+	picker.pages[0].page.Next = Cursor{}
 	picker.nextPage(shell.EventContext{})
 	if picker.pageIndex != 0 || picker.hasError {
 		t.Fatalf("terminal page next changed state: page=%d error=%t", picker.pageIndex, picker.hasError)
@@ -238,6 +243,27 @@ func TestPickerRejectsSameTextFromAnOlderQueryRevision(t *testing.T) {
 	}})
 	if picker.loaded || len(picker.items()) != 0 || picker.hasError {
 		t.Fatalf("older same-text completion committed: loaded=%t items=%v error=%t", picker.loaded, picker.items(), picker.hasError)
+	}
+}
+
+func TestPickerRejectsStaleProviderErrorsByQueryAndRevision(t *testing.T) {
+	for name, result := range map[string]loadResult{
+		"query":    {query: "old", revision: 2},
+		"revision": {query: "current", revision: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			picker := newPickerForTest(t)
+			picker.query.Set("current")
+			picker.queryRevision = 2
+			picker.loadGeneration = 1
+			picker.pendingLoad = true
+			picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 1, Result: shell.WorkResult{
+				Value: result, Err: errors.New("stale failure"), Code: diagnostics.OutcomeFailed,
+			}})
+			if picker.hasError {
+				t.Fatal("stale provider failure replaced the current query state")
+			}
+		})
 	}
 }
 
