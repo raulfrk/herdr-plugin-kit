@@ -100,6 +100,45 @@ process. `make test` runs that lane after the functional suite. Coverage and
 race instrumentation skip only the timing assertions while continuing to run
 all shell correctness and concurrency tests.
 
+## Scaffold hypotheses
+
+## HYP-SCAFFOLD-01 — Generation publishes one complete tree without overwrite
+
+- Claim: concurrent generators targeting the same absent path publish exactly
+  one fully validated plugin, never replace an existing path, and leave no
+  sibling staging directories.
+- Fault model: check-then-rename races, partial publication, failed cleanup,
+  destination replacement, or a generated tree that differs from validation.
+- Setup or generator: eight concurrent publishers, pre-existing destination
+  fixtures, invalid options, and the exact generated source-and-test tree.
+- Independent oracle: Linux `RENAME_NOREPLACE`, a pre-existing marker byte
+  comparison, exact relative-file enumeration, and a fresh `Validate` pass.
+- Falsified when: zero or multiple publishers succeed, marker bytes change,
+  staging remains, or the winning tree fails validation.
+- Diagnostics: contender errors, resulting relative paths, validation stage,
+  and the temporary test root only; generated config values are not logged.
+
+## HYP-SCAFFOLD-02 — Both manifests describe one runnable private plugin
+
+- Claim: generated Herdr TOML and `plugin-kit.json` retain identical identity
+  and static actions, use argv-only build/action/pane commands, pin kit v0.1.0
+  without `replace`, expose responsive main and Debug UI surfaces, and keep
+  config/state under Herdr-provided directories.
+- Fault model: schema drift, shell command insertion, non-overlay panes,
+  missing runtime environment use, malformed Go, wrong license, symlinked or
+  oversized contract files, or catalogue assets leaking into output.
+- Setup or generator: structural mutations of each contract field, escaped
+  metadata, required-file substitutions, and a generated-module build in a
+  test-only Go workspace.
+- Independent oracle: strict TOML decoding, `manifest.Parse`, exact action and
+  pane tables, Go parser/compiler, canonical Apache-2.0 bytes, and exact file
+  enumeration.
+- Falsified when: any drift validates, the pristine generated `go.mod` changes,
+  compilation fails, a required environment/subcommand is absent, or any
+  catalogue content is generated.
+- Diagnostics: contextual filename/contract errors and compiler output; no
+  runtime configuration, state contents, query text, or terminal content.
+
 ## Toolchain feasibility record
 
 On 2026-09-02 the disposable gate ran with Go 1.27.0, Rapid 1.3.0, and

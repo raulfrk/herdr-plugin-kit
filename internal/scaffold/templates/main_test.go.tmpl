@@ -1,0 +1,102 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"testing"
+
+	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
+	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
+	"github.com/raulfrk/herdr-plugin-kit/ui/view"
+)
+
+type testSurface struct {
+	results int
+	resizes int
+	texts   int
+}
+
+func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []shell.Effect {
+	switch event.(type) {
+	case shell.ResultEvent:
+		surface.results++
+	case shell.ResizeEvent:
+		surface.resizes++
+	case shell.TextEvent:
+		surface.texts++
+	}
+	return nil
+}
+
+func (*testSurface) Render(shell.RenderContext) (*view.Frame, error) { return nil, nil }
+func (*testSurface) DiagnosticState() diagnostics.VisualState        { return diagnostics.VisualState{} }
+
+func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
+	mainSurface, debugSurface := &testSurface{}, &testSurface{}
+	router := &surfaceRouter{main: mainSurface, debug: debugSurface, mainEditing: func() bool { return false }}
+	router.Update(shell.EventContext{}, shell.ResizeEvent{Generation: 1})
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	router.Update(shell.EventContext{}, shell.ResultEvent{})
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	if mainSurface.results != 1 || debugSurface.results != 1 {
+		t.Fatalf("result deliveries = main %d, debug %d", mainSurface.results, debugSurface.results)
+	}
+	if mainSurface.resizes != 2 || debugSurface.resizes != 1 || router.showingDebug {
+		t.Fatalf("resize/switch state = main %d, debug %d, showing debug %t", mainSurface.resizes, debugSurface.resizes, router.showingDebug)
+	}
+}
+
+func TestRouterPlainDebugKeyDoesNotStealQueryInput(t *testing.T) {
+	mainSurface, debugSurface := &testSurface{}, &testSurface{}
+	editing := true
+	debugEditing := false
+	router := &surfaceRouter{
+		main: mainSurface, debug: debugSurface,
+		mainEditing: func() bool { return editing }, debugEditing: func() bool { return debugEditing },
+	}
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	if router.showingDebug || mainSurface.texts != 1 {
+		t.Fatalf("editing route = showing debug %t, main texts %d", router.showingDebug, mainSurface.texts)
+	}
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d", Alt: true})
+	if !router.showingDebug {
+		t.Fatal("Alt+D did not open diagnostics while editing")
+	}
+	editing = false
+	debugEditing = true
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	if !router.showingDebug || debugSurface.texts != 1 {
+		t.Fatalf("debug editing route = showing debug %t, debug texts %d", router.showingDebug, debugSurface.texts)
+	}
+	debugEditing = false
+	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	if router.showingDebug {
+		t.Fatal("plain d did not return from diagnostics")
+	}
+}
+
+func TestHealthResponseAndConfigurationContract(t *testing.T) {
+	response := healthResponse()
+	if response.Version != 1 || response.Interface != "health" || response.InterfaceVersion != 1 ||
+		response.Method != "check" || !bytes.Equal(response.Payload, []byte(`{"ok":true}`)) {
+		t.Fatalf("health response = %#v", response)
+	}
+	directory := t.TempDir()
+	palette, err := loadPalette(directory)
+	if err != nil || palette.ID != "catppuccin" {
+		t.Fatalf("default palette = %q, %v", palette.ID, err)
+	}
+	if err := os.WriteFile(directory+"/config.toml", []byte("[theme]\nname = \"dracula\"\n[theme.custom]\naccent = \"#010203\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	palette, err = loadPalette(directory)
+	if err != nil || palette.ID != "dracula" || string(palette.Accent) != "#010203" {
+		t.Fatalf("configured palette = %q, %v", palette.ID, err)
+	}
+	if err := os.WriteFile(directory+"/config.toml", []byte("unknown = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPalette(directory); err == nil {
+		t.Fatal("unknown configuration field was accepted")
+	}
+}

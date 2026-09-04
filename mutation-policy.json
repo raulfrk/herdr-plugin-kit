@@ -10,6 +10,7 @@
     "runtime/internal/herdrid/",
     "runtime/interop/",
     "runtime/sessionhost/",
+    "internal/scaffold/",
     "ui/snapshot/"
   ],
   "critical": {

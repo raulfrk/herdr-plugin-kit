@@ -517,6 +517,24 @@ func TestFilterGrammarAndEmptyEditingKeys(t *testing.T) {
 	}
 }
 
+func TestSurfaceReportsFilterEditingState(t *testing.T) {
+	surface, err := New(Options{Recorder: uiRecorder(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if surface.Editing() {
+		t.Fatal("new surface reports active filter editing")
+	}
+	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "/"})
+	if !surface.Editing() {
+		t.Fatal("surface did not report active filter editing")
+	}
+	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEscape})
+	if surface.Editing() {
+		t.Fatal("surface still reports editing after Escape")
+	}
+}
+
 func TestNavigationFilteringAndPagingStateMachine(t *testing.T) {
 	recorder := uiRecorder(t)
 	visual := &diagnostics.VisualState{Screen: uiID(t, "search"), Focus: uiID(t, "results"), State: uiID(t, "ready"), ItemCount: 3, SelectedIndex: 1}

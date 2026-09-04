@@ -45,6 +45,21 @@ func TestPickerConstructionAndCursorContracts(t *testing.T) {
 	}
 }
 
+func TestPickerReportsWhenPlainTextBelongsToTheQuery(t *testing.T) {
+	picker := newPickerForTest(t)
+	if picker.Editing() {
+		t.Fatal("new picker reports active text editing")
+	}
+	picker.text(shell.EventContext{}, "/")
+	if !picker.Editing() {
+		t.Fatal("picker did not report active query editing")
+	}
+	picker.key(shell.EventContext{}, shell.KeyEscape)
+	if picker.Editing() {
+		t.Fatal("picker still reports editing after Escape")
+	}
+}
+
 func TestPickerPreviousPageGuardsAndSingleStep(t *testing.T) {
 	noHistory := newPickerForTest(t)
 	noHistory.pageIndex = 1

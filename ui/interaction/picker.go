@@ -102,6 +102,9 @@ func NewPicker(options PickerOptions) (*Picker, error) {
 	return &Picker{options: options, loadKey: loadKey, activationKey: activationKey}, nil
 }
 
+// Editing reports whether plain text is currently routed into the query.
+func (picker *Picker) Editing() bool { return picker.editing }
+
 func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
 	case shell.ResizeEvent:

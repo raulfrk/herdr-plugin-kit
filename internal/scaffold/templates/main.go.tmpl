@@ -1,0 +1,266 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/raulfrk/herdr-plugin-kit/config"
+	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
+	"github.com/raulfrk/herdr-plugin-kit/ui/debugui"
+	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
+	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
+	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
+	"github.com/raulfrk/herdr-plugin-kit/ui/view"
+)
+
+const (
+	pluginID   = {{PLUGIN_ID}}
+	pluginName = {{PLUGIN_NAME}}
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: plugin ui|debug|action")
+	}
+	switch args[0] {
+	case "ui":
+		if len(args) != 1 {
+			return errors.New("ui accepts no arguments")
+		}
+		return runUI(os.Getenv("HERDR_PLUGIN_START_VIEW") == "debug")
+	case "debug":
+		if len(args) != 1 {
+			return errors.New("debug accepts no arguments")
+		}
+		return runUI(true)
+	case "action":
+		if len(args) != 2 {
+			return errors.New("usage: plugin action open|debug|health")
+		}
+		return runAction(args[1])
+	default:
+		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func runUI(debug bool) error {
+	recorder, previews, closeResources, err := openResources()
+	if err != nil {
+		return err
+	}
+	defer closeResources()
+	debugSurface, err := debugui.New(debugui.Options{Recorder: recorder, Previews: previews})
+	if err != nil {
+		return err
+	}
+	mainSurface, err := interaction.NewPicker(interaction.PickerOptions{
+		Title: pluginName,
+		Load: func(_ context.Context, query string, _ interaction.Cursor) (interaction.Page, error) {
+			candidate := interaction.Candidate{Key: "ready", Text: "Plugin ready"}
+			if _, ok := interaction.Match(query, candidate.Text); !ok {
+				return interaction.Page{}, nil
+			}
+			return interaction.Page{Items: []interaction.Item{{
+				Key: candidate.Key, Label: candidate.Text,
+				Description: "Replace this loader with plugin functionality.",
+			}}}, nil
+		},
+	})
+	if err != nil {
+		return err
+	}
+	surface := &surfaceRouter{
+		main: mainSurface, debug: debugSurface,
+		mainEditing: mainSurface.Editing, debugEditing: debugSurface.Editing,
+		showingDebug: debug,
+	}
+	id, err := diagnostics.NewID(pluginID)
+	if err != nil {
+		return err
+	}
+	configDirectory, err := runtimeDirectory("HERDR_PLUGIN_CONFIG_DIR")
+	if err != nil {
+		return err
+	}
+	palette, err := loadPalette(configDirectory)
+	if err != nil {
+		return err
+	}
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: recorder}, surface)
+	if err != nil {
+		return err
+	}
+	_, err = program.Run()
+	return err
+}
+
+// surfaceRouter keeps normal and debug views in one process so both observe
+// the same recorder. Alt+D switches views without colliding with text entry.
+type surfaceRouter struct {
+	main, debug               shell.Surface
+	mainEditing, debugEditing func() bool
+	showingDebug              bool
+	lastResize                shell.ResizeEvent
+}
+
+func (router *surfaceRouter) Update(events shell.EventContext, event shell.Event) []shell.Effect {
+	if text, ok := event.(shell.TextEvent); ok && !text.Paste && text.Text == "d" &&
+		(text.Alt || !router.editing()) {
+		router.showingDebug = !router.showingDebug
+		if router.lastResize.Generation > 0 {
+			return router.active().Update(events, router.lastResize)
+		}
+		return nil
+	}
+	if resize, ok := event.(shell.ResizeEvent); ok {
+		router.lastResize = resize
+	}
+	if _, ok := event.(shell.ResultEvent); ok {
+		mainEffects := router.main.Update(events, event)
+		debugEffects := router.debug.Update(events, event)
+		return append(mainEffects, debugEffects...)
+	}
+	return router.active().Update(events, event)
+}
+
+func (router *surfaceRouter) editing() bool {
+	if router.showingDebug {
+		return router.debugEditing != nil && router.debugEditing()
+	}
+	return router.mainEditing != nil && router.mainEditing()
+}
+
+func (router *surfaceRouter) Render(context shell.RenderContext) (*view.Frame, error) {
+	return router.active().Render(context)
+}
+
+func (router *surfaceRouter) DiagnosticState() diagnostics.VisualState {
+	return router.active().DiagnosticState()
+}
+
+func (router *surfaceRouter) active() shell.Surface {
+	if router.showingDebug {
+		return router.debug
+	}
+	return router.main
+}
+
+func runAction(action string) error {
+	switch action {
+	case "open", "debug":
+		herdr := os.Getenv("HERDR_BIN_PATH")
+		if herdr == "" {
+			return errors.New("HERDR_BIN_PATH is empty")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		arguments := []string{"plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", "main"}
+		if action == "debug" {
+			arguments = append(arguments, "--env", "HERDR_PLUGIN_START_VIEW=debug")
+		}
+		_, err := (command.ExecRunner{}).Run(ctx, herdr, arguments)
+		return err
+	case "health":
+		if _, err := runtimeDirectory("HERDR_PLUGIN_CONFIG_DIR"); err != nil {
+			return err
+		}
+		if _, err := runtimeDirectory("HERDR_PLUGIN_STATE_DIR"); err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(healthResponse())
+	default:
+		return fmt.Errorf("unknown action %q", action)
+	}
+}
+
+func healthResponse() interop.ActionResponse {
+	return interop.ActionResponse{
+		Version: interop.Version, Interface: "health", InterfaceVersion: 1,
+		Method: "check", Payload: json.RawMessage(`{"ok":true}`),
+	}
+}
+
+type pluginConfig struct {
+	Theme theme.Settings `toml:"theme"`
+}
+
+func loadPalette(directory string) (theme.Palette, error) {
+	loader := config.Loader[pluginConfig]{Defaults: func() pluginConfig {
+		return pluginConfig{Theme: theme.DefaultSettings()}
+	}, Validate: func(value pluginConfig) error { return value.Theme.Validate() }}
+	data, err := os.ReadFile(filepath.Join(directory, "config.toml"))
+	if errors.Is(err, os.ErrNotExist) {
+		data = nil
+	} else if err != nil {
+		return theme.Palette{}, fmt.Errorf("read plugin config: %w", err)
+	}
+	value, err := loader.Decode(data)
+	if err != nil {
+		return theme.Palette{}, err
+	}
+	value.Theme.AutoSwitch = false
+	return value.Theme.Resolve(false)
+}
+
+func openResources() (*diagnostics.Recorder, *diagnostics.PreviewStore, func(), error) {
+	if _, err := runtimeDirectory("HERDR_PLUGIN_CONFIG_DIR"); err != nil {
+		return nil, nil, nil, err
+	}
+	stateDirectory, err := runtimeDirectory("HERDR_PLUGIN_STATE_DIR")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	directory := filepath.Join(stateDirectory, "diagnostics")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, nil, nil, err
+	}
+	owner, err := os.Open(directory)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := syscall.Flock(int(owner.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = owner.Close()
+		return nil, nil, nil, errors.New("plugin UI or debugger is already open")
+	}
+	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(directory))
+	if err != nil {
+		_ = owner.Close()
+		return nil, nil, nil, err
+	}
+	previews, err := diagnostics.OpenPreviewStore(directory, diagnostics.DefaultPreviewLimits())
+	if err != nil {
+		_ = recorder.Close()
+		_ = owner.Close()
+		return nil, nil, nil, err
+	}
+	closeResources := func() {
+		_ = errors.Join(previews.Close(), recorder.Close(), syscall.Flock(int(owner.Fd()), syscall.LOCK_UN), owner.Close())
+	}
+	return recorder, previews, closeResources, nil
+}
+
+func runtimeDirectory(name string) (string, error) {
+	directory := os.Getenv(name)
+	if directory == "" || !filepath.IsAbs(directory) {
+		return "", fmt.Errorf("%s must be an absolute directory", name)
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", fmt.Errorf("create %s: %w", name, err)
+	}
+	return directory, nil
+}

@@ -460,6 +460,9 @@ func (surface *Surface) Render(context shell.RenderContext) (*view.Frame, error)
 	return surface.render(context)
 }
 
+// Editing reports whether plain text is currently routed into the filter.
+func (surface *Surface) Editing() bool { return surface.editing }
+
 func (surface *Surface) DiagnosticState() diagnostics.VisualState {
 	state := "ready"
 	if surface.projectionFailed {
