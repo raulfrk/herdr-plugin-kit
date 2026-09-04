@@ -241,7 +241,7 @@ func TestEvaluateCriticalKilledPasses(t *testing.T) {
 			Type: "CONDITIONALS_NEGATION", Status: "KILLED", Line: 7, Column: 3,
 		}},
 	}}}
-	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil)
+	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestEvaluateLivedMutantFailsThreshold(t *testing.T) {
 			Type: "ARITHMETIC_BASE", Status: "LIVED", Line: 4, Column: 11,
 		}},
 	}}}
-	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil)
+	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestEquivalentApprovalAdjustsOnlyActionableMetric(t *testing.T) {
 		SourceHash: hash, Hypothesis: "HYP-MUTATION-01", Proof: "same result",
 		Reviewer: "reviewer@example.invalid",
 	}
-	result, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent})
+	result, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,9 +330,33 @@ func TestEquivalentApprovalDoesNotMatchSkippedMutant(t *testing.T) {
 		FileName:  "internal/example.go",
 		Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11}},
 	}}}
-	if _, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}); err == nil ||
+	if _, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}, "full"); err == nil ||
 		!strings.Contains(err.Error(), "does not match a LIVED mutant") {
 		t.Fatalf("skipped equivalent error = %v", err)
+	}
+	result, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}, "changed")
+	if err != nil || !result.Passed || result.Critical.Counts.Skipped != 1 || result.Critical.Counts.Equivalent != 0 {
+		t.Fatalf("changed-scope dormant approval = %+v, %v", result, err)
+	}
+}
+
+func TestEvaluateRejectsUnknownScope(t *testing.T) {
+	if _, err := Evaluate(t.TempDir(), Report{}, strictPolicy(), nil, "targeted"); err == nil {
+		t.Fatal("accepted an unknown mutation scope")
+	}
+}
+
+func TestEvaluateRejectsDuplicateMutationDispositions(t *testing.T) {
+	report := Report{Files: []ReportFile{{
+		FileName: "internal/example.go",
+		Mutations: []ReportMutation{
+			{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11},
+			{Type: "ARITHMETIC_BASE", Status: "KILLED", Line: 4, Column: 11},
+		},
+	}}}
+	if _, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "changed"); err == nil ||
+		!strings.Contains(err.Error(), "duplicate report mutation") {
+		t.Fatalf("duplicate mutation error = %v", err)
 	}
 }
 
@@ -351,7 +375,7 @@ func TestEquivalentSourceHashMismatchFailsClosed(t *testing.T) {
 		SourceHash: strings.Repeat("0", 64), Hypothesis: "HYP-MUTATION-02",
 		Proof: "proof", Reviewer: "reviewer@example.invalid",
 	}
-	_, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{equivalent})
+	_, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{equivalent}, "full")
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("error = %v, want hash mismatch", err)
 	}
@@ -364,7 +388,7 @@ func TestTimedOutAlwaysFails(t *testing.T) {
 			Type: "ARITHMETIC_BASE", Status: "TIMED OUT", Line: 1, Column: 1,
 		}},
 	}}}
-	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil)
+	result, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +409,7 @@ func TestEvaluateCountsEveryGremlinsStatus(t *testing.T) {
 	}
 	result, err := Evaluate(t.TempDir(), Report{Files: []ReportFile{{
 		FileName: "pkg/example.go", Mutations: mutants,
-	}}}, strictPolicy(), nil)
+	}}}, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +426,7 @@ func TestEvaluateCountsEveryGremlinsStatus(t *testing.T) {
 }
 
 func TestZeroDenominators(t *testing.T) {
-	empty, err := Evaluate(t.TempDir(), Report{}, strictPolicy(), nil)
+	empty, err := Evaluate(t.TempDir(), Report{}, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +441,7 @@ func TestZeroDenominators(t *testing.T) {
 			Type: "ARITHMETIC_BASE", Status: "NOT COVERED", Line: 1, Column: 1,
 		}},
 	}}}
-	result, err := Evaluate(t.TempDir(), notCovered, strictPolicy(), nil)
+	result, err := Evaluate(t.TempDir(), notCovered, strictPolicy(), nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +536,7 @@ func TestEvaluateRejectsMissingDuplicateAndUnmatchedApprovals(t *testing.T) {
 		SourceHash: strings.Repeat("0", 64), Hypothesis: "HYP-X-01",
 		Proof: "proof", Reviewer: "Ada",
 	}
-	if _, err := Evaluate(t.TempDir(), Report{}, strictPolicy(), []Equivalent{base}); err == nil {
+	if _, err := Evaluate(t.TempDir(), Report{}, strictPolicy(), []Equivalent{base}, "full"); err == nil {
 		t.Fatal("missing equivalent source passed")
 	}
 
@@ -522,10 +546,10 @@ func TestEvaluateRejectsMissingDuplicateAndUnmatchedApprovals(t *testing.T) {
 	}
 	base.File = "same.go"
 	base.SourceHash = fmt.Sprintf("%x", sha256.Sum256([]byte("same")))
-	if _, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{base, base}); err == nil {
+	if _, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{base, base}, "full"); err == nil {
 		t.Fatal("duplicate equivalent approval passed")
 	}
-	if _, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{base}); err == nil ||
+	if _, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{base}, "full"); err == nil ||
 		!strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("unmatched approval error = %v", err)
 	}

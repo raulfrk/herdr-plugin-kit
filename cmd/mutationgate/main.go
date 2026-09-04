@@ -76,7 +76,7 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
-	result, err := mutation.Evaluate(filepath.Clean(root), report, policy, equivalents)
+	result, err := mutation.Evaluate(filepath.Clean(root), report, policy, equivalents, *scope)
 	if err != nil {
 		return err
 	}

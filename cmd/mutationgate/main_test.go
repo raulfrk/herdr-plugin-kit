@@ -29,7 +29,7 @@ func TestRunWritesMachineReadableFailureBeforeReturningError(t *testing.T) {
 	var stdout bytes.Buffer
 	err := run([]string{
 		"check", "--report", report, "--policy", policy,
-		"--baseline", baseline, "--config", config, "--output", output,
+		"--baseline", baseline, "--config", config, "--output", output, "--scope", "full",
 	}, &stdout)
 	if err == nil {
 		t.Fatal("failing policy returned nil")

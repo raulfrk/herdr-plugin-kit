@@ -341,7 +341,10 @@ func validateEquivalent(entry Equivalent) error {
 	return nil
 }
 
-func Evaluate(root string, report Report, policy Policy, equivalents []Equivalent) (Result, error) {
+func Evaluate(root string, report Report, policy Policy, equivalents []Equivalent, scope string) (Result, error) {
+	if scope != "changed" && scope != "full" {
+		return Result{}, errors.New("mutation scope must be changed or full")
+	}
 	equivalentKeys := make(map[string]Equivalent, len(equivalents))
 	for _, entry := range equivalents {
 		path := filepath.Join(root, filepath.FromSlash(entry.File))
@@ -362,8 +365,15 @@ func Evaluate(root string, report Report, policy Policy, equivalents []Equivalen
 
 	var critical, noncritical Counts
 	matched := make(map[string]bool, len(equivalentKeys))
+	dormant := make(map[string]bool, len(equivalentKeys))
+	seenMutants := make(map[string]bool)
 	for _, file := range report.Files {
 		for _, mutant := range file.Mutations {
+			key := mutationKey(file.FileName, mutant.Line, mutant.Column, mutant.Type)
+			if seenMutants[key] {
+				return Result{}, fmt.Errorf("duplicate report mutation: %s", key)
+			}
+			seenMutants[key] = true
 			counts := &noncritical
 			if isCritical(file.FileName, policy.CriticalPaths) {
 				counts = &critical
@@ -373,7 +383,6 @@ func Evaluate(root string, report Report, policy Policy, equivalents []Equivalen
 				counts.Killed++
 			case "LIVED":
 				counts.Lived++
-				key := mutationKey(file.FileName, mutant.Line, mutant.Column, mutant.Type)
 				if _, ok := equivalentKeys[key]; ok {
 					counts.Equivalent++
 					matched[key] = true
@@ -386,13 +395,18 @@ func Evaluate(root string, report Report, policy Policy, equivalents []Equivalen
 				counts.NotViable++
 			case "SKIPPED":
 				counts.Skipped++
+				if scope == "changed" {
+					if _, ok := equivalentKeys[key]; ok {
+						dormant[key] = true
+					}
+				}
 			default:
 				counts.Unknown++
 			}
 		}
 	}
 	for key := range equivalentKeys {
-		if !matched[key] {
+		if !matched[key] && !dormant[key] {
 			return Result{}, fmt.Errorf("equivalent approval does not match a LIVED mutant: %s", key)
 		}
 	}
