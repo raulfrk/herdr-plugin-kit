@@ -49,6 +49,40 @@ func TestModelBufferMatchesGraphemeSlice(t *testing.T) {
 	})
 }
 
+func TestBufferCursorMovementAndEditsMatchStateModel(t *testing.T) {
+	buffer := NewBuffer("A界e\u0301🙂")
+	steps := []struct {
+		name       string
+		apply      func(*Buffer)
+		wantText   string
+		wantCursor int
+	}{
+		{name: "left", apply: func(buffer *Buffer) { buffer.MoveLeft() }, wantText: "A界e\u0301🙂", wantCursor: 3},
+		{name: "left again", apply: func(buffer *Buffer) { buffer.MoveLeft() }, wantText: "A界e\u0301🙂", wantCursor: 2},
+		{name: "right", apply: func(buffer *Buffer) { buffer.MoveRight() }, wantText: "A界e\u0301🙂", wantCursor: 3},
+		{name: "insert", apply: func(buffer *Buffer) { buffer.Insert("👨‍👩‍👧‍👦") }, wantText: "A界e\u0301👨‍👩‍👧‍👦🙂", wantCursor: 4},
+		{name: "backspace", apply: func(buffer *Buffer) { buffer.Backspace() }, wantText: "A界e\u0301🙂", wantCursor: 3},
+		{name: "delete", apply: func(buffer *Buffer) { buffer.Delete() }, wantText: "A界e\u0301", wantCursor: 3},
+	}
+	for _, step := range steps {
+		step.apply(&buffer)
+		if buffer.Text() != step.wantText || buffer.Cursor() != step.wantCursor || buffer.GraphemeCount() != uniseg.GraphemeClusterCount(step.wantText) {
+			t.Fatalf("%s: buffer=%q cursor=%d count=%d, want %q cursor=%d", step.name, buffer.Text(), buffer.Cursor(), buffer.GraphemeCount(), step.wantText, step.wantCursor)
+		}
+	}
+
+	buffer.SetCursor(-10)
+	buffer.MoveLeft()
+	if buffer.Cursor() != 0 || buffer.Text() != "A界e\u0301" {
+		t.Fatalf("left boundary changed state: %q/%d", buffer.Text(), buffer.Cursor())
+	}
+	buffer.SetCursor(100)
+	buffer.MoveRight()
+	if buffer.Cursor() != buffer.GraphemeCount() || buffer.Text() != "A界e\u0301" {
+		t.Fatalf("right boundary changed state: %q/%d", buffer.Text(), buffer.Cursor())
+	}
+}
+
 func join(parts []string) string {
 	result := ""
 	for _, part := range parts {

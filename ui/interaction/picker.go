@@ -105,13 +105,17 @@ func NewPicker(options PickerOptions) (*Picker, error) {
 func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
 	case shell.ResizeEvent:
-		if event.Generation < picker.resizeGeneration {
+		if event.Generation <= picker.resizeGeneration {
 			return nil
 		}
 		picker.layout, picker.resizeGeneration = event.Layout, event.Generation
-		if !picker.loaded && !picker.pendingLoad {
-			return picker.startLoad(eventContext, Cursor{}, false)
+		if picker.loaded {
+			break
 		}
+		if picker.pendingLoad {
+			break
+		}
+		return picker.startLoad(eventContext, Cursor{}, false)
 	case shell.TextEvent:
 		return picker.text(eventContext, event.Text)
 	case shell.KeyEvent:
@@ -170,7 +174,8 @@ func (picker *Picker) key(eventContext shell.EventContext, key shell.KeyCode) []
 		return []shell.Effect{shell.Quit()}
 	}
 	if picker.screen == helpScreen {
-		if key == shell.KeyEscape || key == shell.KeyBackspace || key == shell.KeyEnter {
+		switch key {
+		case shell.KeyEscape, shell.KeyBackspace, shell.KeyEnter:
 			picker.screen = picker.returnScreen
 		}
 		return nil
@@ -417,7 +422,16 @@ func (picker *Picker) openOrActivate(eventContext shell.EventContext) []shell.Ef
 
 func (picker *Picker) activate(eventContext shell.EventContext) []shell.Effect {
 	item, ok := picker.selectedItem()
-	if !ok || item.Disabled || picker.options.Activate == nil || picker.pendingActivation {
+	if !ok {
+		return nil
+	}
+	if item.Disabled {
+		return nil
+	}
+	if picker.options.Activate == nil {
+		return nil
+	}
+	if picker.pendingActivation {
 		return nil
 	}
 	work := func(ctx context.Context) shell.WorkResult {
@@ -591,7 +605,7 @@ func (picker *Picker) status() string {
 		state = "! Recoverable error"
 	case picker.activated:
 		state = "OK Activated"
-	case picker.loaded && len(picker.items()) == 0:
+	case picker.hasNoResults():
 		state = "0 results · clear search"
 	}
 	if len(picker.pages) > 0 {
@@ -636,7 +650,7 @@ func (picker *Picker) DiagnosticState() diagnostics.VisualState {
 		state = "error"
 	case picker.activated:
 		state = "activated"
-	case picker.loaded && len(picker.items()) == 0:
+	case picker.hasNoResults():
 		state = "empty"
 	}
 	selection := "none"
@@ -653,6 +667,10 @@ func (picker *Picker) DiagnosticState() diagnostics.VisualState {
 		ItemCount: len(picker.items()), SelectedIndex: max(0, picker.selected),
 		Pending: picker.pendingLoad || picker.pendingActivation, HasError: picker.hasError,
 	}
+}
+
+func (picker *Picker) hasNoResults() bool {
+	return picker.loaded && len(picker.items()) == 0
 }
 
 func semanticID(value string) diagnostics.ID { id, _ := diagnostics.NewID(value); return id }

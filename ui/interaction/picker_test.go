@@ -1,10 +1,14 @@
 package interaction
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +29,102 @@ func newPickerForTest(t *testing.T) *Picker {
 		t.Fatal(err)
 	}
 	return picker
+}
+
+func TestPickerConstructionAndCursorContracts(t *testing.T) {
+	if _, err := NewPicker(PickerOptions{Load: func(context.Context, string, Cursor) (Page, error) { return Page{}, nil }}); err == nil {
+		t.Fatal("accepted an empty title")
+	}
+	if _, err := NewPicker(PickerOptions{Title: "Commands"}); err == nil {
+		t.Fatal("accepted a nil loader")
+	}
+	empty := NewCursor("")
+	opaque := NewCursor("provider/page:2")
+	if !empty.Empty() || empty.Token() != "" || opaque.Empty() || opaque.Token() != "provider/page:2" {
+		t.Fatalf("cursor contracts: empty=%q/%t opaque=%q/%t", empty.Token(), empty.Empty(), opaque.Token(), opaque.Empty())
+	}
+}
+
+func TestPickerPreviousPageGuardsAndSingleStep(t *testing.T) {
+	noHistory := newPickerForTest(t)
+	noHistory.pageIndex = 1
+	noHistory.previousPage()
+	if noHistory.pageIndex != 1 || len(noHistory.pages) != 0 {
+		t.Fatalf("empty-history guard changed index to %d", noHistory.pageIndex)
+	}
+
+	firstPage := newPickerForTest(t)
+	if err := firstPage.applyPage(loadResult{page: Page{Items: []Item{{Key: "first", Label: "First"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	firstPage.previousPage()
+	if firstPage.pageIndex != 0 || firstPage.selectedKey != "first" {
+		t.Fatalf("first-page guard changed state: page=%d selected=%q", firstPage.pageIndex, firstPage.selectedKey)
+	}
+
+	history := newPickerForTest(t)
+	_ = history.applyPage(loadResult{page: Page{Items: []Item{{Key: "first", Label: "First"}}}})
+	_ = history.applyPage(loadResult{page: Page{Items: []Item{{Key: "second", Label: "Second"}}}, append: true})
+	history.selectedKey = "first"
+	history.previousPage()
+	if history.pageIndex != 0 || history.selected != 0 || history.selectedKey != "first" || history.items()[0].Key != "first" {
+		t.Fatalf("single previous step = page %d selection %d/%q items=%v", history.pageIndex, history.selected, history.selectedKey, history.items())
+	}
+}
+
+func TestPickerResizeDoesNotDuplicateLoadsAndEveryHelpExitKeyReturns(t *testing.T) {
+	for name, configure := range map[string]func(*Picker){
+		"already loaded": func(picker *Picker) { picker.loaded = true },
+		"load pending":   func(picker *Picker) { picker.pendingLoad = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			picker := newPickerForTest(t)
+			configure(picker)
+			layout := responsive.Resolve(responsive.Size{Columns: 80, Rows: 19})
+			if effects := picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: 1}); len(effects) != 0 || picker.hasError {
+				t.Fatalf("resize duplicated load: effects=%v error=%t", effects, picker.hasError)
+			}
+		})
+	}
+	for _, key := range []shell.KeyCode{shell.KeyEscape, shell.KeyBackspace, shell.KeyEnter} {
+		picker := newPickerForTest(t)
+		picker.screen, picker.returnScreen = helpScreen, detailScreen
+		if effects := picker.key(shell.EventContext{}, key); len(effects) != 0 || picker.screen != detailScreen {
+			t.Fatalf("help key %q left screen=%d effects=%v", key, picker.screen, effects)
+		}
+	}
+}
+
+func TestPickerNextPageBoundariesAndCachedNavigation(t *testing.T) {
+	empty := newPickerForTest(t)
+	if effects := empty.nextPage(shell.EventContext{}); len(effects) != 0 || empty.pageIndex != 0 {
+		t.Fatalf("empty next page produced effects/state: %d/%d", len(effects), empty.pageIndex)
+	}
+
+	picker := newPickerForTest(t)
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}}})
+	picker.pendingLoad = true
+	picker.nextPage(shell.EventContext{})
+	if picker.pageIndex != 0 || picker.hasError {
+		t.Fatalf("pending-load next changed state: page=%d error=%t", picker.pageIndex, picker.hasError)
+	}
+	picker.pendingLoad = false
+	picker.nextPage(shell.EventContext{})
+	if picker.pageIndex != 0 || picker.hasError {
+		t.Fatalf("terminal page next changed state: page=%d error=%t", picker.pageIndex, picker.hasError)
+	}
+
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "two", Label: "Two"}}}, append: true})
+	picker.pageIndex = 0
+	picker.selectedKey = "two"
+	if effects := picker.nextPage(shell.EventContext{}); len(effects) != 0 || picker.pageIndex != 1 || picker.selectedKey != "two" {
+		t.Fatalf("cached next = effects=%d page=%d selected=%q", len(effects), picker.pageIndex, picker.selectedKey)
+	}
+
+	picker.pages[1].page.Next = NewCursor("provider-next")
+	if effects := picker.nextPage(shell.EventContext{}); len(effects) != 0 || !picker.hasError || picker.pendingLoad || picker.pageIndex != 1 {
+		t.Fatalf("failed next request = effects=%d error=%t pending=%t page=%d", len(effects), picker.hasError, picker.pendingLoad, picker.pageIndex)
+	}
 }
 
 func TestPickerOpaquePagingHasNoKitCeiling(t *testing.T) {
@@ -124,8 +224,9 @@ func TestPickerIgnoresStaleResizeAndExplainsRecovery(t *testing.T) {
 	older := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
 	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: newest, Generation: 2})
 	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: older, Generation: 1})
+	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: older, Generation: 2})
 	if picker.layout != newest || picker.resizeGeneration != 2 || picker.query.Text() != "preserved" {
-		t.Fatalf("stale resize committed or state changed: layout=%+v g=%d query=%q", picker.layout, picker.resizeGeneration, picker.query.Text())
+		t.Fatalf("stale or duplicate resize committed or state changed: layout=%+v g=%d query=%q", picker.layout, picker.resizeGeneration, picker.query.Text())
 	}
 	recovery := responsive.Resolve(responsive.Size{Columns: 20, Rows: 5})
 	palette, _ := theme.Builtin("terminal")
@@ -157,6 +258,216 @@ func TestPickerResponsiveFramesAtContractBoundariesAndThemes(t *testing.T) {
 				t.Fatalf("%s %+v missing focus/basic-key cues", themeID, size)
 			}
 		}
+	}
+}
+
+func TestPickerCompactStandardAndWideFrameFingerprints(t *testing.T) {
+	palette, _ := theme.Builtin("terminal")
+	tests := []struct {
+		name    string
+		size    responsive.Size
+		class   responsive.Class
+		splitAt int
+	}{
+		{name: "compact", size: responsive.Size{Columns: 60, Rows: 12}, class: responsive.Compact},
+		{name: "standard", size: responsive.Size{Columns: 90, Rows: 20}, class: responsive.Standard, splitAt: 60},
+		{name: "wide", size: responsive.Size{Columns: 120, Rows: 30}, class: responsive.Wide, splitAt: 80},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			picker := newPickerForTest(t)
+			picker.layout = responsive.Resolve(test.size)
+			_ = picker.applyPage(loadResult{page: Page{Items: []Item{
+				{Key: "alpha", Label: "Alpha", Description: "Primary detail", Detail: []string{"Detail line"}},
+				{Key: "disabled", Label: "Disabled", Disabled: true},
+			}}})
+			frame, err := picker.Render(shell.RenderContext{Layout: picker.layout, Theme: palette})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(stripANSI(view.ANSI(frame)), "\n")
+			if picker.layout.Class != test.class || strings.TrimRight(lines[0], " ") != " Commands" || !strings.HasPrefix(lines[1], "▌ Search: ") || !strings.Contains(lines[2], "Ready · page 1 · 2 items") || !strings.HasPrefix(lines[3], "▌ Alpha") || !strings.HasPrefix(lines[len(lines)-1], "? help · / search") {
+				t.Fatalf("%s semantic frame fingerprint:\n%s", test.name, strings.Join(lines, "\n"))
+			}
+			header, _ := frame.CellAt(1, 0)
+			selected, _ := frame.CellAt(0, 3)
+			if !header.Style.Bold || header.Style.Background != palette.PanelBackground || !selected.Style.Bold || selected.Style.Background != palette.ActiveRowBackground {
+				t.Fatalf("%s semantic styles header=%+v selected=%+v", test.name, header.Style, selected.Style)
+			}
+			if test.splitAt == 0 {
+				if strings.Contains(strings.Join(lines, "\n"), "Primary detail") {
+					t.Fatal("compact root unexpectedly rendered the detail pane")
+				}
+				last, _ := frame.CellAt(test.size.Columns-1, 3)
+				if last.Style.Background != palette.ActiveRowBackground {
+					t.Fatalf("compact selected row did not span list: %+v", last.Style)
+				}
+				return
+			}
+
+			detailLabel := strings.TrimRight(string([]rune(lines[2])[test.splitAt+1:]), " ")
+			detailDescription := strings.TrimRight(string([]rune(lines[3])[test.splitAt+1:]), " ")
+			panel, _ := frame.CellAt(test.splitAt, 3)
+			if detailLabel != "Alpha" || detailDescription != "Primary detail" || panel.Style.Background != palette.PanelBackground {
+				t.Fatalf("%s split fingerprint label=%q description=%q panel=%+v", test.name, detailLabel, detailDescription, panel.Style)
+			}
+		})
+	}
+}
+
+func TestPickerApprovedFramesRemainByteStable(t *testing.T) {
+	palette, _ := theme.Builtin("terminal")
+	items := []Item{
+		{Key: "alpha", Label: "Alpha", Description: "Primary detail", Detail: []string{"Detail line"}},
+		{Key: "disabled", Label: "Disabled", Disabled: true},
+	}
+	tests := []struct {
+		name string
+		size responsive.Size
+		set  func(*Picker)
+	}{
+		{name: "compact-root", size: responsive.Size{Columns: 48, Rows: 18}, set: func(picker *Picker) { _ = picker.applyPage(loadResult{page: Page{Items: items}}) }},
+		{name: "standard-root", size: responsive.Size{Columns: 80, Rows: 19}, set: func(picker *Picker) { _ = picker.applyPage(loadResult{page: Page{Items: items}}) }},
+		{name: "wide-root", size: responsive.Size{Columns: 110, Rows: 24}, set: func(picker *Picker) { _ = picker.applyPage(loadResult{page: Page{Items: items}}) }},
+		{name: "compact-detail", size: responsive.Size{Columns: 48, Rows: 18}, set: func(picker *Picker) {
+			_ = picker.applyPage(loadResult{page: Page{Items: items}})
+			picker.screen = detailScreen
+		}},
+		{name: "help", size: responsive.Size{Columns: 40, Rows: 10}, set: func(picker *Picker) { picker.screen = helpScreen }},
+		{name: "recovery", size: responsive.Size{Columns: 39, Rows: 9}, set: func(*Picker) {}},
+		{name: "long-wide-editing", size: responsive.Size{Columns: 110, Rows: 24}, set: func(picker *Picker) {
+			picker.options.Title = strings.Repeat("Long title ", 20)
+			longItems := make([]Item, 30)
+			for index := range longItems {
+				longItems[index] = Item{Key: fmt.Sprintf("item-%02d", index), Label: strings.Repeat(fmt.Sprintf("Result %02d ", index), 20), Description: strings.Repeat("Long description ", 20), Detail: []string{strings.Repeat("Long detail ", 20)}}
+			}
+			_ = picker.applyPage(loadResult{page: Page{Items: longItems}})
+			picker.selected = 20
+			picker.query.Set(strings.Repeat("query", 30))
+			picker.query.MoveLeft()
+			picker.editing = true
+		}},
+		{name: "long-compact-detail", size: responsive.Size{Columns: 48, Rows: 18}, set: func(picker *Picker) {
+			picker.options.Title = strings.Repeat("Long title ", 20)
+			_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "long", Label: strings.Repeat("Long label ", 20), Description: strings.Repeat("Long description ", 20), Detail: []string{strings.Repeat("Long detail ", 20)}}}}})
+			picker.screen = detailScreen
+		}},
+		{name: "long-recovery", size: responsive.Size{Columns: 39, Rows: 9}, set: func(picker *Picker) { picker.options.Title = strings.Repeat("Long title ", 20) }},
+		{name: "empty", size: responsive.Size{Columns: 80, Rows: 19}, set: func(picker *Picker) {
+			_ = picker.applyPage(loadResult{page: Page{}})
+			picker.loaded = true
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			picker := newPickerForTest(t)
+			picker.layout = responsive.Resolve(test.size)
+			test.set(picker)
+			frame, err := picker.Render(shell.RenderContext{Layout: picker.layout, Theme: palette})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := view.PNG(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := filepath.Join("testdata", "approved", test.name+".png")
+			if os.Getenv("HERDR_UPDATE_GOLDENS") == "1" {
+				if err := os.MkdirAll(filepath.Dir(fixture), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fixture, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				artifactRoot := filepath.Join("..", "..", ".artifacts", "test-failures")
+				if err := os.MkdirAll(artifactRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				artifactDir, err := os.MkdirTemp(artifactRoot, "picker-"+test.name+"-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual := filepath.Join(artifactDir, "actual.png")
+				if err := os.WriteFile(actual, got, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Fatalf("approved frame changed; compare expected %s with actual %s\nvisible frame:\n%s", fixture, actual, view.ANSI(frame))
+			}
+		})
+	}
+}
+
+func TestPickerDetailBasicKeysAndEmptySemanticState(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.options.Activate = func(context.Context, Item) error { return nil }
+	picker.layout = responsive.Resolve(responsive.Size{Columns: 48, Rows: 18})
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}}})
+	picker.screen = detailScreen
+	for _, key := range []string{"a", "o"} {
+		picker.pendingActivation = false
+		if effects := picker.text(shell.EventContext{}, key); len(effects) != 0 || !picker.hasError {
+			t.Fatalf("detail key %q did not attempt activation without a shell: effects=%v error=%t", key, effects, picker.hasError)
+		}
+	}
+	picker.hasError = false
+	if effects := picker.text(shell.EventContext{}, "?"); len(effects) != 0 || picker.screen != helpScreen || picker.returnScreen != detailScreen {
+		t.Fatalf("detail help transition = effects=%v screen=%d return=%d", effects, picker.screen, picker.returnScreen)
+	}
+	picker.screen = rootScreen
+	picker.loaded, picker.pages = true, []loadedPage{{page: Page{}}}
+	state := picker.DiagnosticState()
+	if state.State.String() != "empty" || state.ItemCount != 0 {
+		t.Fatalf("empty semantic state = %+v", state)
+	}
+}
+
+func TestPickerHelpStatusAndCursorPresentation(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.layout = responsive.Resolve(responsive.Size{Columns: 80, Rows: 18})
+	picker.query.Set("A界")
+	picker.query.MoveLeft()
+	picker.editing = true
+	if got := picker.queryWithCursor(); got != "A▏界" {
+		t.Fatalf("query cursor presentation = %q", got)
+	}
+
+	statusTests := []struct {
+		name  string
+		apply func()
+		want  string
+	}{
+		{name: "ready", apply: func() {}, want: "Ready"},
+		{name: "loading", apply: func() { picker.pendingLoad = true }, want: "Loading…"},
+		{name: "activating wins", apply: func() { picker.pendingActivation = true }, want: "Working · activating"},
+		{name: "error", apply: func() { picker.pendingActivation, picker.pendingLoad, picker.hasError = false, false, true }, want: "! Recoverable error"},
+		{name: "activated", apply: func() { picker.hasError, picker.activated = false, true }, want: "OK Activated"},
+	}
+	for _, test := range statusTests {
+		test.apply()
+		if got := picker.status(); got != test.want {
+			t.Fatalf("%s status = %q, want %q", test.name, got, test.want)
+		}
+	}
+
+	picker.screen, picker.returnScreen = helpScreen, rootScreen
+	palette, _ := theme.Builtin("terminal")
+	frame, err := picker.Render(shell.RenderContext{Layout: picker.layout, Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := stripANSI(view.ANSI(frame))
+	if !strings.Contains(plain, "PICKER HELP") || !strings.Contains(plain, "Home/End first/last") || !strings.Contains(plain, "q/Ctrl-C quit") || strings.Contains(plain, "Search:") {
+		t.Fatalf("help frame fingerprint:\n%s", plain)
+	}
+	state := picker.DiagnosticState()
+	if state.Screen.String() != "picker.help" || state.Focus.String() != "help" || state.State.String() != "activated" {
+		t.Fatalf("help diagnostic state = %+v", state)
 	}
 }
 
@@ -216,6 +527,156 @@ func TestPickerActivationCompletionUsesNewestGeneration(t *testing.T) {
 	picker.result(shell.ResultEvent{Key: picker.activationKey, Generation: 2, Result: shell.WorkResult{Value: activationResult{}, Code: diagnostics.OutcomeApplied}})
 	if picker.pendingActivation || picker.hasError || !picker.activated {
 		t.Fatal("latest activation completion was not applied")
+	}
+}
+
+func TestPickerCompletionErrorsAreRecoverableAndGenerationScoped(t *testing.T) {
+	picker := newPickerForTest(t)
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "kept", Label: "Kept"}}}})
+	picker.loadGeneration = 3
+
+	picker.pendingLoad = true
+	picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 3, Result: shell.WorkResult{Err: errors.New("provider failed"), Code: diagnostics.OutcomeFailed}})
+	if picker.pendingLoad || !picker.hasError || picker.items()[0].Key != "kept" {
+		t.Fatalf("load error state pending=%t error=%t items=%v", picker.pendingLoad, picker.hasError, picker.items())
+	}
+
+	picker.pendingLoad, picker.hasError = true, false
+	picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 3, Result: shell.WorkResult{Value: "wrong result type", Code: diagnostics.OutcomeApplied}})
+	if picker.pendingLoad || !picker.hasError || picker.items()[0].Key != "kept" {
+		t.Fatalf("invalid result state pending=%t error=%t items=%v", picker.pendingLoad, picker.hasError, picker.items())
+	}
+
+	picker.pendingLoad, picker.hasError = true, false
+	picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 3, Result: shell.WorkResult{Value: loadResult{page: Page{Items: []Item{{Label: "missing key"}}}}, Code: diagnostics.OutcomeApplied}})
+	if picker.pendingLoad || !picker.hasError || picker.items()[0].Key != "kept" {
+		t.Fatalf("invalid page state pending=%t error=%t items=%v", picker.pendingLoad, picker.hasError, picker.items())
+	}
+
+	picker.activationGeneration = 4
+	picker.pendingActivation, picker.hasError, picker.activated = true, false, true
+	picker.result(shell.ResultEvent{Key: picker.activationKey, Generation: 4, Result: shell.WorkResult{Err: errors.New("activation failed"), Code: diagnostics.OutcomeFailed}})
+	if picker.pendingActivation || !picker.hasError || picker.activated {
+		t.Fatalf("activation error state pending=%t error=%t activated=%t", picker.pendingActivation, picker.hasError, picker.activated)
+	}
+
+	unknown, _ := shell.NewRequestKey("interaction.picker.unknown")
+	before := *picker
+	picker.result(shell.ResultEvent{Key: unknown, Generation: 99, Result: shell.WorkResult{Code: diagnostics.OutcomeApplied}})
+	if picker.pendingLoad != before.pendingLoad || picker.pendingActivation != before.pendingActivation || picker.hasError != before.hasError || picker.activated != before.activated {
+		t.Fatal("unrelated completion changed picker status")
+	}
+}
+
+func TestPickerActivationBoundaries(t *testing.T) {
+	picker := newPickerForTest(t)
+	if effects := picker.activate(shell.EventContext{}); len(effects) != 0 || picker.hasError {
+		t.Fatalf("empty activation produced effects/error: %d/%t", len(effects), picker.hasError)
+	}
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "disabled", Disabled: true}}}})
+	if effects := picker.activate(shell.EventContext{}); len(effects) != 0 || picker.hasError {
+		t.Fatalf("disabled activation produced effects/error: %d/%t", len(effects), picker.hasError)
+	}
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "enabled", Label: "Enabled"}}}})
+	if effects := picker.activate(shell.EventContext{}); len(effects) != 0 || picker.hasError {
+		t.Fatalf("nil activator produced effects/error: %d/%t", len(effects), picker.hasError)
+	}
+	picker.options.Activate = func(context.Context, Item) error { return nil }
+	picker.pendingActivation = true
+	if effects := picker.activate(shell.EventContext{}); len(effects) != 0 || picker.hasError {
+		t.Fatalf("pending activation produced effects/error: %d/%t", len(effects), picker.hasError)
+	}
+	picker.pendingActivation = false
+	if effects := picker.activate(shell.EventContext{}); len(effects) != 0 || !picker.hasError || picker.pendingActivation {
+		t.Fatalf("start failure state effects=%d error=%t pending=%t", len(effects), picker.hasError, picker.pendingActivation)
+	}
+}
+
+func TestPickerTextAndKeyStateModel(t *testing.T) {
+	picker := newPickerForTest(t)
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}, {Key: "off", Label: "Off", Disabled: true}, {Key: "two", Label: "Two"}}}})
+
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "/"})
+	if !picker.editing {
+		t.Fatal("slash did not focus search")
+	}
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "界"})
+	if picker.query.Text() != "界" || !picker.hasError {
+		t.Fatalf("text edit/start failure = query %q error=%t", picker.query.Text(), picker.hasError)
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyLeft})
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyRight})
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyHome})
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEnd})
+	if picker.query.Cursor() != 1 {
+		t.Fatalf("editing cursor = %d", picker.query.Cursor())
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyBackspace})
+	if picker.query.Text() != "" {
+		t.Fatalf("backspace query = %q", picker.query.Text())
+	}
+	picker.query.Set("ab")
+	picker.query.MoveHome()
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDelete})
+	if picker.query.Text() != "b" {
+		t.Fatalf("delete query = %q", picker.query.Text())
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyTab})
+	if picker.editing {
+		t.Fatal("tab did not leave search")
+	}
+
+	picker.query.Set("")
+	picker.hasError = false
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "j"})
+	if picker.selectedKey != "two" {
+		t.Fatalf("j selection = %q", picker.selectedKey)
+	}
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "k"})
+	if picker.selectedKey != "one" {
+		t.Fatalf("k selection = %q", picker.selectedKey)
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEnd})
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyHome})
+	if picker.selectedKey != "one" {
+		t.Fatalf("boundary key selection = %q", picker.selectedKey)
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyTab})
+	if !picker.editing {
+		t.Fatal("tab did not enter search")
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEscape})
+	if picker.editing {
+		t.Fatal("escape did not leave search")
+	}
+
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "?"})
+	if picker.screen != helpScreen || picker.returnScreen != rootScreen {
+		t.Fatalf("help transition = screen %d return %d", picker.screen, picker.returnScreen)
+	}
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "?"})
+	if picker.screen != rootScreen {
+		t.Fatalf("question mark did not close help: %d", picker.screen)
+	}
+	picker.screen, picker.returnScreen = helpScreen, detailScreen
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEnter})
+	if picker.screen != detailScreen {
+		t.Fatalf("enter did not return from help: %d", picker.screen)
+	}
+	picker.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyBackspace})
+	if picker.screen != rootScreen {
+		t.Fatalf("backspace did not leave detail: %d", picker.screen)
+	}
+
+	for _, event := range []shell.Event{shell.TextEvent{Text: "q"}, shell.KeyEvent{Code: shell.KeyEscape}, shell.KeyEvent{Code: shell.KeyBackspace}, shell.KeyEvent{Code: shell.KeyCtrlC}} {
+		picker.screen = rootScreen
+		if effects := picker.Update(shell.EventContext{}, event); len(effects) != 1 {
+			t.Fatalf("quit event %#v produced %d effects", event, len(effects))
+		}
+	}
+	picker.screen, picker.returnScreen = helpScreen, rootScreen
+	if effects := picker.Update(shell.EventContext{}, shell.TextEvent{Text: "q"}); len(effects) != 1 {
+		t.Fatalf("help q produced %d effects", len(effects))
 	}
 }
 

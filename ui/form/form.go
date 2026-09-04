@@ -132,7 +132,7 @@ func cloneValues(values Values) Values {
 func (model *Model) Update(events shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
 	case shell.ResizeEvent:
-		if event.Generation < model.resizeGeneration {
+		if event.Generation <= model.resizeGeneration {
 			return nil
 		}
 		model.layout, model.resizeGeneration = event.Layout, event.Generation

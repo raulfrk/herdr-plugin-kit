@@ -1,6 +1,7 @@
 package interaction
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -45,4 +46,46 @@ func TestPropertyMatchPositionsReconstructFoldedQuery(t *testing.T) {
 			t.Fatalf("positions reconstructed %q, want %q", rebuilt, strings.ToLower(query))
 		}
 	})
+}
+
+func TestMatchScoringRewardsSemanticBoundariesAndAdjacency(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		positions []int
+		score     int
+	}{
+		{name: "exact adjacent", text: "ab", positions: []int{0, 1}, score: 1132},
+		{name: "word boundary adjacent", text: "x-abz", positions: []int{2, 3}, score: 1021},
+		{name: "separate boundaries", text: "a_b", positions: []int{0, 2}, score: 1023},
+		{name: "internal letters", text: "zab", positions: []int{1, 2}, score: 1015},
+	}
+	for _, test := range tests {
+		match, ok := Match("ab", test.text)
+		if !ok || !slices.Equal(match.Positions, test.positions) || match.Score != test.score {
+			t.Fatalf("%s: Match(ab,%q)=(%+v,%t), want positions=%v score=%d", test.name, test.text, match, ok, test.positions, test.score)
+		}
+	}
+
+	ranked := Rank("ab", []Candidate{{Key: "internal", Text: "zab"}, {Key: "adjacent", Text: "x-abz"}, {Key: "boundaries", Text: "a_b"}, {Key: "exact", Text: "ab"}})
+	wantKeys := []string{"exact", "boundaries", "adjacent", "internal"}
+	gotKeys := make([]string, len(ranked))
+	for index, match := range ranked {
+		gotKeys[index] = match.Candidate.Key
+	}
+	if !slices.Equal(gotKeys, wantKeys) {
+		t.Fatalf("semantic rank order = %v, want %v", gotKeys, wantKeys)
+	}
+}
+
+func TestMatchRejectsMissingOrOutOfOrderSubsequence(t *testing.T) {
+	for _, text := range []string{"", "a", "ba", "ac"} {
+		if match, ok := Match("ab", text); ok {
+			t.Fatalf("Match(ab,%q) unexpectedly matched at %v", text, match.Positions)
+		}
+	}
+	match, ok := Match("", "anything")
+	if !ok || len(match.Positions) != 0 || match.Score != 0 {
+		t.Fatalf("empty query result = (%+v,%t)", match, ok)
+	}
 }
