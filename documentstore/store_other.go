@@ -14,3 +14,6 @@ func (*Store) Read(context.Context, string) (Document, error) {
 func (*Store) Write(context.Context, string, []byte, Revision) (Revision, error) {
 	return Revision{}, ErrUnsupported
 }
+func (*Store) WritePrivate(context.Context, string, []byte, Revision) (Revision, error) {
+	return Revision{}, ErrUnsupported
+}

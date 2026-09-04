@@ -137,6 +137,8 @@ func testID(t *testing.T, value string) diagnostics.ID {
 
 func TestResizeLatestGenerationSettlesAndPreservesExactDimensions(t *testing.T) {
 	model, surface, sink := testModel(t)
+	probe := &probeSurface{testSurface: surface}
+	model.surface = probe
 	for _, size := range []tea.WindowSizeMsg{{Width: 70, Height: 30}, {Width: 70, Height: 10}, {Width: 70, Height: 30}} {
 		model.Update(size)
 	}
@@ -146,13 +148,24 @@ func TestResizeLatestGenerationSettlesAndPreservesExactDimensions(t *testing.T) 
 	if surface.layout.Render != (responsive.Size{Columns: 70, Rows: 30}) {
 		t.Fatalf("surface layout = %#v", surface.layout)
 	}
+	if len(probe.contexts) != 3 || probe.contexts[2].Layout.Reported != (responsive.Size{Columns: 70, Rows: 30}) ||
+		probe.contexts[2].Layout.Render != (responsive.Size{Columns: 70, Rows: 30}) {
+		t.Fatalf("burst render contexts = %#v", probe.contexts)
+	}
 	model.Update(settleMessage{generation: 2})
 	if model.settled {
 		t.Fatal("stale settle changed state")
 	}
+	if len(probe.contexts) != 3 {
+		t.Fatalf("stale settle rendered %d frames, want 3", len(probe.contexts))
+	}
 	model.Update(settleMessage{generation: 3})
 	if !model.settled {
 		t.Fatal("current settle did not change state")
+	}
+	if len(probe.contexts) != 4 || !probe.contexts[3].Settled ||
+		probe.contexts[3].Layout.Reported != (responsive.Size{Columns: 70, Rows: 30}) {
+		t.Fatalf("final settled render = %#v", probe.contexts)
 	}
 	if len(sink.snapshot()) == 0 {
 		t.Fatal("resize produced no diagnostics")
@@ -421,7 +434,7 @@ func TestRequestEffectsIncrementGenerationAndCorrelation(t *testing.T) {
 	if first.generation != 1 || second.generation != 2 {
 		t.Fatalf("request generations = %d, %d", first.generation, second.generation)
 	}
-	if first.correlation.IsZero() || second.correlation.IsZero() || first.correlation == second.correlation ||
+	if first.correlation.String() != "c-1" || second.correlation.String() != "c-2" ||
 		second.previousCorrelation != first.correlation {
 		t.Fatalf("request correlations = %q, %q previous %q", first.correlation, second.correlation, second.previousCorrelation)
 	}
@@ -753,6 +766,8 @@ func TestRecoveryFrameClampsAndFooterRows(t *testing.T) {
 	}{
 		{name: "negative width", render: responsive.Size{Columns: -1, Rows: 2}, wantWidth: 1, wantHeight: 2},
 		{name: "negative height", render: responsive.Size{Columns: 2, Rows: -1}, wantWidth: 2, wantHeight: 1},
+		{name: "zero width", render: responsive.Size{Columns: 0, Rows: 2}, wantWidth: 1, wantHeight: 2},
+		{name: "zero height", render: responsive.Size{Columns: 2, Rows: 0}, wantWidth: 2, wantHeight: 1},
 		{name: "unit dimensions", render: responsive.Size{Columns: 1, Rows: 1}, wantWidth: 1, wantHeight: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {

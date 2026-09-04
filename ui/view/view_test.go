@@ -260,6 +260,57 @@ func TestPNGCellLayoutAndUnderlineBoundaries(t *testing.T) {
 	}
 }
 
+func TestPNGOffOriginGlyphAndUnderlineStayInsideTheirCell(t *testing.T) {
+	render := func(style view.Style) image.Image {
+		frame, _ := view.NewFrame(3, 3)
+		frame.PutText(1, 1, "A", style)
+		encoded, err := view.PNG(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := png.Decode(bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+
+	foreground := color.RGBA{R: 255, A: 255}
+	regular := render(view.Style{Foreground: "#ff0000"})
+	bold := render(view.Style{Foreground: "#ff0000", Bold: true, Underline: true})
+	regularPixels, boldGlyphPixels := 0, 0
+	for y := 0; y < 3*view.PNGCellHeight; y++ {
+		for x := 0; x < 3*view.PNGCellWidth; x++ {
+			pixel := color.RGBAModel.Convert(bold.At(x, y)).(color.RGBA)
+			if pixel.A == 0 {
+				continue
+			}
+			if x < view.PNGCellWidth || x >= 2*view.PNGCellWidth || y < view.PNGCellHeight || y >= 2*view.PNGCellHeight {
+				t.Fatalf("foreground escaped cell at (%d,%d)", x, y)
+			}
+			if y < 2*view.PNGCellHeight-2 {
+				boldGlyphPixels++
+			}
+		}
+	}
+	for y := view.PNGCellHeight; y < 2*view.PNGCellHeight-2; y++ {
+		for x := view.PNGCellWidth; x < 2*view.PNGCellWidth; x++ {
+			if color.RGBAModel.Convert(regular.At(x, y)).(color.RGBA).A != 0 {
+				regularPixels++
+			}
+		}
+	}
+	if boldGlyphPixels <= regularPixels {
+		t.Fatalf("bold off-origin glyph pixels = %d, regular = %d", boldGlyphPixels, regularPixels)
+	}
+	underlineY := 2*view.PNGCellHeight - 2
+	for x := view.PNGCellWidth; x < 2*view.PNGCellWidth; x++ {
+		if got := color.RGBAModel.Convert(bold.At(x, underlineY)).(color.RGBA); got != foreground {
+			t.Fatalf("underline pixel (%d,%d) = %v, want %v", x, underlineY, got, foreground)
+		}
+	}
+}
+
 func TestFrameRejectsOverflowAndClipsExtremeRectangles(t *testing.T) {
 	for _, dimensions := range [][2]int{{-1, 0}, {0, -1}, {-1, -1}} {
 		if _, err := view.NewFrame(dimensions[0], dimensions[1]); err == nil {

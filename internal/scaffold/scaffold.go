@@ -341,7 +341,9 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 	readme := "# " + options.Name + "\n\n" + options.Description + "\n\n" +
 		"Generated with Herdr Plugin Kit v0.1.0.\n\n" +
 		"Build with `go build -o ./plugin ./cmd/" + options.ID + "`, then link this directory with Herdr. " +
+		"The generated starter is a deterministic searchable plugin: it demonstrates provider-owned fuzzy ranking, opaque cursor paging, Unicode, stable ties, disabled results, and observable activation. " +
 		"The main and diagnostics views are responsive from 40x10 through 500x200; press d to switch views, or Alt+D while editing search text. " +
+		"The Debug UI registers semantic previews and exports a bounded owner-only `debug-report.json`; activation writes an owner-only `last-activation.json` receipt under `HERDR_PLUGIN_STATE_DIR`. " +
 		"Copy `config.example.toml` to `HERDR_PLUGIN_CONFIG_DIR/config.toml` for local configuration.\n"
 	files := map[string][]byte{
 		"herdr-plugin.toml":   herdrData,
@@ -489,7 +491,7 @@ func validateOpened(rootFS *os.Root) error {
 		}
 	}
 	for _, required := range []string{
-		KitModule + "/config", KitModule + "/diagnostics", KitModule + "/runtime/interop",
+		KitModule + "/config", KitModule + "/diagnostics", KitModule + "/documentstore", KitModule + "/runtime/interop",
 		KitModule + "/ui/debugui", KitModule + "/ui/interaction", KitModule + "/ui/shell", KitModule + "/ui/theme",
 	} {
 		if !imports[required] {

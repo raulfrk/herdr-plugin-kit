@@ -34,6 +34,10 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 	if size.Rows < 2 {
 		return frame, nil
 	}
+	if surface.screen == screenHelp {
+		putLines(frame, 1, 1, size.Columns-2, size.Rows-1, helpLines(), base)
+		return frame, nil
+	}
 	status := surface.status(context)
 	frame.PutText(1, 1, fit(status, size.Columns-2), muted)
 	bottom := size.Rows - 1
@@ -108,6 +112,7 @@ func (surface *Surface) healthLines() []string {
 func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, top, height int, gallery, split bool) {
 	events := surface.page.Events
 	indices := make([]int, len(events))
+	omitted := 0
 	for index := range indices {
 		indices[index] = index
 	}
@@ -115,16 +120,27 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 		filtered := make([]diagnostics.DebugEvent, 0, len(events))
 		filteredIndices := make([]int, 0, len(events))
 		for index, event := range events {
-			if event.Visual != nil && surface.options.Previews != nil {
-				if _, ok := surface.options.Previews.Entry(event.Sequence, *event.Visual); !ok {
-					continue
-				}
-				filtered = append(filtered, event)
-				filteredIndices = append(filteredIndices, index)
+			if event.Visual == nil {
+				continue
 			}
+			if surface.options.Previews == nil {
+				omitted++
+				continue
+			}
+			if _, ok := surface.options.Previews.Entry(event.Sequence, *event.Visual); !ok {
+				omitted++
+				continue
+			}
+			filtered = append(filtered, event)
+			filteredIndices = append(filteredIndices, index)
 		}
 		events = filtered
 		indices = filteredIndices
+		if omitted > 0 && height > 0 {
+			frame.PutText(1, top, fit(fmt.Sprintf("! %d semantic previews omitted", omitted), frame.Width()-2), view.Style{Foreground: palette.Yellow, Background: palette.Background})
+			top++
+			height--
+		}
 	}
 	if len(events) == 0 {
 		frame.PutText(1, top+1, "No matching safe events · 0 clear filters", view.Style{Foreground: palette.Text, Background: palette.Background})
@@ -201,11 +217,15 @@ func (surface *Surface) hudLines(context shell.RenderContext) []string {
 
 func helpLines() []string {
 	return []string{
-		"DEBUG HELP", "h health · t timeline · g semantic gallery · r geometry HUD",
-		"s or Left/Right select current-recorder session", "Up/Down/Home/End select · Enter drill in",
-		"PageUp/PageDown page · Backspace/Escape back", "l level · k kind · 0 clear all filters",
-		"/ edit event-code filter · Enter apply · Escape cancel", "1 component · 2 action · 3 event code · 4 or c correlation",
-		"e export sanitized bounded report · q/Ctrl-C quit",
+		"All controls",
+		"h health · t timeline · g gallery",
+		"r HUD · s/Left/Right session · ? back",
+		"Up/Down/Home/End · Enter detail",
+		"PgUp/PgDn page · Back/Esc back",
+		"l level · k kind · 0 clear filters",
+		"/ code · Enter apply · Esc cancel",
+		"1 comp · 2 action · 3 code · 4/c corr",
+		"e export · q/Ctrl-C quit",
 	}
 }
 

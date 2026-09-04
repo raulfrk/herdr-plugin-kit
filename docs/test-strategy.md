@@ -139,6 +139,28 @@ all shell correctness and concurrency tests.
 - Diagnostics: contextual filename/contract errors and compiler output; no
   runtime configuration, state contents, query text, or terminal content.
 
+## HYP-SCAFFOLD-03 — The generated starter proves the plugin workflow
+
+- Claim: the generated plugin ranks its complete in-memory dataset before
+  paging, preserves stable ties, accepts Unicode input, keeps cursors bound to
+  one query, prevents disabled activation, writes an owner-only activation
+  receipt, and registers a safe preview before debug export.
+- Fault model: picker-side reranking, raw offsets, cross-query cursors, hidden
+  result caps, stale completion, disabled activation, missing provenance, or an
+  unbounded/world-readable report.
+- Setup or generator: the fixed twelve-item generated dataset, four-item pages,
+  shell-driven query bursts, cursor substitution, semantic events, and temporary
+  plugin state directories.
+- Independent oracle: exact key order across all pages, final provider-call
+  query, cursor rejection, file mode and decoded receipt checks, and
+  `PreviewStore.Entry` using the recorder's exact newest sequence/state.
+- Falsified when: an item is lost or reordered, more than one burst query runs,
+  a foreign cursor commits, a disabled row activates, receipt/export mode is
+  not `0600`, or the latest semantic state has no registered preview.
+- Diagnostics: item keys, page counts, request generations, semantic IDs, file
+  modes, and temporary test roots only; no query/result body or path is
+  retained in runtime diagnostics.
+
 ## Toolchain feasibility record
 
 On 2026-09-02 the disposable gate ran with Go 1.27.0, Rapid 1.3.0, and

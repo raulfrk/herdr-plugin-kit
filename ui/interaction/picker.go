@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
 	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
@@ -43,6 +44,8 @@ type PickerOptions struct {
 	Activate Activator
 }
 
+const queryDebounce = 80 * time.Millisecond
+
 type pickerScreen uint8
 
 const (
@@ -57,9 +60,11 @@ type loadedPage struct {
 }
 
 type loadResult struct {
-	cursor Cursor
-	page   Page
-	append bool
+	cursor   Cursor
+	page     Page
+	append   bool
+	query    string
+	revision uint64
 }
 
 type activationResult struct{}
@@ -82,12 +87,15 @@ type Picker struct {
 	loaded               bool
 	pendingLoad          bool
 	pendingActivation    bool
+	queryDirty           bool
+	queryRevision        uint64
 	loadGeneration       uint64
 	activationGeneration uint64
 	hasError             bool
 	activated            bool
 	loadKey              shell.RequestKey
 	activationKey        shell.RequestKey
+	queryDebounceCode    shell.EventCode
 }
 
 func NewPicker(options PickerOptions) (*Picker, error) {
@@ -99,11 +107,16 @@ func NewPicker(options PickerOptions) (*Picker, error) {
 	}
 	loadKey, _ := shell.NewRequestKey("interaction.picker.load")
 	activationKey, _ := shell.NewRequestKey("interaction.picker.activate")
-	return &Picker{options: options, loadKey: loadKey, activationKey: activationKey}, nil
+	queryDebounceCode, _ := shell.NewEventCode("interaction.picker.query")
+	return &Picker{options: options, loadKey: loadKey, activationKey: activationKey, queryDebounceCode: queryDebounceCode}, nil
 }
 
 // Editing reports whether plain text is currently routed into the query.
 func (picker *Picker) Editing() bool { return picker.editing }
+
+// Selected returns the current enabled item. The false result covers empty
+// pages, invalid selection state, and disabled items.
+func (picker *Picker) Selected() (Item, bool) { return picker.selectedItem() }
 
 func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
@@ -125,6 +138,10 @@ func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event)
 		return picker.key(eventContext, event.Code)
 	case shell.ResultEvent:
 		picker.result(event)
+	case shell.TimerEvent:
+		if event.Code.String() == picker.queryDebounceCode.String() {
+			return picker.startLoad(eventContext, Cursor{}, false)
+		}
 	}
 	return nil
 }
@@ -140,7 +157,7 @@ func (picker *Picker) text(eventContext shell.EventContext, text string) []shell
 	}
 	if picker.editing {
 		picker.query.Insert(text)
-		return picker.startLoad(eventContext, Cursor{}, false)
+		return picker.scheduleQueryLoad(eventContext)
 	}
 	if picker.screen == detailScreen {
 		if text == "a" || text == "o" {
@@ -189,11 +206,11 @@ func (picker *Picker) key(eventContext shell.EventContext, key shell.KeyCode) []
 			picker.editing = false
 		case shell.KeyBackspace:
 			if picker.query.Backspace() {
-				return picker.startLoad(eventContext, Cursor{}, false)
+				return picker.scheduleQueryLoad(eventContext)
 			}
 		case shell.KeyDelete:
 			if picker.query.Delete() {
-				return picker.startLoad(eventContext, Cursor{}, false)
+				return picker.scheduleQueryLoad(eventContext)
 			}
 		case shell.KeyLeft:
 			picker.query.MoveLeft()
@@ -242,23 +259,41 @@ func (picker *Picker) key(eventContext shell.EventContext, key shell.KeyCode) []
 	return nil
 }
 
+func (picker *Picker) scheduleQueryLoad(eventContext shell.EventContext) []shell.Effect {
+	picker.queryRevision++
+	picker.queryDirty = true
+	effect, err := eventContext.After(queryDebounce, picker.queryDebounceCode)
+	if err != nil {
+		picker.queryDirty = false
+		picker.hasError = true
+		return nil
+	}
+	picker.hasError = false
+	return []shell.Effect{effect}
+}
+
 func (picker *Picker) startLoad(eventContext shell.EventContext, cursor Cursor, appendPage bool) []shell.Effect {
 	query := picker.query.Text()
+	revision := picker.queryRevision
 	work := func(ctx context.Context) shell.WorkResult {
 		page, err := picker.options.Load(ctx, query, cursor)
 		if err != nil {
-			return shell.WorkResult{Err: err, Code: diagnostics.OutcomeFailed}
+			return shell.WorkResult{Value: loadResult{query: query, revision: revision}, Err: err, Code: diagnostics.OutcomeFailed}
 		}
-		return shell.WorkResult{Value: loadResult{cursor: cursor, page: page, append: appendPage}, Code: diagnostics.OutcomeApplied}
+		return shell.WorkResult{Value: loadResult{cursor: cursor, page: page, append: appendPage, query: query, revision: revision}, Code: diagnostics.OutcomeApplied}
 	}
 	effect, err := eventContext.Start(picker.loadKey, work)
 	if err != nil {
+		if !appendPage {
+			picker.queryDirty = false
+		}
 		picker.hasError = true
 		return nil
 	}
 	picker.loadGeneration++
 	picker.pendingLoad, picker.hasError, picker.activated = true, false, false
 	if !appendPage {
+		picker.queryDirty = false
 		picker.pages, picker.pageIndex = nil, 0
 	}
 	return []shell.Effect{effect}
@@ -272,11 +307,22 @@ func (picker *Picker) result(event shell.ResultEvent) {
 		}
 		picker.pendingLoad = false
 		if event.Result.Err != nil {
+			result, ok := event.Result.Value.(loadResult)
+			if ok && (result.query != picker.query.Text() || result.revision != picker.queryRevision) {
+				return
+			}
 			picker.hasError = true
 			return
 		}
 		result, ok := event.Result.Value.(loadResult)
-		if !ok || picker.applyPage(result) != nil {
+		if !ok {
+			picker.hasError = true
+			return
+		}
+		if result.query != picker.query.Text() || result.revision != picker.queryRevision {
+			return
+		}
+		if picker.applyPage(result) != nil {
 			picker.hasError = true
 		}
 	case picker.activationKey.String():
@@ -300,7 +346,6 @@ func (picker *Picker) applyPage(result loadResult) error {
 		}
 		seen[item.Key] = struct{}{}
 	}
-	result.page.Items = rankItems(picker.query.Text(), result.page.Items)
 	entry := loadedPage{cursor: result.cursor, page: result.page}
 	if result.append {
 		picker.pages = append(picker.pages, entry)
@@ -312,24 +357,6 @@ func (picker *Picker) applyPage(result loadResult) error {
 	picker.loaded, picker.hasError = true, false
 	picker.restoreSelection()
 	return nil
-}
-
-func rankItems(query string, items []Item) []Item {
-	if query == "" {
-		return append([]Item(nil), items...)
-	}
-	candidates := make([]Candidate, len(items))
-	byKey := make(map[string]Item, len(items))
-	for index, item := range items {
-		candidates[index] = Candidate{Key: item.Key, Text: item.Label + " " + item.Description}
-		byKey[item.Key] = item
-	}
-	matches := Rank(query, candidates)
-	result := make([]Item, 0, len(matches))
-	for _, match := range matches {
-		result = append(result, byKey[match.Candidate.Key])
-	}
-	return result
 }
 
 func (picker *Picker) restoreSelection() {
@@ -397,7 +424,7 @@ func (picker *Picker) previousPage() {
 }
 
 func (picker *Picker) nextPage(eventContext shell.EventContext) []shell.Effect {
-	if picker.pendingLoad || len(picker.pages) == 0 {
+	if picker.queryDirty || picker.pendingLoad || len(picker.pages) == 0 {
 		return nil
 	}
 	if picker.pageIndex+1 < len(picker.pages) {
@@ -413,6 +440,9 @@ func (picker *Picker) nextPage(eventContext shell.EventContext) []shell.Effect {
 }
 
 func (picker *Picker) openOrActivate(eventContext shell.EventContext) []shell.Effect {
+	if picker.queryDirty {
+		return nil
+	}
 	if _, ok := picker.selectedItem(); !ok {
 		return nil
 	}
@@ -424,6 +454,9 @@ func (picker *Picker) openOrActivate(eventContext shell.EventContext) []shell.Ef
 }
 
 func (picker *Picker) activate(eventContext shell.EventContext) []shell.Effect {
+	if picker.queryDirty {
+		return nil
+	}
 	item, ok := picker.selectedItem()
 	if !ok {
 		return nil
@@ -604,6 +637,8 @@ func (picker *Picker) status() string {
 		state = "Working · activating"
 	case picker.pendingLoad:
 		state = "Loading…"
+	case picker.queryDirty:
+		state = "Typing…"
 	case picker.hasError:
 		state = "! Recoverable error"
 	case picker.activated:
@@ -649,6 +684,8 @@ func (picker *Picker) DiagnosticState() diagnostics.VisualState {
 		state = "activating"
 	case picker.pendingLoad:
 		state = "loading"
+	case picker.queryDirty:
+		state = "debouncing"
 	case picker.hasError:
 		state = "error"
 	case picker.activated:
@@ -668,7 +705,7 @@ func (picker *Picker) DiagnosticState() diagnostics.VisualState {
 		Geometry:         diagnostics.Geometry{ReportedColumns: picker.layout.Reported.Columns, ReportedRows: picker.layout.Reported.Rows, RenderColumns: picker.layout.Render.Columns, RenderRows: picker.layout.Render.Rows},
 		ResizeGeneration: picker.resizeGeneration, RequestGeneration: picker.loadGeneration,
 		ItemCount: len(picker.items()), SelectedIndex: max(0, picker.selected),
-		Pending: picker.pendingLoad || picker.pendingActivation, HasError: picker.hasError,
+		Pending: picker.queryDirty || picker.pendingLoad || picker.pendingActivation, HasError: picker.hasError,
 	}
 }
 

@@ -2,18 +2,502 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
+	"github.com/raulfrk/herdr-plugin-kit/documentstore"
+	"github.com/raulfrk/herdr-plugin-kit/ui/debugui"
+	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
+	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
+	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
 )
+
+func TestExampleSearchUsesStableUnicodeRankingAndOpaquePaging(t *testing.T) {
+	var all []interaction.Item
+	cursor := interaction.Cursor{}
+	pages := 0
+	for {
+		page, err := loadExamplePage(context.Background(), "", cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		all = append(all, page.Items...)
+		if page.Next.Empty() {
+			break
+		}
+		if page.Next.Token() == "4" {
+			t.Fatal("cursor exposed a raw offset")
+		}
+		cursor = page.Next
+	}
+	if pages != 3 || len(all) != len(exampleItems) {
+		t.Fatalf("paging = %d pages, %d items", pages, len(all))
+	}
+	shared, err := loadExamplePage(context.Background(), "shared result", interaction.Cursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shared.Items) < 2 || shared.Items[0].Key != "stable-a" || shared.Items[1].Key != "stable-b" {
+		t.Fatalf("stable equal-score order = %#v", shared.Items)
+	}
+	for query, want := range map[string]string{"résumé": "unicode-accent", "cafe": "unicode-combining", "作業": "unicode-wide"} {
+		page, err := loadExamplePage(context.Background(), query, interaction.Cursor{})
+		if err != nil || len(page.Items) == 0 || page.Items[0].Key != want {
+			t.Fatalf("search %q = %#v, %v", query, page.Items, err)
+		}
+	}
+	disabled, err := loadExamplePage(context.Background(), "unavailable", interaction.Cursor{})
+	if err != nil || len(disabled.Items) != 1 || !disabled.Items[0].Disabled {
+		t.Fatalf("disabled result = %#v, %v", disabled.Items, err)
+	}
+	first, _ := loadExamplePage(context.Background(), "recall", interaction.Cursor{})
+	if !first.Next.Empty() {
+		if _, err := loadExamplePage(context.Background(), "session", first.Next); err == nil {
+			t.Fatal("accepted a cursor from another query")
+		}
+	}
+}
+
+func TestExampleActivationAndDebugExportAreOwnerOnlyDocuments(t *testing.T) {
+	directory := t.TempDir()
+	store, err := documentstore.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resources := &resources{documents: store}
+	if err := resources.activate(context.Background(), interaction.Item{Key: "session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.exportDebug(context.Background(), []byte(`{"version":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"last-activation.json", "debug-report.json"} {
+		if err := os.Chmod(filepath.Join(directory, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := resources.activate(context.Background(), interaction.Item{Key: "attention"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.exportDebug(context.Background(), []byte(`{"version":1,"updated":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"last-activation.json", "debug-report.json"} {
+		info, err := os.Stat(filepath.Join(directory, name))
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, %v", name, info, err)
+		}
+	}
+	activation, err := os.ReadFile(filepath.Join(directory, "last-activation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct{ Key, Status string }
+	if err := json.Unmarshal(activation, &result); err != nil || result.Key != "attention" || result.Status != "activated" {
+		t.Fatalf("activation receipt = %#v, %v", result, err)
+	}
+}
+
+func TestPreviewingSinkRegistersTheRecordedSemanticState(t *testing.T) {
+	directory := t.TempDir()
+	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	previews, err := diagnostics.OpenPreviewStore(directory, diagnostics.PreviewLimits{MaxCount: 1, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer previews.Close()
+	resources := &resources{recorder: recorder, previews: previews}
+	plugin, _ := diagnostics.NewID(pluginID)
+	code, _ := diagnostics.NewID("example.preview")
+	stateID, _ := diagnostics.NewID("ready")
+	visual := diagnostics.VisualState{Screen: code, State: stateID, ItemCount: 3}
+	if err := (previewingSink{resources}).RecordSemantic(diagnostics.SemanticEvent{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindInteraction, Plugin: plugin,
+		Code: code, Outcome: diagnostics.OutcomeApplied, Visual: &visual,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 1})
+	if err != nil || len(page.Events) != 1 {
+		t.Fatalf("debug page = %#v, %v", page, err)
+	}
+	if _, ok := previews.Entry(page.Events[0].Sequence, visual); !ok {
+		t.Fatal("latest semantic state has no registered preview")
+	}
+	second := visual
+	second.ItemCount++
+	if err := (previewingSink{resources}).RecordSemantic(diagnostics.SemanticEvent{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindInteraction, Plugin: plugin,
+		Code: code, Outcome: diagnostics.OutcomeApplied, Visual: &second,
+	}); err != nil {
+		t.Fatalf("preview exhaustion stopped semantic diagnostics: %v", err)
+	}
+	page, err = recorder.Debug(diagnostics.DebugQuery{PageSize: 2})
+	if err != nil || len(page.Events) != 2 {
+		t.Fatalf("events after preview exhaustion = %#v, %v", page.Events, err)
+	}
+	if _, ok := previews.Entry(page.Events[0].Sequence, second); ok {
+		t.Fatal("preview store exceeded its count limit")
+	}
+}
+
+func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
+	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	picker, err := interaction.NewPicker(interaction.PickerOptions{Title: pluginName, Load: loadExamplePage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugSurface, err := debugui.New(debugui.Options{Recorder: recorder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := &surfaceRouter{
+		main: picker, debug: debugSurface,
+		mainEditing: picker.Editing, debugEditing: debugSurface.Editing,
+	}
+	initialPalette, _ := theme.Builtin("catppuccin")
+	plugin, _ := diagnostics.NewID(pluginID)
+	input, inputWriter := io.Pipe()
+	program, err := shell.NewProgram(shell.ProgramOptions{
+		PluginID: plugin, Theme: initialPalette, Events: recorder,
+		Input: input, Output: io.Discard,
+	}, router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, runErr := program.Run(); done <- runErr }()
+	program.Send(tea.WindowSizeMsg{Width: 80, Height: 19})
+	waitForVisualState(t, recorder, "ready", 4)
+	program.Kill()
+	if err := <-done; err != nil && !errors.Is(err, tea.ErrProgramKilled) {
+		t.Fatal(err)
+	}
+	_ = inputWriter.Close()
+
+	sizes := []responsive.Size{
+		{Columns: 39, Rows: 9}, {Columns: 40, Rows: 10}, {Columns: 48, Rows: 18},
+		{Columns: 48, Rows: 30}, {Columns: 78, Rows: 10}, {Columns: 78, Rows: 20},
+		{Columns: 80, Rows: 18}, {Columns: 110, Rows: 24}, {Columns: 500, Rows: 200},
+		{Columns: 5000, Rows: 2000},
+	}
+	for _, themeID := range theme.IDs() {
+		palette, err := theme.Builtin(themeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, size := range sizes {
+			generation := router.lastResize.Generation + 1
+			layout := responsive.Resolve(size)
+			router.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: generation})
+			stale := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
+			router.Update(shell.EventContext{}, shell.ResizeEvent{Layout: stale, Generation: generation - 1})
+			if router.lastResize.Generation != generation || router.lastResize.Layout != layout {
+				t.Fatalf("%s %+v retained resize = %+v", themeID, size, router.lastResize)
+			}
+			context := shell.RenderContext{Layout: layout, Theme: palette, ResizeGeneration: generation, Settled: true}
+			mainFrame, err := router.Render(context)
+			if err != nil || mainFrame.Width() != layout.Render.Columns || mainFrame.Height() != layout.Render.Rows {
+				t.Fatalf("%s %+v main frame = %v, %v", themeID, size, mainFrame, err)
+			}
+			if layout.Class != responsive.Recovery {
+				plain := view.ANSI(mainFrame)
+				if !strings.Contains(plain, "Recall the plugin plan") || !strings.Contains(plain, "? help") {
+					t.Fatalf("%s %+v missing loaded row or controls", themeID, size)
+				}
+			}
+			router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+			debugFrame, err := router.Render(context)
+			if err != nil || debugFrame.Width() != layout.Render.Columns || debugFrame.Height() != layout.Render.Rows {
+				t.Fatalf("%s %+v debug frame = %v, %v", themeID, size, debugFrame, err)
+			}
+			if size == (responsive.Size{Columns: 39, Rows: 9}) && layout.Class != responsive.Recovery {
+				t.Fatalf("recovery size resolved to %s", layout.Class)
+			}
+			if size == (responsive.Size{Columns: 5000, Rows: 2000}) && (!layout.Projected || layout.Render != (responsive.Size{Columns: 500, Rows: 200})) {
+				t.Fatalf("oversized projection = %+v", layout)
+			}
+			router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+		}
+	}
+
+	layout := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
+	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: router.lastResize.Generation + 1})
+	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "?"})
+	palette, _ := theme.Builtin("catppuccin")
+	frame, err := picker.Render(shell.RenderContext{Layout: layout, Theme: palette})
+	if err != nil || !strings.Contains(view.ANSI(frame), "PICKER HELP") {
+		t.Fatalf("compact help unavailable: %v", err)
+	}
+}
+
+func TestGeneratedShellSuppressesSameTextQueryBurst(t *testing.T) {
+	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var matchingLoads atomic.Int32
+	loader := func(ctx context.Context, query string, _ interaction.Cursor) (interaction.Page, error) {
+		if query != "a" {
+			return interaction.Page{Items: exampleItems[:4]}, nil
+		}
+		if matchingLoads.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return interaction.Page{}, ctx.Err()
+			}
+			return interaction.Page{Items: []interaction.Item{{Key: "old", Label: "Old result"}}}, nil
+		}
+		return interaction.Page{Items: []interaction.Item{{Key: "new", Label: "Newest result"}}}, nil
+	}
+	picker, err := interaction.NewPicker(interaction.PickerOptions{Title: pluginName, Load: loader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	palette, _ := theme.Builtin("catppuccin")
+	plugin, _ := diagnostics.NewID(pluginID)
+	input, inputWriter := io.Pipe()
+	program, err := shell.NewProgram(shell.ProgramOptions{
+		PluginID: plugin, Theme: palette, Events: recorder, Input: input, Output: io.Discard,
+	}, picker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, runErr := program.Run(); done <- runErr }()
+	defer func() {
+		program.Kill()
+		_ = inputWriter.Close()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, tea.ErrProgramKilled) {
+				t.Error(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("generated query-burst program did not stop")
+		}
+	}()
+
+	program.Send(tea.WindowSizeMsg{Width: 80, Height: 19})
+	waitForVisualState(t, recorder, "ready", 4)
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first matching query did not start")
+	}
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	program.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+	close(release)
+	waitForVisualState(t, recorder, "ready", 1)
+	deadline := time.Now().Add(2 * time.Second)
+	for matchingLoads.Load() != 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	selected, ok := picker.Selected()
+	if matchingLoads.Load() != 2 || !ok || selected.Key != "new" {
+		t.Fatalf("matching loads = %d, selected = %#v, %t", matchingLoads.Load(), selected, ok)
+	}
+	page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range page.Events {
+		if event.Visual != nil && event.Visual.State.String() == "debouncing" && event.Visual.ItemCount == 1 {
+			t.Fatal("stale one-item result was committed during the newer debounce window")
+		}
+	}
+}
+
+func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *testing.T) {
+	stateDirectory := t.TempDir()
+	diagnosticDirectory := filepath.Join(stateDirectory, "diagnostics")
+	if err := os.MkdirAll(diagnosticDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(diagnosticDirectory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previews, err := diagnostics.OpenPreviewStore(stateDirectory, diagnostics.DefaultPreviewLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	documents, err := documentstore.Open(stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := &resources{recorder: recorder, previews: previews, documents: documents}
+	t.Cleanup(func() { _ = errors.Join(documents.Close(), previews.Close(), recorder.Close()) })
+
+	plugin, _ := diagnostics.NewID(pluginID)
+	code, _ := diagnostics.NewID("example.seed")
+	longID, _ := diagnostics.NewID("seed-" + strings.Repeat("a", 100))
+	seedVisual := diagnostics.VisualState{
+		Screen: longID, Focus: longID, Selection: longID, State: longID,
+		Geometry:         diagnostics.Geometry{ReportedColumns: 5000, ReportedRows: 2000, RenderColumns: 500, RenderRows: 200},
+		ResizeGeneration: 100, RequestGeneration: 100, ItemCount: 100, SelectedIndex: 99, Pending: true,
+	}
+	for range 400 {
+		if err := recorder.RecordSemantic(diagnostics.SemanticEvent{
+			Level: diagnostics.LevelInfo, Kind: diagnostics.KindInteraction,
+			Plugin: plugin, Component: longID, Action: longID, Correlation: longID,
+			Code: code, Outcome: diagnostics.OutcomeApplied, Before: longID, After: longID,
+			Geometry: seedVisual.Geometry, Visual: &seedVisual,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	picker, err := interaction.NewPicker(interaction.PickerOptions{Title: pluginName, Load: loadExamplePage, Activate: resources.activate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugSurface, err := debugui.New(debugui.Options{
+		Recorder: recorder, Previews: previews, Exporter: resources.exportDebug, MaxReportBytes: 64 << 10, PageSize: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := &surfaceRouter{
+		main: picker, debug: debugSurface,
+		mainEditing: picker.Editing, debugEditing: debugSurface.Editing,
+	}
+	palette, _ := theme.Builtin("catppuccin")
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() { _ = inputWriter.Close() })
+	program, err := shell.NewProgram(shell.ProgramOptions{
+		PluginID: plugin, Theme: palette, Events: previewingSink{resources}, Input: input, Output: io.Discard,
+	}, router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, runErr := program.Run(); done <- runErr }()
+	t.Cleanup(func() {
+		program.Kill()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("generated program did not stop")
+		}
+	})
+
+	program.Send(tea.WindowSizeMsg{Width: 80, Height: 19})
+	waitForVisualState(t, recorder, "ready", 4)
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("unavailable")})
+	waitForVisualState(t, recorder, "ready", 1)
+	program.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitForAction(t, recorder, "enter")
+	if _, err := os.Stat(filepath.Join(stateDirectory, "last-activation.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled selection produced activation receipt: %v", err)
+	}
+
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	reportPath := filepath.Join(stateDirectory, "debug-report.json")
+	var reportData []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		reportData, err = os.ReadFile(reportPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("Debug UI did not export: %v", err)
+	}
+	if len(reportData) > 64<<10 {
+		t.Fatalf("debug report has %d bytes", len(reportData))
+	}
+	var report diagnostics.DebugReport
+	if err := json.Unmarshal(reportData, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Truncated || len(report.Previews) == 0 {
+		t.Fatalf("bounded report truncated=%t previews=%d", report.Truncated, len(report.Previews))
+	}
+	for _, preview := range report.Previews {
+		if !strings.HasPrefix(preview.RelativePath, "snapshots/") {
+			t.Fatalf("preview path = %q", preview.RelativePath)
+		}
+		if _, err := os.Stat(filepath.Join(stateDirectory, filepath.FromSlash(preview.RelativePath))); err != nil {
+			t.Fatalf("exported preview %q is not under state directory: %v", preview.RelativePath, err)
+		}
+	}
+}
+
+func waitForVisualState(t *testing.T, recorder *diagnostics.Recorder, state string, itemCount int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range page.Events {
+			if event.Visual != nil && event.Visual.State.String() == state && event.Visual.ItemCount == itemCount {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("did not observe state %q with %d items", state, itemCount)
+}
+
+func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range page.Events {
+			if event.Action.String() == action {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("did not observe action %q", action)
+}
 
 type testSurface struct {
 	results int
 	resizes int
 	texts   int
+	timers  int
 }
 
 func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []shell.Effect {
@@ -24,6 +508,8 @@ func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []sh
 		surface.resizes++
 	case shell.TextEvent:
 		surface.texts++
+	case shell.TimerEvent:
+		surface.timers++
 	}
 	return nil
 }
@@ -37,9 +523,13 @@ func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 	router.Update(shell.EventContext{}, shell.ResizeEvent{Generation: 1})
 	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
 	router.Update(shell.EventContext{}, shell.ResultEvent{})
+	router.Update(shell.EventContext{}, shell.TimerEvent{})
 	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
 	if mainSurface.results != 1 || debugSurface.results != 1 {
 		t.Fatalf("result deliveries = main %d, debug %d", mainSurface.results, debugSurface.results)
+	}
+	if mainSurface.timers != 1 || debugSurface.timers != 1 {
+		t.Fatalf("timer deliveries = main %d, debug %d", mainSurface.timers, debugSurface.timers)
 	}
 	if mainSurface.resizes != 2 || debugSurface.resizes != 1 || router.showingDebug {
 		t.Fatalf("resize/switch state = main %d, debug %d, showing debug %t", mainSurface.resizes, debugSurface.resizes, router.showingDebug)

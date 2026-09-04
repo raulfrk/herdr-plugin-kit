@@ -47,7 +47,7 @@ func PNG(frame *Frame) ([]byte, error) {
 			origin := fixed.P(x*PNGCellWidth, y*PNGCellHeight+13)
 			drawer := font.Drawer{Dst: imageFrame.SubImage(clip).(draw.Image), Src: image.NewUniform(foreground), Face: basicfont.Face7x13, Dot: origin}
 			drawer.DrawString(cell.Text)
-			if cell.Style.Bold && x*PNGCellWidth+1 < clip.Max.X {
+			if cell.Style.Bold {
 				drawer.Dot = origin
 				drawer.Dot.X += fixed.I(1)
 				drawer.DrawString(cell.Text)

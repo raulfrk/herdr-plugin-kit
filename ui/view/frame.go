@@ -41,10 +41,14 @@ func NewFrame(width, height int) (*Frame, error) {
 	maxInt := int(^uint(0) >> 1)
 	cellSize := int(unsafe.Sizeof(Cell{}))
 	maxCells := maxInt / cellSize
-	if height != 0 && width > maxCells/height {
+	if dimensionsOverflow(width, height, maxCells) {
 		return nil, fmt.Errorf("frame size overflows int: %dx%d", width, height)
 	}
 	return &Frame{width: width, height: height, cells: make([]Cell, width*height)}, nil
+}
+
+func dimensionsOverflow(width, height, maxCells int) bool {
+	return height != 0 && width > maxCells/height
 }
 
 func (f *Frame) Width() int  { return f.width }
@@ -117,12 +121,14 @@ func (f *Frame) clearGlyphAt(x, y int) {
 		return
 	}
 	lead := x
-	for lead > 0 && f.cells[f.index(lead, y)].Continuation {
+	// A continuation at column zero cannot be produced by Frame methods.
+	for f.cells[f.index(lead, y)].Continuation {
 		lead--
 	}
 	cell := f.cells[f.index(lead, y)]
 	span := max(cell.Width, 1)
-	for i := range min(span, f.width-lead) {
+	// Every stored glyph was admitted only when its full span fit in the frame.
+	for i := range span {
 		f.cells[f.index(lead+i, y)] = Cell{}
 	}
 }

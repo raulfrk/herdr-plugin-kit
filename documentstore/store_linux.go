@@ -104,6 +104,16 @@ func (s *Store) Read(ctx context.Context, name string) (Document, error) {
 // A zero expected revision requires name not to exist. The returned revision
 // is non-zero after rename, including when the following directory fsync fails.
 func (s *Store) Write(ctx context.Context, name string, data []byte, expected Revision) (result Revision, resultErr error) {
+	return s.write(ctx, name, data, expected, false)
+}
+
+// WritePrivate has the same checked-write semantics as Write and always
+// publishes the resulting document with owner-only permissions.
+func (s *Store) WritePrivate(ctx context.Context, name string, data []byte, expected Revision) (result Revision, resultErr error) {
+	return s.write(ctx, name, data, expected, true)
+}
+
+func (s *Store) write(ctx context.Context, name string, data []byte, expected Revision, private bool) (result Revision, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return Revision{}, err
 	}
@@ -152,7 +162,7 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 	if err := writeAll(tempFD, data, s.hooks.write); err != nil {
 		return Revision{}, fmt.Errorf("write temporary document: %w", err)
 	}
-	if metadata != nil {
+	if metadata != nil && !private {
 		if err := unix.Fchown(tempFD, int(metadata.Uid), int(metadata.Gid)); err != nil {
 			return Revision{}, fmt.Errorf("preserve document ownership: %w", err)
 		}

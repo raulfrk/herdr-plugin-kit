@@ -167,14 +167,22 @@ func TestPreviewStoreLimitAndIdempotencyBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, limits := range map[string]PreviewLimits{
-		"zero count":     {MaxCount: 0, MaxBytes: int64(len(preview))},
-		"negative count": {MaxCount: -1, MaxBytes: int64(len(preview))},
-		"zero bytes":     {MaxCount: 1, MaxBytes: 0},
-		"negative bytes": {MaxCount: 1, MaxBytes: -1},
+		"zero count":         {MaxCount: 0, MaxBytes: int64(len(preview))},
+		"negative count":     {MaxCount: -1, MaxBytes: int64(len(preview))},
+		"zero bytes":         {MaxCount: 1, MaxBytes: 0},
+		"negative bytes":     {MaxCount: 1, MaxBytes: -1},
+		"bytes over maximum": {MaxCount: 1, MaxBytes: MaxPreviewBytes + 1},
 	} {
 		if _, err := OpenPreviewStore(filepath.Join(t.TempDir(), name), limits); err == nil {
 			t.Fatalf("%s limits were accepted", name)
 		}
+	}
+	maximum, err := OpenPreviewStore(t.TempDir(), PreviewLimits{MaxCount: 1, MaxBytes: MaxPreviewBytes})
+	if err != nil {
+		t.Fatalf("exact maximum preview byte limit rejected: %v", err)
+	}
+	if err := maximum.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	exact, err := OpenPreviewStore(t.TempDir(), PreviewLimits{MaxCount: 1, MaxBytes: int64(len(preview))})
@@ -625,6 +633,32 @@ func TestAnchoredRegularReadCannotSwitchToPathReplacement(t *testing.T) {
 				t.Fatal("no-follow open accepted replacement symlink")
 			}
 		})
+	}
+}
+
+func TestOpenedRegularReadHonorsExactAndZeroExpectedSizes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preview.png")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := readOpenedRegular(file, 1, 1); err != nil || string(data) != "x" {
+		t.Fatalf("read at exact limits = %q, %v", data, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err = os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := readOpenedRegular(file, 1, 0); err == nil {
+		t.Fatal("nonempty file accepted with zero expected bytes")
 	}
 }
 

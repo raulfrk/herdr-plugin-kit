@@ -191,6 +191,80 @@ func TestPickerStableSelectionAndStaleResults(t *testing.T) {
 	}
 }
 
+func TestPickerRejectsPreviousQueryCompletionDuringDebounce(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.query.Set("old")
+	picker.loadGeneration = 1
+	picker.pendingLoad = true
+	picker.queryRevision = 1
+	picker.query.Set("new")
+	picker.queryDirty = true
+	picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 1, Result: shell.WorkResult{
+		Value: loadResult{query: "old", revision: 1, page: Page{Items: []Item{{Key: "stale", Label: "Stale"}}}},
+		Code:  diagnostics.OutcomeApplied,
+	}})
+	if picker.loaded || len(picker.items()) != 0 || picker.hasError {
+		t.Fatalf("previous-query completion committed: loaded=%t items=%v error=%t", picker.loaded, picker.items(), picker.hasError)
+	}
+	if effects := picker.nextPage(shell.EventContext{}); len(effects) != 0 {
+		t.Fatalf("dirty query paged with %d effects", len(effects))
+	}
+	if effects := picker.openOrActivate(shell.EventContext{}); len(effects) != 0 {
+		t.Fatalf("dirty query activated with %d effects", len(effects))
+	}
+	if picker.status() != "Typing…" {
+		t.Fatalf("dirty query status = %q", picker.status())
+	}
+	state := picker.DiagnosticState()
+	if state.State.String() != "debouncing" || !state.Pending {
+		t.Fatalf("dirty query diagnostics = %+v", state)
+	}
+}
+
+func TestPickerRejectsSameTextFromAnOlderQueryRevision(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.query.Set("a")
+	picker.queryRevision = 1
+	picker.loadGeneration = 1
+	picker.pendingLoad = true
+	picker.query.Set("ab")
+	picker.queryRevision++
+	picker.query.Set("a")
+	picker.queryRevision++
+	picker.queryDirty = true
+	picker.result(shell.ResultEvent{Key: picker.loadKey, Generation: 1, Result: shell.WorkResult{
+		Value: loadResult{query: "a", revision: 1, page: Page{Items: []Item{{Key: "stale", Label: "Stale"}}}},
+		Code:  diagnostics.OutcomeApplied,
+	}})
+	if picker.loaded || len(picker.items()) != 0 || picker.hasError {
+		t.Fatalf("older same-text completion committed: loaded=%t items=%v error=%t", picker.loaded, picker.items(), picker.hasError)
+	}
+}
+
+func TestPickerPreservesProviderOrderAndExposesEnabledSelection(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.query.Set("alpha")
+	items := []Item{
+		{Key: "provider-first", Label: "No textual match"},
+		{Key: "disabled", Label: "Alpha", Disabled: true},
+		{Key: "provider-last", Label: "Alpha exact"},
+	}
+	if err := picker.applyPage(loadResult{page: Page{Items: items}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := picker.items(); len(got) != 3 || got[0].Key != "provider-first" || got[2].Key != "provider-last" {
+		t.Fatalf("provider order changed: %#v", got)
+	}
+	selected, ok := picker.Selected()
+	if !ok || selected.Key != "provider-first" {
+		t.Fatalf("selected item = %#v, %t", selected, ok)
+	}
+	picker.selected = 1
+	if _, ok := picker.Selected(); ok {
+		t.Fatal("disabled item was exposed as selected")
+	}
+}
+
 func TestPickerRejectsInvalidPagesAndSkipsDisabledItems(t *testing.T) {
 	for _, items := range [][]Item{{{Label: "missing key"}}, {{Key: "same"}, {Key: "same"}}} {
 		picker := newPickerForTest(t)
@@ -785,6 +859,54 @@ func TestPickerRunsLoadAndActivationThroughShellEffects(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		program.Kill()
 		t.Fatal("picker program did not quit")
+	}
+}
+
+func TestPickerDebouncesQueryBurstToFinalText(t *testing.T) {
+	requested := make(chan string, 8)
+	picker, err := NewPicker(PickerOptions{
+		Title: "Commands",
+		Load: func(_ context.Context, query string, _ Cursor) (Page, error) {
+			requested <- query
+			return Page{Items: []Item{{Key: "run", Label: "Run"}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface := &signalSurface{picker: picker, loaded: make(chan struct{}, 8), applied: make(chan struct{}, 1)}
+	palette, _ := theme.Builtin("terminal")
+	input, inputWriter := io.Pipe()
+	t.Cleanup(func() { _ = inputWriter.Close() })
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: semanticID("test-picker-debounce"), Theme: palette, Events: discardSemanticSink{}, Input: input, Output: io.Discard}, surface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, runErr := program.Run(); done <- runErr }()
+	t.Cleanup(func() { program.Kill(); <-done })
+
+	program.Send(tea.WindowSizeMsg{Width: 80, Height: 19})
+	if got := <-requested; got != "" {
+		t.Fatalf("initial query = %q", got)
+	}
+	waitSignal(t, surface.loaded, "initial load")
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, value := range []rune{'a', 'b', 'c'} {
+		program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{value}})
+	}
+	select {
+	case got := <-requested:
+		if got != "abc" {
+			t.Fatalf("debounced query = %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("debounced load did not run")
+	}
+	select {
+	case extra := <-requested:
+		t.Fatalf("query burst produced extra load for %q", extra)
+	case <-time.After(2 * queryDebounce):
 	}
 }
 

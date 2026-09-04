@@ -204,6 +204,29 @@ func TestModesAndOwnership(t *testing.T) {
 	}
 }
 
+func TestWritePrivateReplacesPermissiveModeWithOwnerOnlyMode(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "debug-report.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, root)
+	current, err := store.Read(context.Background(), "debug-report.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WritePrivate(context.Background(), "debug-report.json", []byte("private"), current.Revision); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != ownerOnly {
+		t.Fatalf("private document mode = %#o", info.Mode().Perm())
+	}
+}
+
 func TestNewModeIgnoresRestrictiveUmask(t *testing.T) {
 	root := t.TempDir()
 	store := openTestStore(t, root)

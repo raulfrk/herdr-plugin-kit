@@ -61,8 +61,14 @@ func OpenPreviewStore(stateDirectory string, limits PreviewLimits) (*PreviewStor
 	if stateDirectory == "" {
 		return nil, errors.New("preview state directory is empty")
 	}
-	if limits.MaxCount <= 0 || limits.MaxBytes <= 0 || limits.MaxBytes > MaxPreviewBytes {
+	if limits.MaxCount <= 0 {
 		return nil, errors.New("preview limits must be positive")
+	}
+	if limits.MaxBytes <= 0 {
+		return nil, errors.New("preview limits must be positive")
+	}
+	if limits.MaxBytes > MaxPreviewBytes {
+		return nil, errors.New("preview byte limit exceeds maximum")
 	}
 	abs, err := filepath.Abs(stateDirectory)
 	if err != nil {
@@ -114,7 +120,15 @@ func openPreviewRoot(path string) (*os.Root, *os.File, error) {
 		_ = directory.Close()
 		return nil, nil, fmt.Errorf("inspect preview directory: %w", err)
 	}
-	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(opened, current) {
+	if current.Mode()&os.ModeSymlink != 0 {
+		_ = directory.Close()
+		return nil, nil, errors.New("preview directory must be a stable real directory")
+	}
+	if !current.IsDir() {
+		_ = directory.Close()
+		return nil, nil, errors.New("preview directory must be a stable real directory")
+	}
+	if !os.SameFile(opened, current) {
 		_ = directory.Close()
 		return nil, nil, errors.New("preview directory must be a stable real directory")
 	}
@@ -124,7 +138,12 @@ func openPreviewRoot(path string) (*os.Root, *os.File, error) {
 		return nil, nil, fmt.Errorf("open confined preview directory: %w", err)
 	}
 	anchored, err := root.Stat(".")
-	if err != nil || !os.SameFile(opened, anchored) {
+	if err != nil {
+		_ = root.Close()
+		_ = directory.Close()
+		return nil, nil, errors.New("preview directory changed while opening")
+	}
+	if !os.SameFile(opened, anchored) {
 		_ = root.Close()
 		_ = directory.Close()
 		return nil, nil, errors.New("preview directory changed while opening")
@@ -149,7 +168,7 @@ func (store *PreviewStore) Close() error {
 
 func (store *PreviewStore) lockRoot() error {
 	if err := unix.Flock(int(store.rootDir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		if errors.Is(err, unix.EWOULDBLOCK) {
 			return errors.New("preview store is already open")
 		}
 		return fmt.Errorf("lock preview store: %w", err)
@@ -330,7 +349,16 @@ func (store *PreviewStore) loadRegistry() error {
 		return errors.New("preview registry exceeds count limit")
 	}
 	for _, entry := range entries {
-		if entry.Sequence == 0 || entry.Bytes <= 0 || !validSHA256(entry.VisualDigest) || !validSHA256(entry.PNGSHA256) {
+		if entry.Sequence == 0 {
+			return errors.New("preview registry contains an invalid entry")
+		}
+		if entry.Bytes <= 0 {
+			return errors.New("preview registry contains an invalid entry")
+		}
+		if !validSHA256(entry.VisualDigest) {
+			return errors.New("preview registry contains an invalid entry")
+		}
+		if !validSHA256(entry.PNGSHA256) {
 			return errors.New("preview registry contains an invalid entry")
 		}
 		if _, exists := store.entries[entry.Sequence]; exists {
@@ -371,11 +399,11 @@ func readOpenedRegular(file *os.File, maxBytes, expectedBytes int64) ([]byte, er
 	if info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("file permissions are not owner-only")
 	}
-	if info.Size() < 0 || info.Size() > maxBytes {
+	if info.Size() > maxBytes {
 		return nil, errors.New("file size exceeds limit")
 	}
-	if expectedBytes >= 0 && info.Size() != expectedBytes {
-		return nil, errors.New("file size does not match")
+	if err := validateExpectedFileSize(info.Size(), expectedBytes, "file size does not match"); err != nil {
+		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
@@ -384,10 +412,20 @@ func readOpenedRegular(file *os.File, maxBytes, expectedBytes int64) ([]byte, er
 	if int64(len(data)) > maxBytes {
 		return nil, errors.New("file grew beyond limit while reading")
 	}
-	if expectedBytes >= 0 && int64(len(data)) != expectedBytes {
-		return nil, errors.New("file size changed while reading")
+	if err := validateExpectedFileSize(int64(len(data)), expectedBytes, "file size changed while reading"); err != nil {
+		return nil, err
 	}
 	return data, nil
+}
+
+func validateExpectedFileSize(actual, expected int64, mismatch string) error {
+	if expected < 0 {
+		return nil
+	}
+	if actual != expected {
+		return errors.New(mismatch)
+	}
+	return nil
 }
 
 func (store *PreviewStore) writeRegistryLocked() error {

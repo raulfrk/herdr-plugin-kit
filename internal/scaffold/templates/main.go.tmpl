@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/config"
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
+	"github.com/raulfrk/herdr-plugin-kit/documentstore"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
 	"github.com/raulfrk/herdr-plugin-kit/ui/debugui"
@@ -25,6 +29,23 @@ const (
 	pluginID   = {{PLUGIN_ID}}
 	pluginName = {{PLUGIN_NAME}}
 )
+
+const examplePageSize = 4
+
+var exampleItems = []interaction.Item{
+	{Key: "recall-plan", Label: "Recall the plugin plan", Description: "Search prior planning decisions", Detail: []string{"Reference workflow · stable tie A"}},
+	{Key: "recall-code", Label: "Recall Codex notes", Description: "Search agent implementation notes", Detail: []string{"Reference workflow · stable tie B"}},
+	{Key: "attention", Label: "Attention Switcher", Description: "Focus an agent needing input", Detail: []string{"Agent state is provider-owned"}},
+	{Key: "session", Label: "Session Switcher", Description: "Find and reopen a session", Detail: []string{"Supports opening at a directory"}},
+	{Key: "config", Label: "Plugin Configurator", Description: "Edit TOML or YAML safely", Detail: []string{"Revision-checked writes"}},
+	{Key: "actions", Label: "Action Finder", Description: "Fuzzy-find runnable plugin actions", Detail: []string{"Like a command palette"}},
+	{Key: "unicode-accent", Label: "Résumé archive", Description: "Canonical Unicode search example"},
+	{Key: "unicode-combining", Label: "Cafe\u0301 session", Description: "Combining-mark search example"},
+	{Key: "unicode-wide", Label: "作業セッション", Description: "Wide-character layout example"},
+	{Key: "disabled", Label: "Unavailable provider", Description: "Visible but intentionally disabled", Disabled: true},
+	{Key: "stable-a", Label: "Shared result", Description: "Equal-score provider order A"},
+	{Key: "stable-b", Label: "Shared result", Description: "Equal-score provider order B"},
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -59,27 +80,22 @@ func run(args []string) error {
 }
 
 func runUI(debug bool) error {
-	recorder, previews, closeResources, err := openResources()
+	resources, err := openResources()
 	if err != nil {
 		return err
 	}
-	defer closeResources()
-	debugSurface, err := debugui.New(debugui.Options{Recorder: recorder, Previews: previews})
+	defer resources.Close()
+	debugSurface, err := debugui.New(debugui.Options{
+		Recorder: resources.recorder, Previews: resources.previews,
+		Exporter: resources.exportDebug, MaxReportBytes: 64 << 10, PageSize: 100,
+	})
 	if err != nil {
 		return err
 	}
 	mainSurface, err := interaction.NewPicker(interaction.PickerOptions{
-		Title: pluginName,
-		Load: func(_ context.Context, query string, _ interaction.Cursor) (interaction.Page, error) {
-			candidate := interaction.Candidate{Key: "ready", Text: "Plugin ready"}
-			if _, ok := interaction.Match(query, candidate.Text); !ok {
-				return interaction.Page{}, nil
-			}
-			return interaction.Page{Items: []interaction.Item{{
-				Key: candidate.Key, Label: candidate.Text,
-				Description: "Replace this loader with plugin functionality.",
-			}}}, nil
-		},
+		Title:    pluginName,
+		Load:     loadExamplePage,
+		Activate: resources.activate,
 	})
 	if err != nil {
 		return err
@@ -101,12 +117,62 @@ func runUI(debug bool) error {
 	if err != nil {
 		return err
 	}
-	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: recorder}, surface)
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: previewingSink{resources}}, surface)
 	if err != nil {
 		return err
 	}
 	_, err = program.Run()
 	return err
+}
+
+func loadExamplePage(_ context.Context, query string, cursor interaction.Cursor) (interaction.Page, error) {
+	offset, err := cursorOffset(query, cursor)
+	if err != nil {
+		return interaction.Page{}, err
+	}
+	candidates := make([]interaction.Candidate, len(exampleItems))
+	itemsByKey := make(map[string]interaction.Item, len(exampleItems))
+	for index, item := range exampleItems {
+		candidates[index] = interaction.Candidate{Key: item.Key, Text: item.Label + " " + item.Description}
+		itemsByKey[item.Key] = item
+	}
+	matches := interaction.Rank(query, candidates)
+	if offset > len(matches) {
+		return interaction.Page{}, errors.New("cursor is outside the result set")
+	}
+	end := min(offset+examplePageSize, len(matches))
+	page := interaction.Page{Items: make([]interaction.Item, 0, end-offset)}
+	for _, match := range matches[offset:end] {
+		page.Items = append(page.Items, itemsByKey[match.Candidate.Key])
+	}
+	if end < len(matches) {
+		page.Next = interaction.NewCursor(queryCursor(query, end))
+	}
+	return page, nil
+}
+
+func queryCursor(query string, offset int) string {
+	return queryCursorPrefix(query) + strconv.Itoa(offset)
+}
+
+func queryCursorPrefix(query string) string {
+	digest := sha256.Sum256([]byte(query))
+	return fmt.Sprintf("q-%x:", digest[:8])
+}
+
+func cursorOffset(query string, cursor interaction.Cursor) (int, error) {
+	if cursor.Empty() {
+		return 0, nil
+	}
+	value, ok := strings.CutPrefix(cursor.Token(), queryCursorPrefix(query))
+	if !ok {
+		return 0, errors.New("cursor does not belong to this query")
+	}
+	offset, err := strconv.Atoi(value)
+	if err != nil || offset < 0 {
+		return 0, errors.New("cursor offset is invalid")
+	}
+	return offset, nil
 }
 
 // surfaceRouter keeps normal and debug views in one process so both observe
@@ -128,9 +194,12 @@ func (router *surfaceRouter) Update(events shell.EventContext, event shell.Event
 		return nil
 	}
 	if resize, ok := event.(shell.ResizeEvent); ok {
-		router.lastResize = resize
+		if resize.Generation > router.lastResize.Generation {
+			router.lastResize = resize
+		}
 	}
-	if _, ok := event.(shell.ResultEvent); ok {
+	switch event.(type) {
+	case shell.ResultEvent, shell.TimerEvent:
 		mainEffects := router.main.Update(events, event)
 		debugEffects := router.debug.Update(events, event)
 		return append(mainEffects, debugEffects...)
@@ -217,41 +286,100 @@ func loadPalette(directory string) (theme.Palette, error) {
 	return value.Theme.Resolve(false)
 }
 
-func openResources() (*diagnostics.Recorder, *diagnostics.PreviewStore, func(), error) {
+type resources struct {
+	recorder  *diagnostics.Recorder
+	previews  *diagnostics.PreviewStore
+	documents *documentstore.Store
+	owner     *os.File
+}
+
+func openResources() (*resources, error) {
 	if _, err := runtimeDirectory("HERDR_PLUGIN_CONFIG_DIR"); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	stateDirectory, err := runtimeDirectory("HERDR_PLUGIN_STATE_DIR")
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	directory := filepath.Join(stateDirectory, "diagnostics")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	owner, err := os.Open(directory)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if err := syscall.Flock(int(owner.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = owner.Close()
-		return nil, nil, nil, errors.New("plugin UI or debugger is already open")
+		return nil, errors.New("plugin UI or debugger is already open")
 	}
 	recorder, err := diagnostics.Open(diagnostics.DefaultConfig(directory))
 	if err != nil {
 		_ = owner.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
-	previews, err := diagnostics.OpenPreviewStore(directory, diagnostics.DefaultPreviewLimits())
+	previews, err := diagnostics.OpenPreviewStore(stateDirectory, diagnostics.DefaultPreviewLimits())
 	if err != nil {
 		_ = recorder.Close()
 		_ = owner.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
-	closeResources := func() {
+	documents, err := documentstore.Open(stateDirectory)
+	if err != nil {
 		_ = errors.Join(previews.Close(), recorder.Close(), syscall.Flock(int(owner.Fd()), syscall.LOCK_UN), owner.Close())
+		return nil, err
 	}
-	return recorder, previews, closeResources, nil
+	return &resources{recorder: recorder, previews: previews, documents: documents, owner: owner}, nil
+}
+
+func (resources *resources) Close() {
+	_ = errors.Join(resources.documents.Close(), resources.previews.Close(), resources.recorder.Close(), syscall.Flock(int(resources.owner.Fd()), syscall.LOCK_UN), resources.owner.Close())
+}
+
+func (resources *resources) writeDocument(ctx context.Context, name string, data []byte) error {
+	expected := documentstore.Revision{}
+	current, err := resources.documents.Read(ctx, name)
+	if err == nil {
+		expected = current.Revision
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err = resources.documents.WritePrivate(ctx, name, data, expected)
+	return err
+}
+
+func (resources *resources) exportDebug(ctx context.Context, data []byte) error {
+	return resources.writeDocument(ctx, "debug-report.json", data)
+}
+
+func (resources *resources) activate(ctx context.Context, item interaction.Item) error {
+	data, err := json.Marshal(struct {
+		Key    string `json:"key"`
+		Status string `json:"status"`
+	}{Key: item.Key, Status: "activated"})
+	if err != nil {
+		return err
+	}
+	return resources.writeDocument(ctx, "last-activation.json", append(data, '\n'))
+}
+
+type previewingSink struct{ resources *resources }
+
+func (sink previewingSink) RecordSemantic(event diagnostics.SemanticEvent) error {
+	if err := sink.resources.recorder.RecordSemantic(event); err != nil {
+		return err
+	}
+	if event.Visual == nil {
+		return nil
+	}
+	page, err := sink.resources.recorder.Debug(diagnostics.DebugQuery{PageSize: 1})
+	if err != nil || len(page.Events) == 0 {
+		return err
+	}
+	// Preview limits are independent from the event recorder. A missing image is
+	// visible as an omission in the gallery/export and must not stop diagnostics.
+	_, _ = sink.resources.previews.Put(page.Events[0].Sequence, *event.Visual)
+	return nil
 }
 
 func runtimeDirectory(name string) (string, error) {

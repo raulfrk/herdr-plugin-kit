@@ -179,6 +179,24 @@ func TestCompactNavigationDrillInFiltersAndResizeState(t *testing.T) {
 	}
 }
 
+func TestCompactHelpIsCompleteAndUnclipped(t *testing.T) {
+	recorder := uiRecorder(t)
+	surface, err := New(Options{Recorder: recorder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "?"})
+	text := frameText(renderAt(t, surface, responsive.Size{Columns: 40, Rows: 10}, 1))
+	for _, line := range helpLines() {
+		if !strings.Contains(text, line) {
+			t.Fatalf("compact help omitted %q: %q", line, text)
+		}
+	}
+	if strings.Contains(text, "...") {
+		t.Fatalf("compact help was clipped: %q", text)
+	}
+}
+
 func TestRenderedViewsNeverContainRecorderPayloadPathOrError(t *testing.T) {
 	recorder := uiRecorder(t)
 	canary := "CANARY_/private/path_error-detail"
@@ -728,6 +746,10 @@ func TestGalleryNavigationUsesOnlyRegisteredSemanticPreviews(t *testing.T) {
 	surface, _ := New(Options{Recorder: recorder, Previews: previews, PageSize: 10})
 	surface.selected = 0
 	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "g"})
+	frame := renderAt(t, surface, responsive.Size{Columns: 40, Rows: 10}, 1)
+	if !strings.Contains(frameText(frame), "2 semantic previews omitted") {
+		t.Fatalf("gallery omission count is not visible: %q", frameText(frame))
+	}
 	if surface.selected != 1 {
 		t.Fatalf("gallery did not select first registered preview: %d", surface.selected)
 	}
@@ -759,8 +781,8 @@ func TestGalleryNavigationUsesOnlyRegisteredSemanticPreviews(t *testing.T) {
 	if empty.selected != 0 || empty.selectedEvent() == nil {
 		t.Fatalf("empty gallery changed underlying safe selection: %d", empty.selected)
 	}
-	frame := renderAt(t, empty, responsive.Size{Columns: 40, Rows: 10}, 1)
-	if !strings.Contains(frameText(frame), "No matching safe events") {
+	frame = renderAt(t, empty, responsive.Size{Columns: 40, Rows: 10}, 1)
+	if text := frameText(frame); !strings.Contains(text, "4 semantic previews omitted") || !strings.Contains(text, "No matching safe events") {
 		t.Fatalf("empty gallery explanation missing: %q", frameText(frame))
 	}
 }
