@@ -178,6 +178,23 @@ read-only `plugin action list`, `plugin log list`, and `session list --json`
 output. Tests use injected runners and do not create, invoke, stop, or delete
 live Herdr resources.
 
+## HYP-DIAGNOSTIC-ID-01 — Semantic IDs survive typed debug-report JSON
+
+- Claim: every semantic ID in exported session, event, and visual projections
+  is a JSON string and reconstructs the same typed ID; zero and legacy empty
+  objects decode to zero.
+- Fault model: an ID's private field serializes as an empty object, typed report
+  decoding loses IDs, or permissive decoding accepts a non-ID JSON form.
+- Setup or generator: a debug report containing every nested ID position plus
+  valid, zero, legacy, invalid, malformed, and trailing direct decoder inputs.
+- Independent oracle: literal JSON token types and the original static ID
+  strings, compared independently of the codec implementation.
+- Falsified when: an ID is not a string, a round trip changes it, a supported
+  zero form is rejected, or rejected input changes the receiver or exposes a
+  variable error.
+- Diagnostics: field name, fixed test-only static ID, JSON token type, and the
+  fixed decoder error; no free-form content is retained.
+
 ## HYP-AGENT-STATUS-01 — Agent status requires a coherent Codex-aware sample
 
 - Claim: agent enumeration and focus preserve exact current/named-session

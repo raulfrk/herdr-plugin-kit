@@ -28,6 +28,37 @@ func NewID(value string) (ID, error) {
 func (id ID) String() string { return id.value }
 func (id ID) IsZero() bool   { return id.value == "" }
 
+func (id ID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.value)
+}
+
+func (id *ID) UnmarshalJSON(data []byte) error {
+	const invalid = "invalid semantic identifier JSON"
+	var decoded any
+	if id == nil || json.Unmarshal(data, &decoded) != nil {
+		return errors.New(invalid)
+	}
+	switch value := decoded.(type) {
+	case string:
+		if value == "" {
+			*id = ID{}
+			return nil
+		}
+		candidate, err := NewID(value)
+		if err != nil {
+			return errors.New(invalid)
+		}
+		*id = candidate
+		return nil
+	case map[string]any:
+		if len(value) == 0 {
+			*id = ID{}
+			return nil
+		}
+	}
+	return errors.New(invalid)
+}
+
 type OutcomeCode string
 
 const (

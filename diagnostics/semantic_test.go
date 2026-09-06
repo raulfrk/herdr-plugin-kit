@@ -136,6 +136,63 @@ func TestSemanticIdentifiersEnforceFormatAndBounds(t *testing.T) {
 	}
 }
 
+func TestSemanticIDJSONRoundTripAndLegacyZero(t *testing.T) {
+	tests := []struct {
+		name string
+		wire string
+		want string
+	}{
+		{name: "valid string", wire: `"request-7"`, want: "request-7"},
+		{name: "empty string", wire: `""`},
+		{name: "legacy empty object", wire: `{}`},
+		{name: "legacy empty object with whitespace", wire: " \n { } \t"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			id := mustID(t, "unchanged")
+			if err := json.Unmarshal([]byte(test.wire), &id); err != nil {
+				t.Fatalf("Unmarshal(%s): %v", test.wire, err)
+			}
+			if id.String() != test.want {
+				t.Fatalf("decoded ID = %q, want %q", id.String(), test.want)
+			}
+			encoded, err := json.Marshal(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWire, err := json.Marshal(test.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != string(wantWire) {
+				t.Fatalf("encoded ID = %s, want %s", encoded, wantWire)
+			}
+		})
+	}
+}
+
+func TestSemanticIDJSONRejectsInvalidInputWithoutMutation(t *testing.T) {
+	tests := []string{
+		`"Invalid ID"`, `null`, `7`, `[]`, `["valid"]`, `{"value":"valid"}`,
+		`{ "value": "valid" }`, `{`, `"valid" trailing`, ``,
+	}
+	for _, wire := range tests {
+		t.Run(wire, func(t *testing.T) {
+			id := mustID(t, "unchanged")
+			err := id.UnmarshalJSON([]byte(wire))
+			if err == nil {
+				t.Fatalf("Unmarshal(%s) succeeded", wire)
+			}
+			if err.Error() != "invalid semantic identifier JSON" {
+				t.Fatalf("Unmarshal(%s) error = %q", wire, err)
+			}
+			if id.String() != "unchanged" {
+				t.Fatalf("rejected input changed ID to %q", id.String())
+			}
+		})
+	}
+}
+
 func TestSemanticRecordRejectsInvalidMeasurements(t *testing.T) {
 	code := mustID(t, "render.completed")
 	tests := []struct {

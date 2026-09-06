@@ -498,6 +498,20 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	if err := json.Unmarshal(reportData, &report); err != nil {
 		t.Fatal(err)
 	}
+	if len(report.Sessions) == 0 || report.Sessions[0].ID != plugin {
+		t.Fatalf("debug report session IDs were not preserved: %#v", report.Sessions)
+	}
+	preservedVisualID := false
+	for _, event := range report.Events {
+		if event.Session == plugin && !event.Code.IsZero() && event.Visual != nil &&
+			!event.Visual.Screen.IsZero() && !event.Visual.State.IsZero() {
+			preservedVisualID = true
+			break
+		}
+	}
+	if !preservedVisualID {
+		t.Fatal("debug report event and visual IDs were not preserved")
+	}
 	if !report.Truncated || len(report.Previews) == 0 {
 		t.Fatalf("bounded report truncated=%t previews=%d", report.Truncated, len(report.Previews))
 	}

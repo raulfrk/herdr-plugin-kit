@@ -218,6 +218,72 @@ func TestDebugExactPageAndExportBoundaries(t *testing.T) {
 	}
 }
 
+func TestDebugReportJSONPreservesNestedSemanticIDs(t *testing.T) {
+	recorder := debugRecorder(t)
+	event := SemanticEvent{
+		Level: LevelInfo, Kind: KindInteraction,
+		Plugin: debugID(t, "session-a"), Component: debugID(t, "results"),
+		Action: debugID(t, "open"), Correlation: debugID(t, "request-7"),
+		Code: debugID(t, "request.completed"), Outcome: OutcomeApplied,
+		Visual: &VisualState{
+			Screen: debugID(t, "timeline"), Focus: debugID(t, "events"),
+			Selection: debugID(t, "event-3"), State: debugID(t, "ready"),
+		},
+	}
+	if err := recorder.RecordSemantic(event); err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := recorder.ExportDebug(DebugExportOptions{MaxBytes: recorder.config.MaxReportBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Sessions []struct {
+			ID json.RawMessage `json:"ID"`
+		} `json:"sessions"`
+		Events []struct {
+			Session, Component, Action, Code, Correlation json.RawMessage
+			Visual                                        map[string]json.RawMessage
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Sessions) != 1 || len(wire.Events) != 1 {
+		t.Fatalf("export shape = sessions %d events %d", len(wire.Sessions), len(wire.Events))
+	}
+	want := map[string]string{
+		"session ID": string(wire.Sessions[0].ID),
+		"session":    string(wire.Events[0].Session), "component": string(wire.Events[0].Component),
+		"action": string(wire.Events[0].Action), "code": string(wire.Events[0].Code),
+		"correlation":      string(wire.Events[0].Correlation),
+		"visual screen":    string(wire.Events[0].Visual["Screen"]),
+		"visual focus":     string(wire.Events[0].Visual["Focus"]),
+		"visual selection": string(wire.Events[0].Visual["Selection"]),
+		"visual state":     string(wire.Events[0].Visual["State"]),
+	}
+	for name, got := range want {
+		if got == "{}" || len(got) < 2 || got[0] != '"' || got[len(got)-1] != '"' {
+			t.Errorf("%s JSON = %s, want string", name, got)
+		}
+	}
+
+	var decoded DebugReport
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	gotEvent := decoded.Events[0]
+	if decoded.Sessions[0].ID.String() != "session-a" || gotEvent.Session.String() != "session-a" ||
+		gotEvent.Component.String() != "results" || gotEvent.Action.String() != "open" ||
+		gotEvent.Code.String() != "request.completed" || gotEvent.Correlation.String() != "request-7" ||
+		gotEvent.Visual == nil || gotEvent.Visual.Screen.String() != "timeline" ||
+		gotEvent.Visual.Focus.String() != "events" || gotEvent.Visual.Selection.String() != "event-3" ||
+		gotEvent.Visual.State.String() != "ready" {
+		t.Fatalf("decoded report IDs = %#v", decoded)
+	}
+}
+
 func TestDebugSessionsTrackFirstLastAndStableOrder(t *testing.T) {
 	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	semantic := map[string]any{"semantic_schema": semanticSchemaVersion, "outcome": "applied"}
