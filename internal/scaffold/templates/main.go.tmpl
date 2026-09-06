@@ -85,9 +85,14 @@ func runUI(debug bool) (result error) {
 		return err
 	}
 	defer func() { result = errors.Join(result, resources.Close()) }()
+	recording, err := debugui.NewRecording(resources.recorder, resources.previews, previewingSink{resources})
+	if err != nil {
+		return err
+	}
+	defer func() { result = errors.Join(result, recording.Close()) }()
 	debugSurface, err := debugui.New(debugui.Options{
 		Recorder: resources.recorder, Previews: resources.previews,
-		Exporter: resources.exportDebug, MaxReportBytes: 64 << 10, PageSize: 100,
+		Exporter: resources.exportDebug, MaxReportBytes: 64 << 10, PageSize: 100, RecordingStatus: recording.Status,
 	})
 	if err != nil {
 		return err
@@ -117,7 +122,7 @@ func runUI(debug bool) (result error) {
 	if err != nil {
 		return err
 	}
-	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: previewingSink{resources}}, surface)
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: recording}, surface)
 	if err != nil {
 		return err
 	}
@@ -220,6 +225,16 @@ func (router *surfaceRouter) Render(context shell.RenderContext) (*view.Frame, e
 
 func (router *surfaceRouter) DiagnosticState() diagnostics.VisualState {
 	return router.active().DiagnosticState()
+}
+
+func (router *surfaceRouter) SuppressEventDiagnostics(event shell.Event) bool {
+	filter, ok := router.debug.(shell.DiagnosticFilter)
+	return ok && filter.SuppressEventDiagnostics(event)
+}
+
+func (router *surfaceRouter) SuppressEffectDiagnostics(effect shell.Effect) bool {
+	filter, ok := router.debug.(shell.DiagnosticFilter)
+	return ok && filter.SuppressEffectDiagnostics(effect)
 }
 
 func (router *surfaceRouter) active() shell.Surface {
@@ -366,22 +381,16 @@ func (resources *resources) activate(ctx context.Context, item interaction.Item)
 	return resources.writeDocument(ctx, "last-activation.json", append(data, '\n'))
 }
 
+// previewingSink remains the synchronous non-debugger path used by generated
+// consumer contract tests. The interactive program uses Recording above.
 type previewingSink struct{ resources *resources }
 
 func (sink previewingSink) RecordSemantic(event diagnostics.SemanticEvent) error {
-	if err := sink.resources.recorder.RecordSemantic(event); err != nil {
+	sequence, err := sink.resources.recorder.RecordSemanticWithSequence(event)
+	if err != nil || event.Visual == nil {
 		return err
 	}
-	if event.Visual == nil {
-		return nil
-	}
-	page, err := sink.resources.recorder.Debug(diagnostics.DebugQuery{PageSize: 1})
-	if err != nil || len(page.Events) == 0 {
-		return err
-	}
-	// Preview limits are independent from the event recorder. A missing image is
-	// visible as an omission in the gallery/export and must not stop diagnostics.
-	_, _ = sink.resources.previews.Put(page.Events[0].Sequence, *event.Visual)
+	_, _ = sink.resources.previews.Put(sequence, *event.Visual)
 	return nil
 }
 

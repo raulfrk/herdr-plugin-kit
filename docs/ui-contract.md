@@ -56,6 +56,29 @@ shell renders the newest size immediately and marks it settled only after its
 | `?` | Open complete help. |
 | Ctrl-C | Quit. |
 
+The standard Debug UI starts with `Loading` and acquires its first safe snapshot
+as shell work after the first resize; construction performs no recorder work.
+While loading, data-dependent navigation, detail, filter, and export actions do
+nothing. In the Debug UI, `p` or Space toggles Live/Frozen inspection and `v`
+toggles visibility of the debugger's own diagnostics. Live mode refreshes every
+500 ms. Frozen mode updates status but pins the displayed snapshot, selected
+sequence, top-visible sequence, and any open detail. Timeline and gallery keep
+independent sequence anchors across their list, detail, and help screens. If a
+live anchor is evicted, selection moves to the nearest older event, or the
+nearest newer event when no older event remains, and the status reports the
+loss. PageUp and PageDown move by the configured page size without rounding a
+sequence anchor to a page boundary.
+
+Only one snapshot/select task runs at a time. New requests coalesce and stale
+generations cannot replace the displayed projection, including a rapid
+freeze/resume cycle. Export captures the displayed view and window before work
+is dispatched; later refresh or retention does not change its membership.
+Maintenance timers and snapshot work are excluded from diagnostics so the
+debugger does not create a self-sustaining event stream. Genuine input, resize,
+and export lifecycle diagnostics remain visible. The status line includes Live
+or Frozen state, debugger visibility, queue pressure, and persisted/rejected/
+failed recording counts when available.
+
 Any operation normally reached with a special key must also expose a visible
 basic-key alternative on mobile. Footer hints may abbreviate, but `?` must
 always open the complete unclipped guide.

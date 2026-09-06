@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
 	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
@@ -19,6 +23,66 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
 	"pgregory.net/rapid"
 )
+
+func TestUIExportFallsBackByOmittingOversizedSessionIndex(t *testing.T) {
+	recorder := uiRecorder(t)
+	for index := range 40 {
+		addDetailedUIEvent(t, recorder, fmt.Sprintf("session-%02d-with-bounded-padding", index), "results", "open", "event", "", diagnostics.LevelInfo, diagnostics.KindDiagnostic, nil)
+	}
+	exported := make(chan []byte, 1)
+	surface, err := New(Options{Recorder: recorder, PageSize: 100, MaxReportBytes: 1024, Exporter: func(_ context.Context, data []byte) error {
+		exported <- append([]byte(nil), data...)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	palette, _ := theme.Builtin("catppuccin")
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: uiID(t, "plugin-a"), Theme: palette, Events: recorder, Input: input, Output: io.Discard}, surface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, runErr := program.Run(); done <- runErr }()
+	t.Cleanup(func() { program.Kill(); <-done })
+	program.Send(tea.WindowSizeMsg{Width: 80, Height: 18})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		page, pageErr := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
+		if pageErr != nil {
+			t.Fatal(pageErr)
+		}
+		ready := false
+		for _, event := range page.Events {
+			if event.Visual != nil && event.Visual.Screen.String() == "debug.health" && event.Visual.State.String() == "ready" {
+				ready = true
+				break
+			}
+		}
+		if ready {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	select {
+	case data := <-exported:
+		var report diagnostics.DebugReport
+		if len(data) > 1024 || !json.Valid(data) {
+			t.Fatalf("export bytes=%d valid=%t", len(data), json.Valid(data))
+		}
+		if err := json.Unmarshal(data, &report); err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Sessions) != 0 || !slices.Contains(report.TruncationReasons, "session_index_omitted") {
+			t.Fatalf("UI export fallback=%+v", report)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("UI export did not complete")
+	}
+}
 
 func uiID(t testing.TB, value string) diagnostics.ID {
 	t.Helper()
@@ -37,6 +101,76 @@ func uiRecorder(t testing.TB) *diagnostics.Recorder {
 	}
 	t.Cleanup(func() { _ = recorder.Close() })
 	return recorder
+}
+
+type synchronousTestSurface struct{ *Surface }
+
+func (surface *synchronousTestSurface) Update(events shell.EventContext, event shell.Event) []shell.Effect {
+	effects := surface.Surface.Update(events, event)
+	surface.refresh()
+	return effects
+}
+
+type observedEffect struct {
+	request    shell.RequestKey
+	event      shell.EventCode
+	suppressed bool
+}
+
+type observedUpdate struct {
+	event         shell.Event
+	effects       []observedEffect
+	nonReservedOK bool
+	observedAt    time.Time
+}
+
+type maintenanceObservingSurface struct {
+	*Surface
+	updates chan observedUpdate
+}
+
+func (surface *maintenanceObservingSurface) Update(events shell.EventContext, event shell.Event) []shell.Effect {
+	effects := surface.Surface.Update(events, event)
+	observation := observedUpdate{event: event, observedAt: time.Now(), nonReservedOK: true}
+	for _, effect := range effects {
+		observation.effects = append(observation.effects, observedEffect{
+			request: effect.RequestKey(), event: effect.EventCode(), suppressed: surface.SuppressEffectDiagnostics(effect),
+		})
+	}
+	if _, ok := event.(shell.ResizeEvent); ok {
+		otherRequest, _ := shell.NewRequestKey("other.request")
+		otherTimer, _ := shell.NewEventCode("other.timer")
+		work, workErr := events.Start(otherRequest, func(context.Context) shell.WorkResult { return shell.WorkResult{Code: diagnostics.OutcomeApplied} })
+		timer, timerErr := events.After(10*time.Second, otherTimer)
+		observation.nonReservedOK = workErr == nil && timerErr == nil && !surface.SuppressEffectDiagnostics(work) && !surface.SuppressEffectDiagnostics(timer)
+	}
+	surface.updates <- observation
+	return effects
+}
+
+func (surface *maintenanceObservingSurface) Render(context shell.RenderContext) (*view.Frame, error) {
+	return surface.Surface.Render(context)
+}
+
+func (surface *maintenanceObservingSurface) DiagnosticState() diagnostics.VisualState {
+	return surface.Surface.DiagnosticState()
+}
+
+func (surface *maintenanceObservingSurface) SuppressEventDiagnostics(event shell.Event) bool {
+	return surface.Surface.SuppressEventDiagnostics(event)
+}
+
+func (surface *maintenanceObservingSurface) SuppressEffectDiagnostics(effect shell.Effect) bool {
+	return surface.Surface.SuppressEffectDiagnostics(effect)
+}
+
+func newTestSurface(t interface{ Helper() }, options Options) (*synchronousTestSurface, error) {
+	t.Helper()
+	surface, err := New(options)
+	if err == nil {
+		surface.refresh()
+	}
+	return &synchronousTestSurface{Surface: surface}, err
 }
 
 func addUIEvent(t testing.TB, recorder *diagnostics.Recorder, code, correlation string, visual bool) {
@@ -83,7 +217,10 @@ func terminalTheme(t testing.TB) theme.Palette {
 	return palette
 }
 
-func renderAt(t testing.TB, surface *Surface, size responsive.Size, generation uint64) *view.Frame {
+func renderAt(t testing.TB, surface interface {
+	Update(shell.EventContext, shell.Event) []shell.Effect
+	Render(shell.RenderContext) (*view.Frame, error)
+}, size responsive.Size, generation uint64) *view.Frame {
 	t.Helper()
 	layout := responsive.Resolve(size)
 	surface.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: generation})
@@ -126,7 +263,7 @@ func TestSurfaceRendersRequiredResponsiveEnvelopeAcrossThemes(t *testing.T) {
 			t.Fatal(err)
 		}
 		for generation, size := range sizes {
-			surface, err := New(Options{Recorder: recorder, PageSize: 7})
+			surface, err := newTestSurface(t, Options{Recorder: recorder, PageSize: 7})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,12 +281,12 @@ func TestCompactNavigationDrillInFiltersAndResizeState(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "first", "request-1", false)
 	addUIEvent(t, recorder, "second", "request-2", true)
-	surface, err := New(Options{Recorder: recorder, PageSize: 1})
+	surface, err := newTestSurface(t, Options{Recorder: recorder, PageSize: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	frame := renderAt(t, surface, responsive.Size{Columns: 40, Rows: 10}, 1)
-	if text := frameText(frame); !strings.Contains(text, "h/t/g/r view") {
+	if text := frameText(frame); !strings.Contains(text, "h/t/g/r") || !strings.Contains(text, "p/v") {
 		t.Fatalf("compact basic-key navigation missing: %q", text)
 	}
 	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "t"})
@@ -181,7 +318,7 @@ func TestCompactNavigationDrillInFiltersAndResizeState(t *testing.T) {
 
 func TestCompactHelpIsCompleteAndUnclipped(t *testing.T) {
 	recorder := uiRecorder(t)
-	surface, err := New(Options{Recorder: recorder})
+	surface, err := newTestSurface(t, Options{Recorder: recorder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +334,178 @@ func TestCompactHelpIsCompleteAndUnclipped(t *testing.T) {
 	}
 }
 
+func TestStatusIncludesRecordingProgressAndFailures(t *testing.T) {
+	recorder := uiRecorder(t)
+	surface, err := newTestSurface(t, Options{Recorder: recorder, RecordingStatus: func() RecordingStatus {
+		return RecordingStatus{Pending: 3, Persisted: 17, OverflowRejected: 2, PersistenceFailed: 1}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := surface.status(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 110, Rows: 24})})
+	for _, want := range []string{"Q!", "p3", "ok17", "r2", "f1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status %q omitted %q", got, want)
+		}
+	}
+}
+
+func TestStatusReportsEitherRecordingFailureCounter(t *testing.T) {
+	recorder := uiRecorder(t)
+	for _, status := range []RecordingStatus{
+		{Pending: 1, Persisted: 2, OverflowRejected: 3},
+		{Pending: 1, Persisted: 2, PersistenceFailed: 4},
+	} {
+		surface, err := newTestSurface(t, Options{Recorder: recorder, RecordingStatus: func() RecordingStatus { return status }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := surface.status(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 80, Rows: 18})}); !strings.Contains(got, "Q!") {
+			t.Fatalf("failure status not highlighted: %q", got)
+		}
+	}
+}
+
+func TestMaintenanceDiagnosticSuppressionIsExact(t *testing.T) {
+	surface, err := newTestSurface(t, Options{Recorder: uiRecorder(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherCode, _ := shell.NewEventCode("other.timer")
+	otherRequest, _ := shell.NewRequestKey("other.request")
+	for _, test := range []struct {
+		event shell.Event
+		want  bool
+	}{
+		{shell.TimerEvent{Code: maintenanceCode}, true},
+		{shell.TimerEvent{Code: otherCode}, false},
+		{shell.ResultEvent{Key: projectionRequest}, true},
+		{shell.ResultEvent{Key: otherRequest}, false},
+		{shell.TextEvent{Text: "e"}, false},
+		{shell.FocusEvent{Focused: true}, false},
+	} {
+		if got := surface.SuppressEventDiagnostics(test.event); got != test.want {
+			t.Fatalf("SuppressEventDiagnostics(%T) = %t, want %t", test.event, got, test.want)
+		}
+	}
+}
+
+func TestMaintenanceTimerUsesRealShellContextAndRearmsLiveOrFrozen(t *testing.T) {
+	for _, frozen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("frozen=%t", frozen), func(t *testing.T) {
+			recorder := uiRecorder(t)
+			addUIEvent(t, recorder, "initial", "", false)
+			base := loadedProjectionSurface(t, recorder)
+			base.frozen = frozen
+			observed := &maintenanceObservingSurface{Surface: base, updates: make(chan observedUpdate, 32)}
+			input, writer := io.Pipe()
+			t.Cleanup(func() { _ = writer.Close() })
+			program, err := shell.NewProgram(shell.ProgramOptions{PluginID: uiID(t, "plugin-a"), Theme: terminalTheme(t), Events: recorder, Input: input, Output: io.Discard}, observed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { _, runErr := program.Run(); done <- runErr }()
+			t.Cleanup(func() {
+				program.Kill()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Error("debug program did not stop")
+				}
+			})
+
+			program.Send(tea.WindowSizeMsg{Width: 80, Height: 18})
+			var resized observedUpdate
+			deadline := time.After(2 * time.Second)
+		resizeLoop:
+			for {
+				select {
+				case update := <-observed.updates:
+					if _, ok := update.event.(shell.ResizeEvent); ok {
+						resized = update
+						break resizeLoop
+					}
+				case <-deadline:
+					t.Fatal("resize did not reach debug surface")
+				}
+			}
+			if !resized.nonReservedOK {
+				t.Fatal("non-reserved work or timer effect was suppressed")
+			}
+
+			var maintenance observedUpdate
+			deadline = time.After(2 * time.Second)
+		maintenanceLoop:
+			for {
+				select {
+				case update := <-observed.updates:
+					if timer, ok := update.event.(shell.TimerEvent); ok && timer.Code == maintenanceCode {
+						maintenance = update
+						break maintenanceLoop
+					}
+				case <-deadline:
+					t.Fatal("maintenance timer did not fire")
+				}
+			}
+			elapsed := maintenance.observedAt.Sub(resized.observedAt)
+			if elapsed < 350*time.Millisecond || elapsed > 1500*time.Millisecond {
+				t.Fatalf("maintenance delay = %v, want approximately 500ms", elapsed)
+			}
+			requests, timers := 0, 0
+			for _, effect := range maintenance.effects {
+				if !effect.suppressed {
+					t.Fatalf("reserved maintenance effect was not suppressed: %+v", effect)
+				}
+				if effect.request == projectionRequest {
+					requests++
+				}
+				if effect.event == maintenanceCode {
+					timers++
+				}
+			}
+			wantRequests := 1
+			if frozen {
+				wantRequests = 0
+			}
+			if requests != wantRequests || timers != 1 {
+				t.Fatalf("maintenance effects: requests=%d timers=%d frozen=%t", requests, timers, frozen)
+			}
+		})
+	}
+}
+
+func TestRenderOwnershipAndGalleryOmissionAreObservable(t *testing.T) {
+	recorder := uiRecorder(t)
+	addUIEvent(t, recorder, "visual", "", true)
+	surface := loadedProjectionSurface(t, recorder)
+	surface.list, surface.screen = screenGallery, screenGallery
+	surface.displayedList = screenTimeline
+	surface.anchors[1] = inspectionAnchor{top: 99}
+	frame := renderAt(t, surface, responsive.Size{Columns: 80, Rows: 18}, 1)
+	if surface.anchors[1].top != 99 {
+		t.Fatalf("stale displayed list changed gallery anchor: %+v", surface.anchors[1])
+	}
+	if text := frameText(frame); !strings.Contains(text, "semantic previews omitted") {
+		t.Fatalf("gallery omission was not rendered: %q", text)
+	}
+
+	surface.list, surface.screen, surface.displayedList = screenTimeline, screenTimeline, screenTimeline
+	surface.displayedQuery = surface.query
+	surface.anchors[0] = inspectionAnchor{}
+	renderAt(t, surface, responsive.Size{Columns: 80, Rows: 18}, 2)
+	if surface.anchors[0].top == 0 || surface.visibleTop[0] == 0 {
+		t.Fatalf("current non-empty projection did not publish visible top: anchor=%+v visible=%d", surface.anchors[0], surface.visibleTop[0])
+	}
+
+	surface.page.Events = nil
+	surface.anchors[0].top, surface.visibleTop[0] = 77, 77
+	renderAt(t, surface, responsive.Size{Columns: 80, Rows: 18}, 3)
+	if surface.anchors[0].top != 0 || surface.visibleTop[0] != 0 {
+		t.Fatalf("current empty projection retained visible top: anchor=%+v visible=%d", surface.anchors[0], surface.visibleTop[0])
+	}
+}
+
 func TestRenderedViewsNeverContainRecorderPayloadPathOrError(t *testing.T) {
 	recorder := uiRecorder(t)
 	canary := "CANARY_/private/path_error-detail"
@@ -206,7 +515,7 @@ func TestRenderedViewsNeverContainRecorderPayloadPathOrError(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	for _, command := range []string{"h", "t", "g", "r", "?"} {
 		surface.Update(shell.EventContext{}, shell.TextEvent{Text: command})
 		text := frameText(renderAt(t, surface, responsive.Size{Columns: 110, Rows: 24}, 1))
@@ -220,7 +529,7 @@ func TestExportUsesBoundedRecorderReportAndFiniteStatuses(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "event", "request-1", true)
 	var exported []byte
-	surface, err := New(Options{Recorder: recorder, MaxReportBytes: 2048, Exporter: func(_ context.Context, data []byte) error {
+	surface, err := newTestSurface(t, Options{Recorder: recorder, MaxReportBytes: 2048, Exporter: func(_ context.Context, data []byte) error {
 		exported = append([]byte(nil), data...)
 		return nil
 	}})
@@ -235,7 +544,7 @@ func TestExportUsesBoundedRecorderReportAndFiniteStatuses(t *testing.T) {
 	if surface.export != exportSucceeded || exportLabel(surface.export) != "OK exported" {
 		t.Fatalf("export status=%v", surface.export)
 	}
-	failing, _ := New(Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return errors.New("SECRET exporter path") }})
+	failing, _ := newTestSurface(t, Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return errors.New("SECRET exporter path") }})
 	failed := failing.exportWork()(context.Background())
 	if failed.Err == nil || failed.Err.Error() != "debug export failed" {
 		t.Fatalf("unbounded export error escaped: %v", failed.Err)
@@ -244,7 +553,7 @@ func TestExportUsesBoundedRecorderReportAndFiniteStatuses(t *testing.T) {
 
 func TestProjectionFailureIsGuardedAndResizeHistoryIsBounded(t *testing.T) {
 	recorder := uiRecorder(t)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	if err := recorder.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +571,7 @@ func TestProjectionFailureIsGuardedAndResizeHistoryIsBounded(t *testing.T) {
 
 func TestDebugIgnoresStaleResizeAndExplainsRecovery(t *testing.T) {
 	recorder := uiRecorder(t)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	newest := responsive.Resolve(responsive.Size{Columns: 110, Rows: 24})
 	older := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
 	surface.Update(shell.EventContext{}, shell.ResizeEvent{Layout: newest, Generation: 2})
@@ -296,7 +605,7 @@ func TestTimelineAndRegisteredGalleryKeepSelectionVisible(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	surface, _ := New(Options{Recorder: recorder, Previews: previews, PageSize: 20})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, Previews: previews, PageSize: 20})
 	surface.screen = screenTimeline
 	surface.selected = len(surface.page.Events) - 1
 	layout := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
@@ -318,7 +627,7 @@ func TestSurfaceNavigationModelMaintainsBounds(t *testing.T) {
 	}
 	commands := []byte{'h', 't', 'g', 'r', '?', '?', 's', 'l', 'k', '0', '1', '2', '3', '4'}
 	rapid.Check(t, func(t *rapid.T) {
-		surface, _ := New(Options{Recorder: recorder, PageSize: 5})
+		surface, _ := newTestSurface(t, Options{Recorder: recorder, PageSize: 5})
 		for range rapid.IntRange(1, 80).Draw(t, "steps") {
 			if rapid.Bool().Draw(t, "text") {
 				value := commands[rapid.IntRange(0, len(commands)-1).Draw(t, "command")]
@@ -339,7 +648,7 @@ func TestSurfaceNavigationModelMaintainsBounds(t *testing.T) {
 
 func TestRecorderCanWriteWhileDebugSurfaceRefreshesAndRenders(t *testing.T) {
 	recorder := uiRecorder(t)
-	surface, _ := New(Options{Recorder: recorder, PageSize: 10})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, PageSize: 10})
 	var wait sync.WaitGroup
 	wait.Add(1)
 	go func() {
@@ -362,7 +671,7 @@ func TestRecorderCanWriteWhileDebugSurfaceRefreshesAndRenders(t *testing.T) {
 func TestFrameRenderingIsDeterministic(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "event", "request-1", true)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	layout := responsive.Resolve(responsive.Size{Columns: 80, Rows: 18})
 	surface.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: 1})
 	context := shell.RenderContext{Layout: layout, Theme: terminalTheme(t), ResizeGeneration: 1, Settled: true}
@@ -384,7 +693,7 @@ func TestApprovedDebugFramesRemainByteStable(t *testing.T) {
 		{name: "compact-health", size: responsive.Size{Columns: 40, Rows: 10}, set: func(*Surface) {}},
 		{name: "standard-timeline", size: responsive.Size{Columns: 80, Rows: 18}, set: func(surface *Surface) { surface.screen = screenTimeline }},
 		{name: "standard-split", size: responsive.Size{Columns: 80, Rows: 19}, set: func(surface *Surface) { surface.screen = screenTimeline }},
-		{name: "wide-gallery", size: responsive.Size{Columns: 110, Rows: 24}, set: func(surface *Surface) { surface.screen = screenGallery; surface.ensureGallerySelection() }},
+		{name: "wide-gallery", size: responsive.Size{Columns: 110, Rows: 24}, set: func(*Surface) {}},
 		{name: "compact-detail", size: responsive.Size{Columns: 48, Rows: 18}, set: func(surface *Surface) { surface.screen = screenDetail }},
 		{name: "help", size: responsive.Size{Columns: 40, Rows: 10}, set: func(surface *Surface) { surface.screen = screenHelp }},
 		{name: "recovery", size: responsive.Size{Columns: 39, Rows: 9}, set: func(*Surface) {}},
@@ -413,11 +722,31 @@ func TestApprovedDebugFramesRemainByteStable(t *testing.T) {
 			if test.name == "wide-gallery" {
 				addDetailedUIEvent(t, recorder, "alpha", "results", "open", "unregistered.visual", "request-2", diagnostics.LevelInfo, diagnostics.KindInteraction, visual)
 			}
-			surface, err := New(Options{Recorder: recorder, Previews: previews})
+			surface, err := newTestSurface(t, Options{Recorder: recorder, Previews: previews})
 			if err != nil {
 				t.Fatal(err)
 			}
-			test.set(surface)
+			if test.name == "wide-gallery" {
+				surface.Surface.text(shell.EventContext{}, 'g')
+				snapshot, snapshotErr := recorder.DebugSnapshot(context.Background(), previews)
+				if snapshotErr != nil {
+					t.Fatal(snapshotErr)
+				}
+				gallery, selectErr := snapshot.Select(context.Background(), surface.query, true)
+				if selectErr != nil {
+					t.Fatal(selectErr)
+				}
+				surface.pending = projectionSelect
+				surface.applyProjection(shell.EventContext{}, shell.WorkResult{Code: diagnostics.OutcomeApplied, Value: projectionResult{
+					snapshot: snapshot, view: gallery, query: surface.query, kind: projectionSelect, list: screenGallery, epoch: surface.projectionEpoch,
+				}})
+				selected := surface.selectedEvent()
+				if surface.list != screenGallery || surface.screen != screenGallery || selected == nil || selected.Sequence != page.Events[0].Sequence || !surface.view.PreviewEligible(selected.Sequence) {
+					t.Fatalf("gallery approval state is incoherent: list=%d screen=%d selected=%+v eligible=%t", surface.list, surface.screen, selected, selected != nil && surface.view.PreviewEligible(selected.Sequence))
+				}
+			} else {
+				test.set(surface.Surface)
+			}
 			layout := responsive.Resolve(test.size)
 			surface.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: 7})
 			surface.page.Health = diagnostics.DebugHealth{Writable: true, Events: 1, MaxEvents: 100, Bytes: 512, MaxBytes: 4096, UsageRatio: 0.125}
@@ -462,17 +791,17 @@ func TestApprovedDebugFramesRemainByteStable(t *testing.T) {
 }
 
 func TestSurfaceConstructionAndQuitBoundaries(t *testing.T) {
-	if _, err := New(Options{}); err == nil || err.Error() != "debug recorder is nil" {
+	if _, err := newTestSurface(t, Options{}); err == nil || err.Error() != "debug recorder is nil" {
 		t.Fatalf("nil recorder error = %v", err)
 	}
 	recorder := uiRecorder(t)
 	for _, size := range []int{-1, diagnostics.MaxDebugPageSize + 1} {
-		if _, err := New(Options{Recorder: recorder, PageSize: size}); err == nil {
+		if _, err := newTestSurface(t, Options{Recorder: recorder, PageSize: size}); err == nil {
 			t.Fatalf("accepted invalid page size %d", size)
 		}
 	}
 	for _, size := range []int{0, 1, diagnostics.MaxDebugPageSize} {
-		surface, err := New(Options{Recorder: recorder, PageSize: size})
+		surface, err := newTestSurface(t, Options{Recorder: recorder, PageSize: size})
 		if err != nil {
 			t.Fatalf("page size %d: %v", size, err)
 		}
@@ -484,7 +813,7 @@ func TestSurfaceConstructionAndQuitBoundaries(t *testing.T) {
 			t.Fatalf("page size %d initialized as query=%+v export=%v", size, surface.query, surface.export)
 		}
 	}
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	for _, event := range []shell.Event{shell.TextEvent{Text: "q"}, shell.KeyEvent{Code: shell.KeyCtrlC}} {
 		if effects := surface.Update(shell.EventContext{}, event); len(effects) != 1 {
 			t.Fatalf("quit event %T returned %d effects", event, len(effects))
@@ -518,7 +847,7 @@ func TestFilterGrammarAndEmptyEditingKeys(t *testing.T) {
 	}
 
 	recorder := uiRecorder(t)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "/"})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyBackspace})
 	if !surface.editing || surface.draft != "" {
@@ -536,7 +865,7 @@ func TestFilterGrammarAndEmptyEditingKeys(t *testing.T) {
 }
 
 func TestSurfaceReportsFilterEditingState(t *testing.T) {
-	surface, err := New(Options{Recorder: uiRecorder(t)})
+	surface, err := newTestSurface(t, Options{Recorder: uiRecorder(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,24 +888,24 @@ func TestNavigationFilteringAndPagingStateMachine(t *testing.T) {
 	addDetailedUIEvent(t, recorder, "alpha", "results", "open", "alpha.first", "request-a", diagnostics.LevelInfo, diagnostics.KindInteraction, nil)
 	addDetailedUIEvent(t, recorder, "beta", "worker", "retry", "beta.only", "request-b", diagnostics.LevelError, diagnostics.KindDiagnostic, nil)
 	addDetailedUIEvent(t, recorder, "alpha", "results", "open", "alpha.latest", "request-a", diagnostics.LevelInfo, diagnostics.KindInteraction, visual)
-	surface, _ := New(Options{Recorder: recorder, PageSize: 1})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, PageSize: 1})
 
 	if surface.page.Total != 3 || !surface.page.HasNext || surface.page.HasPrev {
 		t.Fatalf("initial page = %+v", surface.page)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageDown})
-	if surface.query.Page != 1 || surface.page.Events[0].Code.String() != "beta.only" || !surface.page.HasPrev || !surface.page.HasNext {
+	if surface.page.Page != 1 || surface.query.Page != 0 || surface.page.Events[0].Code.String() != "beta.only" || !surface.page.HasPrev || !surface.page.HasNext {
 		t.Fatalf("middle page query=%+v page=%+v", surface.query, surface.page)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageDown})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageDown})
-	if surface.query.Page != 2 || surface.page.Events[0].Code.String() != "alpha.first" || surface.page.HasNext {
+	if surface.page.Page != 2 || surface.query.Page != 0 || surface.page.Events[0].Code.String() != "alpha.first" || surface.page.HasNext {
 		t.Fatalf("last page advanced past boundary: query=%+v page=%+v", surface.query, surface.page)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageUp})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageUp})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyPageUp})
-	if surface.query.Page != 0 || surface.page.Events[0].Code.String() != "alpha.latest" {
+	if surface.page.Page != 0 || surface.query.Page != 0 || surface.page.Events[0].Code.String() != "alpha.latest" {
 		t.Fatalf("first page moved past boundary: query=%+v page=%+v", surface.query, surface.page)
 	}
 
@@ -614,7 +943,7 @@ func TestSelectionDetailHelpAndEditorTransitions(t *testing.T) {
 	for _, code := range []string{"oldest", "middle", "newest"} {
 		addUIEvent(t, recorder, code, "request-1", false)
 	}
-	surface, _ := New(Options{Recorder: recorder, PageSize: 3})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, PageSize: 3})
 	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "t"})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDown})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDown})
@@ -674,12 +1003,12 @@ func TestSelectionDetailHelpAndEditorTransitions(t *testing.T) {
 func TestExportFailureRecoveryAndDiagnosticState(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "event", "request-1", true)
-	disabled, _ := New(Options{Recorder: recorder})
+	disabled, _ := newTestSurface(t, Options{Recorder: recorder})
 	if effects := disabled.Update(shell.EventContext{}, shell.TextEvent{Text: "e"}); len(effects) != 0 || disabled.export != exportDisabled {
 		t.Fatalf("disabled export changed: effects=%d status=%v", len(effects), disabled.export)
 	}
 
-	surface, _ := New(Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return nil }})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return nil }})
 	if effects := surface.Update(shell.EventContext{}, shell.TextEvent{Text: "e"}); len(effects) != 0 || surface.export != exportFailed {
 		t.Fatalf("failed scheduling did not surface failure: effects=%d status=%v", len(effects), surface.export)
 	}
@@ -743,31 +1072,28 @@ func TestGalleryNavigationUsesOnlyRegisteredSemanticPreviews(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	surface, _ := New(Options{Recorder: recorder, Previews: previews, PageSize: 10})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, Previews: previews, PageSize: 10})
 	surface.selected = 0
 	surface.Update(shell.EventContext{}, shell.TextEvent{Text: "g"})
 	frame := renderAt(t, surface, responsive.Size{Columns: 40, Rows: 10}, 1)
-	if !strings.Contains(frameText(frame), "2 semantic previews omitted") {
-		t.Fatalf("gallery omission count is not visible: %q", frameText(frame))
-	}
-	if surface.selected != 1 {
+	if surface.selected != 0 || len(surface.page.Events) != 2 {
 		t.Fatalf("gallery did not select first registered preview: %d", surface.selected)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDown})
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDown})
-	if surface.selected != 4 {
+	if surface.selected != 1 {
 		t.Fatalf("gallery crossed final registered preview: %d", surface.selected)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyUp})
-	if surface.selected != 1 {
+	if surface.selected != 0 {
 		t.Fatalf("gallery previous preview = %d", surface.selected)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEnd})
-	if surface.selected != 4 {
+	if surface.selected != 1 {
 		t.Fatalf("gallery end = %d", surface.selected)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyHome})
-	if surface.selected != 1 {
+	if surface.selected != 0 {
 		t.Fatalf("gallery home = %d", surface.selected)
 	}
 	surface.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyEnter})
@@ -775,14 +1101,14 @@ func TestGalleryNavigationUsesOnlyRegisteredSemanticPreviews(t *testing.T) {
 		t.Fatalf("gallery drill-in screen=%v previous=%v", surface.screen, surface.previous)
 	}
 
-	empty, _ := New(Options{Recorder: recorder, PageSize: 10})
+	empty, _ := newTestSurface(t, Options{Recorder: recorder, PageSize: 10})
 	empty.Update(shell.EventContext{}, shell.TextEvent{Text: "g"})
 	empty.Update(shell.EventContext{}, shell.KeyEvent{Code: shell.KeyDown})
-	if empty.selected != 0 || empty.selectedEvent() == nil {
-		t.Fatalf("empty gallery changed underlying safe selection: %d", empty.selected)
+	if empty.selected != 0 || empty.selectedEvent() != nil {
+		t.Fatalf("empty gallery retained an ineligible selection: %d", empty.selected)
 	}
 	frame = renderAt(t, empty, responsive.Size{Columns: 40, Rows: 10}, 1)
-	if text := frameText(frame); !strings.Contains(text, "4 semantic previews omitted") || !strings.Contains(text, "No matching safe events") {
+	if text := frameText(frame); !strings.Contains(text, "No matching safe events") {
 		t.Fatalf("empty gallery explanation missing: %q", frameText(frame))
 	}
 }
@@ -818,7 +1144,7 @@ func TestSemanticFrameLayoutFingerprintsAtSplitBoundaries(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			surface, _ := New(Options{Recorder: recorder, Previews: previews})
+			surface, _ := newTestSurface(t, Options{Recorder: recorder, Previews: previews})
 			surface.screen = screenTimeline
 			layout := responsive.Resolve(test.size)
 			if layout.Class != test.wantClass {
@@ -859,7 +1185,7 @@ func TestSemanticFrameLayoutFingerprintsAtSplitBoundaries(t *testing.T) {
 
 func TestRenderedHealthDetailHUDAndRecoverySemantics(t *testing.T) {
 	recorder := uiRecorder(t)
-	surface, _ := New(Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return nil }})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder, Exporter: func(context.Context, []byte) error { return nil }})
 	layout := responsive.Resolve(responsive.Size{Columns: 80, Rows: 18})
 	surface.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: 1})
 	surface.page.Health = diagnostics.DebugHealth{Writable: false, Pressure: true, Events: 3, MaxEvents: 5, Bytes: 80, MaxBytes: 100, UsageRatio: .8, Dropped: 2, CorruptRecords: 1}
@@ -909,7 +1235,7 @@ func TestRenderedHealthDetailHUDAndRecoverySemantics(t *testing.T) {
 func TestRefreshDropsAStaleSessionSelection(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "event", "", false)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	surface.query.Session = uiID(t, "missing-session")
 	surface.session = 4
 	surface.refresh()
@@ -925,7 +1251,7 @@ func TestRefreshDropsAStaleSessionSelection(t *testing.T) {
 func TestRefreshClampsSelectionAtExactEventBoundary(t *testing.T) {
 	recorder := uiRecorder(t)
 	addUIEvent(t, recorder, "event", "", false)
-	surface, _ := New(Options{Recorder: recorder})
+	surface, _ := newTestSurface(t, Options{Recorder: recorder})
 	surface.selected = len(surface.page.Events)
 	surface.refresh()
 	if surface.selected != len(surface.page.Events)-1 || surface.selectedEvent() == nil {

@@ -1,12 +1,11 @@
 package diagnostics
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/bits"
-	"slices"
-	"strings"
 	"time"
 )
 
@@ -18,15 +17,16 @@ const (
 // DebugQuery selects a bounded page from the recorder's current retained
 // events. All string filters are exact, static semantic identifiers.
 type DebugQuery struct {
-	Session     ID
-	Level       Level
-	Kind        Kind
-	Component   ID
-	Action      ID
-	Code        ID
-	Correlation ID
-	Page        int
-	PageSize    int
+	Session      ID
+	Level        Level
+	Kind         Kind
+	Component    ID
+	Action       ID
+	Code         ID
+	Correlation  ID
+	Page         int
+	PageSize     int
+	HideDebugger bool
 }
 
 // DebugHealth deliberately omits the recorder's free-form last error.
@@ -120,31 +120,40 @@ func (r *Recorder) Debug(query DebugQuery) (DebugPage, error) {
 		return DebugPage{}, errors.New("invalid debug kind filter")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return DebugPage{}, ErrClosed
+	requestedPage := query.Page
+	query.Page = 0
+	snapshot, err := r.DebugSnapshot(context.Background(), nil)
+	if err != nil {
+		return DebugPage{}, err
 	}
-
-	page := DebugPage{Page: query.Page, PageSize: query.PageSize, Health: debugHealth(r.health)}
-	page.Sessions = debugSessions(r.records)
-	matching := make([]DebugEvent, 0, min(len(r.records), query.PageSize))
-	start := debugPageStart(query.Page, query.PageSize, len(r.records))
-	for index := len(r.records) - 1; index >= 0; index-- {
-		projected, ok := projectDebugEvent(r.records[index].event)
-		if !ok || !matchesDebug(projected, query) {
-			continue
-		}
-		page.Total++
-		if int64(page.Total) <= start || len(matching) == query.PageSize {
-			continue
-		}
-		matching = append(matching, projected)
+	view, err := snapshot.Select(context.Background(), query, false)
+	if err != nil {
+		return DebugPage{}, err
 	}
-	page.Events = matching
-	page.HasPrev = query.Page > 0
-	page.HasNext = int64(page.Total)-start > int64(query.PageSize)
+	start := debugPageStart(requestedPage, query.PageSize, len(view.events))
+	window := view.Window(DebugWindowQuery{Start: int(start)})
+	page := DebugPage{Sessions: view.Sessions(), Health: view.Health(), Events: window.Events, Page: requestedPage, PageSize: query.PageSize, Total: window.Total, HasPrev: requestedPage > 0, HasNext: window.HasNext}
 	return page, nil
+}
+
+func cloneDebugEvent(event DebugEvent) DebugEvent {
+	if event.Visual != nil {
+		visual := *event.Visual
+		event.Visual = &visual
+	}
+	return event
+}
+
+func isDebuggerVisual(event DebugEvent) bool {
+	if event.Visual == nil {
+		return false
+	}
+	switch event.Visual.Screen.String() {
+	case "debug.health", "debug.timeline", "debug.gallery", "debug.hud", "debug.detail", "debug.help":
+		return true
+	default:
+		return false
+	}
 }
 
 // ExportDebug returns only the allowlisted debug projection. It never exports
@@ -231,38 +240,6 @@ func debugHealth(health Health) DebugHealth {
 		CorruptRecords: health.CorruptRecords, Events: health.Events, Bytes: health.Bytes,
 		MaxEvents: health.MaxEvents, MaxBytes: health.MaxBytes, UsageRatio: health.UsageRatio,
 	}
-}
-
-func debugSessions(records []storedEvent) []DebugSession {
-	byID := make(map[ID]DebugSession)
-	for _, record := range records {
-		projected, ok := projectDebugEvent(record.event)
-		if !ok || projected.Session.IsZero() {
-			continue
-		}
-		id := projected.Session
-		session := byID[id]
-		session.ID = id
-		session.Events++
-		if session.First.IsZero() || record.event.Time.Before(session.First) {
-			session.First = record.event.Time
-		}
-		if record.event.Time.After(session.Last) {
-			session.Last = record.event.Time
-		}
-		byID[id] = session
-	}
-	sessions := make([]DebugSession, 0, len(byID))
-	for _, session := range byID {
-		sessions = append(sessions, session)
-	}
-	slices.SortFunc(sessions, func(left, right DebugSession) int {
-		if newest := right.Last.Compare(left.Last); newest != 0 {
-			return newest
-		}
-		return strings.Compare(left.ID.String(), right.ID.String())
-	})
-	return sessions
 }
 
 func projectDebugEvent(event Event) (DebugEvent, bool) {

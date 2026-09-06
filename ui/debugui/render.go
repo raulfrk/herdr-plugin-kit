@@ -73,6 +73,9 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 }
 
 func (surface *Surface) status(context shell.RenderContext) string {
+	if !surface.loaded {
+		return "Loading debug snapshot…"
+	}
 	session := "all sessions"
 	if !surface.query.Session.IsZero() {
 		session = surface.query.Session.String()
@@ -81,14 +84,39 @@ func (surface *Surface) status(context shell.RenderContext) string {
 	if context.Settled {
 		settled = "settled"
 	}
-	return fmt.Sprintf("%s · %d events · page %d · %s · %dx%d g%d %s", session, surface.page.Total, surface.query.Page+1, exportLabel(surface.export), context.Layout.Reported.Columns, context.Layout.Reported.Rows, context.ResizeGeneration, settled)
+	mode := "Live"
+	if surface.frozen {
+		mode = "Frozen"
+	}
+	if surface.pending == projectionSelect {
+		mode += "/filtering"
+	}
+	if surface.pending == projectionAcquire {
+		mode += "/loading"
+	}
+	if surface.evicted {
+		mode += "/anchor-evicted"
+	}
+	visibility := "debug hidden"
+	if !surface.hideDebugger {
+		visibility = "debug shown"
+	}
+	pressure := "Q:p0 ok0 "
+	if surface.options.RecordingStatus != nil {
+		status := surface.options.RecordingStatus()
+		pressure = fmt.Sprintf("Q:p%d ok%d ", status.Pending, status.Persisted)
+		if status.OverflowRejected != 0 || status.PersistenceFailed != 0 {
+			pressure = fmt.Sprintf("Q! p%d ok%d r%d f%d ", status.Pending, status.Persisted, status.OverflowRejected, status.PersistenceFailed)
+		}
+	}
+	return fmt.Sprintf("%s%s · %s · %s · %d events · page %d · %s · %dx%d g%d %s", pressure, mode, visibility, session, surface.page.Total, surface.page.Page+1, exportLabel(surface.export), context.Layout.Reported.Columns, context.Layout.Reported.Rows, context.ResizeGeneration, settled)
 }
 
 func (surface *Surface) footer(columns int) string {
 	if columns < 70 {
-		return "? help · h/t/g/r view · s session · e export"
+		return "? all keys · h/t/g/r · p/v · s · e"
 	}
-	return "? help · h health · t timeline · g gallery · r HUD · s/←→ session · e export"
+	return "? help · h health · t timeline · g gallery · r HUD · p freeze · v debug · s/←→ session · e export"
 }
 
 func (surface *Surface) healthLines() []string {
@@ -123,11 +151,7 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 			if event.Visual == nil {
 				continue
 			}
-			if surface.options.Previews == nil {
-				omitted++
-				continue
-			}
-			if _, ok := surface.options.Previews.Entry(event.Sequence, *event.Visual); !ok {
+			if surface.view == nil || !surface.view.PreviewEligible(event.Sequence) {
 				omitted++
 				continue
 			}
@@ -143,6 +167,10 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 		}
 	}
 	if len(events) == 0 {
+		if surface.displayedQuery == surface.query && surface.displayedList == surface.list {
+			index := surface.anchorIndex()
+			surface.visibleTop[index], surface.anchors[index].top = 0, 0
+		}
 		frame.PutText(1, top+1, "No matching safe events · 0 clear filters", view.Style{Foreground: palette.Text, Background: palette.Background})
 		return
 	}
@@ -161,6 +189,11 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 	start := 0
 	if rows > 0 && selectedPosition >= rows {
 		start = selectedPosition - rows + 1
+	}
+	if len(events) > 0 && surface.displayedQuery == surface.query && surface.displayedList == surface.list {
+		index := surface.anchorIndex()
+		surface.visibleTop[index] = events[start].Sequence
+		surface.anchors[index].top = events[start].Sequence
 	}
 	for row := range rows {
 		position := start + row
@@ -218,10 +251,10 @@ func (surface *Surface) hudLines(context shell.RenderContext) []string {
 func helpLines() []string {
 	return []string{
 		"All controls",
-		"h health · t timeline · g gallery",
-		"r HUD · s/Left/Right session · ? back",
-		"Up/Down/Home/End · Enter detail",
-		"PgUp/PgDn page · Back/Esc back",
+		"h/t/g views · r HUD",
+		"p/Space Live/Frozen · v debug",
+		"s/Left/Right session · Back/Esc back",
+		"Up/Down/Home/End/PgUp/PgDn · Enter",
 		"l level · k kind · 0 clear filters",
 		"/ code · Enter apply · Esc cancel",
 		"1 comp · 2 action · 3 code · 4/c corr",

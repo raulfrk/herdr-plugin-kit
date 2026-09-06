@@ -124,6 +124,9 @@ type Effect struct {
 	work                Work
 }
 
+func (effect Effect) RequestKey() RequestKey { return effect.requestKey }
+func (effect Effect) EventCode() EventCode   { return effect.eventCode }
+
 func Quit() Effect { return Effect{kind: effectQuit} }
 
 type EventContext struct {

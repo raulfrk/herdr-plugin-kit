@@ -18,6 +18,7 @@ import (
 type storedEvent struct {
 	event Event
 	data  []byte
+	debug *DebugEvent
 }
 
 // Recorder serializes reservations and storage updates so one process may
@@ -143,7 +144,12 @@ func (r *Recorder) load(now time.Time) error {
 		if !bytes.Equal(encoded, append(append([]byte(nil), line...), '\n')) {
 			changed = true
 		}
-		r.records = append(r.records, storedEvent{event: event, data: encoded})
+		projected, projectedOK := projectDebugEvent(event)
+		var cached *DebugEvent
+		if projectedOK {
+			cached = &projected
+		}
+		r.records = append(r.records, storedEvent{event: event, data: encoded, debug: cached})
 		r.bytes += int64(len(encoded))
 		r.next = event.Sequence
 		previousSequence = event.Sequence
@@ -223,7 +229,12 @@ func (r *Recorder) record(input Event) (Event, error) {
 	previousRecords := append([]storedEvent(nil), r.records...)
 	previousBytes := r.bytes
 	previousDropped := r.health.Dropped
-	r.records = append(r.records, storedEvent{event: event, data: data})
+	projected, projectedOK := projectDebugEvent(event)
+	var cached *DebugEvent
+	if projectedOK {
+		cached = &projected
+	}
+	r.records = append(r.records, storedEvent{event: event, data: data, debug: cached})
 	r.bytes += int64(len(data))
 	changed := r.applyRetention(event.Time)
 	if changed {

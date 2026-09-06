@@ -47,3 +47,29 @@ writeback while the recorder is active; `Close` synchronizes the log before
 returning. Retention rewrites synchronize their replacement before publication.
 This keeps per-event synchronization latency out of the interactive event loop
 without buffering events in a second in-process queue.
+
+The generated interactive shell is the deliberate exception for the Debug UI's
+own six visual identities (`debug.health`, `debug.timeline`, `debug.gallery`,
+`debug.hud`, `debug.detail`, and `debug.help`). `debugui.Recording` copies those
+semantic values at admission and sends them through one fixed 128-event FIFO and
+one storage worker. Admission never waits for disk or queue space; a full queue
+rejects the newest debugger event and exposes the rejection in bounded status
+counters. Other plugin and shell events keep the synchronous `SemanticSink`
+behavior above. `Recording.Close` stops admission, drains accepted events, and
+reports any rejection or persistence failure. A process crash can lose pending
+debugger events, so normal and error exits must close the recording adapter
+before closing preview or recorder storage.
+
+`Recorder.RecordSemanticWithSequence` has the same validation and persistence
+contract as `RecordSemantic` and additionally returns the exact committed
+sequence. Preview producers use that sequence for correlation instead of
+querying for whichever event is newest.
+
+Safe debugger projections are normalized and cached once with each retained
+event. `DebugSnapshot` captures immutable projection references and health under
+the recorder lock, then prepares indexes and preview eligibility outside it.
+`DebugSnapshot.Select` creates a filtered view; `DebugView.Window` and `Locate`
+provide bounded sequence-anchored navigation; `ExportWindow` exports the
+captured window and revalidates preview provenance. Returned sessions, events,
+and nested visual values are copies and do not alias recorder state. Existing
+`Debug` and `ExportDebug` defaults and page-size behavior remain unchanged.

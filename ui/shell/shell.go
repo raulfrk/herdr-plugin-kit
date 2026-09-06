@@ -23,6 +23,11 @@ type Surface interface {
 	DiagnosticState() diagnostics.VisualState
 }
 
+type DiagnosticFilter interface {
+	SuppressEventDiagnostics(Event) bool
+	SuppressEffectDiagnostics(Effect) bool
+}
+
 type RenderContext struct {
 	Layout           responsive.Layout
 	Theme            theme.Palette
@@ -84,6 +89,7 @@ type model struct {
 	correlation         uint64
 	rendered            string
 	diagnosticFailed    bool
+	suppressCycle       bool
 }
 
 func newModel(options ProgramOptions, surface Surface) *model {
@@ -97,6 +103,7 @@ func newModel(options ProgramOptions, surface Surface) *model {
 func (model *model) Init() tea.Cmd { return tea.EnableReportFocus }
 
 func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	model.suppressCycle = false
 	receivedAt := time.Now()
 	before := model.surface.DiagnosticState()
 	context := model.eventContext()
@@ -188,10 +195,18 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	var effects []Effect
 	if event != nil {
+		if filter, ok := model.surface.(DiagnosticFilter); ok {
+			model.suppressCycle = filter.SuppressEventDiagnostics(event)
+		}
 		effects = model.surface.Update(context, event)
 	}
 	if diagnosticEvent == nil {
 		diagnosticEvent = event
+	}
+	if diagnosticEvent != nil {
+		if filter, ok := model.surface.(DiagnosticFilter); ok && filter.SuppressEventDiagnostics(diagnosticEvent) {
+			model.suppressCycle = true
+		}
 	}
 	after := model.surface.DiagnosticState()
 	model.record(code, outcome, before, after, diagnosticEvent, eventDuration)
@@ -203,8 +218,10 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.render(receivedAt)
 	}
 	if len(commands) == 0 {
+		model.suppressCycle = false
 		return model, nil
 	}
+	model.suppressCycle = false
 	return model, tea.Batch(commands...)
 }
 
@@ -245,6 +262,10 @@ func (model *model) eventContext() EventContext {
 func (model *model) commands(effects []Effect) []tea.Cmd {
 	commands := make([]tea.Cmd, 0, len(effects))
 	for _, effect := range effects {
+		previousSuppression := model.suppressCycle
+		if filter, ok := model.surface.(DiagnosticFilter); ok && filter.SuppressEffectDiagnostics(effect) {
+			model.suppressCycle = true
+		}
 		state := model.surface.DiagnosticState()
 		switch effect.kind {
 		case effectWork:
@@ -279,6 +300,7 @@ func (model *model) commands(effects []Effect) []tea.Cmd {
 			model.record("program.quit", diagnostics.OutcomeApplied, state, state, nil, 0)
 			commands = append(commands, tea.Quit)
 		}
+		model.suppressCycle = previousSuppression
 	}
 	return commands
 }
@@ -332,7 +354,7 @@ func (model *model) recoveryFrame(renderErr error) *view.Frame {
 }
 
 func (model *model) record(code string, outcome diagnostics.OutcomeCode, before, after diagnostics.VisualState, event Event, duration time.Duration) {
-	if model.diagnosticFailed {
+	if model.diagnosticFailed || model.suppressCycle {
 		return
 	}
 	eventCode, err := diagnostics.NewID(code)

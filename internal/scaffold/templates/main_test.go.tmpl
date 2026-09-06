@@ -25,6 +25,20 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
 )
 
+type observedSurface struct {
+	shell.Surface
+	states chan diagnostics.VisualState
+}
+
+func (surface *observedSurface) DiagnosticState() diagnostics.VisualState {
+	state := surface.Surface.DiagnosticState()
+	select {
+	case surface.states <- state:
+	default:
+	}
+	return state
+}
+
 func TestExampleSearchUsesStableUnicodeRankingAndOpaquePaging(t *testing.T) {
 	var all []interaction.Item
 	cursor := interaction.Cursor{}
@@ -441,8 +455,9 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	observedDebug := &observedSurface{Surface: debugSurface, states: make(chan diagnostics.VisualState, 64)}
 	router := &surfaceRouter{
-		main: picker, debug: debugSurface,
+		main: picker, debug: observedDebug,
 		mainEditing: picker.Editing, debugEditing: debugSurface.Editing,
 	}
 	palette, _ := theme.Builtin("catppuccin")
@@ -477,6 +492,7 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	}
 
 	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
+	waitForObservedState(t, observedDebug.states, "ready")
 	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	reportPath := filepath.Join(stateDirectory, "debug-report.json")
 	var reportData []byte
@@ -543,6 +559,22 @@ func waitForVisualState(t *testing.T, recorder *diagnostics.Recorder, state stri
 	t.Fatalf("did not observe state %q with %d items", state, itemCount)
 }
 
+func waitForObservedState(t *testing.T, states <-chan diagnostics.VisualState, want string) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case state := <-states:
+			if state.State.String() == want {
+				return
+			}
+		case <-deadline.C:
+			t.Fatalf("did not observe Debug UI state %q", want)
+		}
+	}
+}
+
 func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -562,10 +594,11 @@ func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) 
 }
 
 type testSurface struct {
-	results int
-	resizes int
-	texts   int
-	timers  int
+	results  int
+	resizes  int
+	texts    int
+	timers   int
+	suppress bool
 }
 
 func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []shell.Effect {
@@ -582,8 +615,10 @@ func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []sh
 	return nil
 }
 
-func (*testSurface) Render(shell.RenderContext) (*view.Frame, error) { return nil, nil }
-func (*testSurface) DiagnosticState() diagnostics.VisualState        { return diagnostics.VisualState{} }
+func (*testSurface) Render(shell.RenderContext) (*view.Frame, error)     { return nil, nil }
+func (*testSurface) DiagnosticState() diagnostics.VisualState            { return diagnostics.VisualState{} }
+func (surface *testSurface) SuppressEventDiagnostics(shell.Event) bool   { return surface.suppress }
+func (surface *testSurface) SuppressEffectDiagnostics(shell.Effect) bool { return surface.suppress }
 
 func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 	mainSurface, debugSurface := &testSurface{}, &testSurface{}
@@ -601,6 +636,14 @@ func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 	}
 	if mainSurface.resizes != 2 || debugSurface.resizes != 1 || router.showingDebug {
 		t.Fatalf("resize/switch state = main %d, debug %d, showing debug %t", mainSurface.resizes, debugSurface.resizes, router.showingDebug)
+	}
+}
+
+func TestRouterDelegatesDebugMaintenanceSuppressionWhileMainIsActive(t *testing.T) {
+	mainSurface, debugSurface := &testSurface{}, &testSurface{suppress: true}
+	router := &surfaceRouter{main: mainSurface, debug: debugSurface, mainEditing: func() bool { return false }}
+	if router.showingDebug || !router.SuppressEventDiagnostics(shell.TimerEvent{}) || !router.SuppressEffectDiagnostics(shell.Effect{}) {
+		t.Fatal("main-active router did not delegate maintenance suppression to debug surface")
 	}
 }
 

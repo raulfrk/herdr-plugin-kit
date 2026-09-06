@@ -107,7 +107,7 @@ func TestGeneratedProjectBuildsWithoutChangingItsGoMod(t *testing.T) {
 	if err := os.WriteFile(workspace, workspaceData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("go", "test", "./...")
+	command := exec.Command("go", "test", "-race", "./...")
 	command.Dir = output
 	command.Env = append(os.Environ(), "GOWORK="+workspace, "GOTOOLCHAIN=go1.27.0")
 	if data, err := command.CombinedOutput(); err != nil {

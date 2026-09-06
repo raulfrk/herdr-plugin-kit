@@ -130,8 +130,15 @@ type SemanticSink interface {
 }
 
 func (r *Recorder) RecordSemantic(input SemanticEvent) error {
+	_, err := r.RecordSemanticWithSequence(input)
+	return err
+}
+
+// RecordSemanticWithSequence records one semantic event and returns its exact
+// committed sequence. A failed record returns sequence zero.
+func (r *Recorder) RecordSemanticWithSequence(input SemanticEvent) (uint64, error) {
 	if err := validateSemanticEvent(input); err != nil {
-		return err
+		return 0, err
 	}
 	details := map[string]any{
 		"semantic_schema": semanticSchemaVersion,
@@ -152,12 +159,12 @@ func (r *Recorder) RecordSemantic(input SemanticEvent) error {
 	if input.Visual != nil {
 		encoded, err := encodeVisualState(*input.Visual)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		event.UISnapshot = &UISnapshot{Name: "semantic-ui", Text: string(encoded)}
 	}
-	_, err := r.record(event)
-	return err
+	stored, err := r.record(event)
+	return stored.Sequence, err
 }
 
 func validateSemanticEvent(input SemanticEvent) error {

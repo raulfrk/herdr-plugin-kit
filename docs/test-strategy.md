@@ -701,6 +701,29 @@ panel_bg = "reset"
 - Diagnostics: report length, reasons, retained sequences, and redacted health;
   report contents are safe to attach to a debugging session.
 
+## HYP-DEBUG-INSPECTION-01 — Stable inspection preserves captured ownership
+
+- Claim: a snapshot validates exact filters, cancellation, gallery provenance,
+  and nil boundaries; its immutable view pages and exports only captured events,
+  revalidates previews, and never exceeds an inclusive caller byte limit. The
+  debug surface applies only the current query/list/epoch result and preserves
+  independent list anchors and recording failure state.
+- Fault model: invalid filters accepted, cancellation delayed across a bounded
+  scan, unregistered visuals entering the gallery, stale async work replacing
+  current state, preview provenance drifting, or exact-size exports truncating.
+- Setup or generator: fixed semantic events and previews, boundary filters,
+  deterministic cancellation contexts, current and stale projection results,
+  independent timeline/gallery anchors, and computed JSON byte boundaries.
+- Independent oracle: exact event IDs and order, selected/top sequences,
+  omission counts, decoded report membership and byte length, rendered status
+  text, and public diagnostic state.
+- Falsified when: a rejected filter succeeds, cancelled work returns a view,
+  gallery membership lacks captured provenance, stale ownership changes visible
+  state, an anchor crosses lists, or a report differs at its exact valid limit.
+- Diagnostics: query/list/epoch identity, window start and sequences, omission
+  counts, report byte length, and bounded recording counters; no free-form event
+  payload or storage path is emitted.
+
 ## HYP-INTERACTION-01 — Picker state converges on the newest visible request
 
 - Claim: opaque provider cursors can page without a kit-imposed total limit,

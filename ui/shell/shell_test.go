@@ -67,6 +67,27 @@ type probeSurface struct {
 	contexts []RenderContext
 }
 
+type filteredProbeSurface struct {
+	*probeSurface
+	timer   EventCode
+	request RequestKey
+}
+
+func (surface *filteredProbeSurface) SuppressEventDiagnostics(event Event) bool {
+	switch event := event.(type) {
+	case TimerEvent:
+		return event.Code == surface.timer
+	case ResultEvent:
+		return event.Key == surface.request
+	default:
+		return false
+	}
+}
+
+func (surface *filteredProbeSurface) SuppressEffectDiagnostics(effect Effect) bool {
+	return effect.RequestKey() == surface.request || effect.EventCode() == surface.timer
+}
+
 func (surface *probeSurface) Update(context EventContext, event Event) []Effect {
 	surface.events = append(surface.events, event)
 	surface.testSurface.Update(context, event)
@@ -359,6 +380,45 @@ func TestTimerAndSettleDiagnosticsCarryOriginatingGeneration(t *testing.T) {
 	}
 	if !settleFound {
 		t.Fatalf("missing stale settle with monotonic duration in %#v", events)
+	}
+}
+
+func TestDiagnosticFilterSuppressesMaintenanceEventAndWorkLifecycle(t *testing.T) {
+	model, base, sink := testModel(t)
+	timer, _ := NewEventCode("debug.maintenance")
+	request, _ := NewRequestKey("debug.snapshot")
+	probe := &filteredProbeSurface{probeSurface: &probeSurface{testSurface: base}, timer: timer, request: request}
+	probe.effects = func(event Event) []Effect {
+		if fired, ok := event.(TimerEvent); ok && fired.Code == timer {
+			effect, err := model.eventContext().Start(request, func(context.Context) WorkResult {
+				return WorkResult{Code: diagnostics.OutcomeApplied}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return []Effect{effect}
+		}
+		return nil
+	}
+	model.surface = probe
+	model.timerGenerations[timer] = 1
+	_, command := model.Update(timerMessage{TimerEvent{Code: timer, Generation: 1}})
+	if command == nil {
+		t.Fatal("suppressed maintenance work was not scheduled")
+	}
+	message := command()
+	if batch, ok := message.(tea.BatchMsg); ok {
+		if len(batch) != 1 {
+			t.Fatalf("maintenance batch has %d commands", len(batch))
+		}
+		message = batch[0]()
+	}
+	model.Update(message)
+	if events := sink.snapshot(); len(events) != 0 {
+		t.Fatalf("suppressed maintenance produced diagnostics: %+v", events)
+	}
+	if base.results != 1 {
+		t.Fatalf("suppressed work result deliveries = %d", base.results)
 	}
 }
 

@@ -54,6 +54,20 @@ func recordDebugSemantic(t *testing.T, recorder *Recorder, plugin, component, co
 	}
 }
 
+type debugTestReporter interface {
+	Helper()
+	Fatalf(string, ...any)
+}
+
+func cachedStoredEvent(t debugTestReporter, event Event) storedEvent {
+	t.Helper()
+	projected, ok := projectDebugEvent(event)
+	if !ok {
+		t.Fatalf("event did not produce a safe debug projection: %+v", event)
+	}
+	return storedEvent{event: event, debug: &projected}
+}
+
 func TestDebugProjectsCurrentRecorderNewestFirstAndPagesExactly(t *testing.T) {
 	recorder := debugRecorder(t)
 	for _, item := range []struct{ plugin, component, code string }{
@@ -288,9 +302,9 @@ func TestDebugSessionsTrackFirstLastAndStableOrder(t *testing.T) {
 	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	semantic := map[string]any{"semantic_schema": semanticSchemaVersion, "outcome": "applied"}
 	recorder := &Recorder{health: Health{Writable: true}, records: []storedEvent{
-		{event: Event{Sequence: 1, Time: base.Add(2 * time.Minute), Plugin: "beta", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}},
-		{event: Event{Sequence: 2, Time: base, Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}},
-		{event: Event{Sequence: 3, Time: base.Add(2 * time.Minute), Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}},
+		cachedStoredEvent(t, Event{Sequence: 1, Time: base.Add(2 * time.Minute), Plugin: "beta", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
+		cachedStoredEvent(t, Event{Sequence: 2, Time: base, Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
+		cachedStoredEvent(t, Event{Sequence: 3, Time: base.Add(2 * time.Minute), Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
 	}}
 	page, err := recorder.Debug(DebugQuery{})
 	if err != nil {
@@ -311,9 +325,9 @@ func TestDebugSessionIndexOmitsZeroSessionAndDropsBeforeOversizeExport(t *testin
 		config:   Config{MaxReportBytes: 1 << 20},
 		reportAt: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
 		health:   Health{Writable: true},
-		records: []storedEvent{{event: Event{
+		records: []storedEvent{cachedStoredEvent(t, Event{
 			Sequence: 1, Time: time.Now(), Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic,
-		}}},
+		})},
 	}
 	page, err := recorder.Debug(DebugQuery{})
 	if err != nil {
@@ -325,11 +339,11 @@ func TestDebugSessionIndexOmitsZeroSessionAndDropsBeforeOversizeExport(t *testin
 
 	recorder.records = nil
 	for index := range 40 {
-		recorder.records = append(recorder.records, storedEvent{event: Event{
+		recorder.records = append(recorder.records, cachedStoredEvent(t, Event{
 			Sequence: uint64(index + 1), Time: time.Unix(int64(index), 0),
 			Plugin: fmt.Sprintf("session-%02d-with-bounded-padding", index), Message: "event",
 			Level: LevelInfo, Kind: KindDiagnostic, Details: semantic,
-		}})
+		}))
 	}
 	data, err := recorder.ExportDebug(DebugExportOptions{Query: DebugQuery{PageSize: 100}, MaxBytes: 1024})
 	if err != nil {
@@ -397,11 +411,11 @@ func TestDebugPagingMatchesSliceModel(t *testing.T) {
 		pageNumber := rapid.IntRange(0, 100).Draw(t, "page")
 		recorder := &Recorder{health: Health{Writable: true, MaxEvents: 100, MaxBytes: 1 << 20}}
 		for index := range count {
-			recorder.records = append(recorder.records, storedEvent{event: Event{
+			recorder.records = append(recorder.records, cachedStoredEvent(t, Event{
 				Version: EventSchemaVersion, Sequence: uint64(index + 1), Time: time.Unix(int64(index), 0),
 				Level: LevelInfo, Kind: KindDiagnostic, Plugin: "session", Message: "event-" + string(rune('a'+index%26)),
 				Details: map[string]any{"semantic_schema": semanticSchemaVersion, "outcome": "applied"},
-			}})
+			}))
 		}
 		page, err := recorder.Debug(DebugQuery{Page: pageNumber, PageSize: pageSize})
 		if err != nil {
