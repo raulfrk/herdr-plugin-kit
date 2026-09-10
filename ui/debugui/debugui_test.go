@@ -24,6 +24,210 @@ import (
 	"pgregory.net/rapid"
 )
 
+func TestTextFitDetailScrollsPinnedReportAndPreservesList(t *testing.T) {
+	report := &diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{}, Omitted: 2}
+	for index := range diagnostics.MaxTextFitObservations {
+		report.Observations = append(report.Observations, diagnostics.TextFitObservation{
+			Element: uiID(t, "essential"), Instance: index, OriginalColumns: 80, LayoutRows: 3,
+			AvailableColumns: 38, AvailableRows: 2, Intent: diagnostics.TextFitWrap, Wrapped: true, Clipped: true,
+		})
+	}
+	surface := &Surface{loaded: true, screen: screenTimeline, list: screenTimeline,
+		layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}),
+		page:   diagnostics.DebugPage{Events: []diagnostics.DebugEvent{{Code: uiID(t, "render.completed"), Sequence: 7, TextFit: report}}}}
+	surface.anchors[0] = inspectionAnchor{selected: 7, top: 7}
+	anchor := surface.anchors
+	surface.openDetail()
+	report.Observations[0].Instance = 999
+	if surface.detail.TextFit.Observations[0].Instance != 0 {
+		t.Fatal("pinned report aliases list event")
+	}
+	var visible strings.Builder
+	reachedEnd := false
+	// At fixed geometry, each successful page step must advance through this
+	// finite row set. A render/navigation disagreement must fail, not cycle.
+	rowBound := len(surface.detailRows(surface.detail, surface.layout.Render.Columns-2))
+	// At 38 ASCII cells, the header takes two rows; each observation takes
+	// one outcome row, two dimension rows, and two flag rows.
+	wantRows := len(surface.detailLines(surface.detail)) + 2 + 5*diagnostics.MaxTextFitObservations
+	if rowBound != wantRows {
+		t.Fatalf("detail wrapping rows=%d, want %d", rowBound, wantRows)
+	}
+	for step := 0; step <= rowBound; step++ {
+		offsetBeforeRender := surface.detailOffset
+		frame, err := surface.Render(shell.RenderContext{Layout: surface.layout, Theme: terminalTheme(t)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if surface.detailOffset != offsetBeforeRender {
+			t.Fatalf("fixed-geometry Render changed detail offset from %d to %d", offsetBeforeRender, surface.detailOffset)
+		}
+		// Join only the detail viewport, excluding repeated chrome. Whitespace
+		// and hard row boundaries are layout, not missing metadata.
+		for row := 3; row < frame.Height()-1; row++ {
+			for column := 1; column < frame.Width()-1; column++ {
+				cell, _ := frame.CellAt(column, row)
+				if !cell.Continuation {
+					visible.WriteString(cell.Text)
+				}
+			}
+		}
+		previous := surface.detailOffset
+		surface.key(shell.EventContext{}, shell.KeyPageDown)
+		if surface.detailOffset == previous {
+			reachedEnd = true
+			break
+		}
+		if surface.detailOffset < previous {
+			t.Fatal("PageDown moved backward")
+		}
+	}
+	if !reachedEnd {
+		t.Fatal("detail traversal exhausted its row bound")
+	}
+	seen := strings.Join(strings.Fields(visible.String()), "")
+	wants := []string{"256 measured, 2 omitted", "unchecked", "UNEXPECTED loss", "original 80 columns; layout 3 rows; available 38x2; intent wrap"}
+	for index := range diagnostics.MaxTextFitObservations {
+		wants = append(wants, fmt.Sprintf("essential[%d]", index))
+	}
+	for _, want := range wants {
+		if !strings.Contains(seen, strings.Join(strings.Fields(want), "")) {
+			t.Fatalf("detail cannot reach %q", want)
+		}
+	}
+	end := surface.detailOffset
+	surface.key(shell.EventContext{}, shell.KeyHome)
+	if surface.detailOffset != 0 {
+		t.Fatal("Home did not reset detail")
+	}
+	surface.key(shell.EventContext{}, shell.KeyDown)
+	if surface.detailOffset != 1 {
+		t.Fatal("Down did not move one detail row")
+	}
+	surface.key(shell.EventContext{}, shell.KeyUp)
+	if surface.detailOffset != 0 {
+		t.Fatal("Up did not move one detail row")
+	}
+	surface.key(shell.EventContext{}, shell.KeyPageDown)
+	if surface.detailOffset != 6 {
+		t.Fatalf("PageDown offset %d", surface.detailOffset)
+	}
+	surface.key(shell.EventContext{}, shell.KeyPageUp)
+	if surface.detailOffset != 0 {
+		t.Fatal("PageUp did not return to top")
+	}
+	surface.key(shell.EventContext{}, shell.KeyEnd)
+	if surface.detailOffset != end {
+		t.Fatal("End did not reach final page")
+	}
+	large := responsive.Resolve(responsive.Size{Columns: 500, Rows: 200})
+	if _, err := surface.Render(shell.RenderContext{Layout: large, Theme: terminalTheme(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if surface.detailOffset >= end {
+		t.Fatal("resize did not clamp offset")
+	}
+	surface.key(shell.EventContext{}, shell.KeyEscape)
+	if surface.screen != screenTimeline || surface.selected != 0 || surface.anchors != anchor {
+		t.Fatal("detail navigation changed list position")
+	}
+	surface.openDetail()
+	if surface.detailOffset != 0 {
+		t.Fatal("entry did not reset offset")
+	}
+}
+
+func TestTextFitDetailOutcomeTable(t *testing.T) {
+	for _, test := range []struct {
+		clipped, truncated, allow bool
+		want                      string
+	}{
+		{true, false, false, "UNEXPECTED loss"},
+		{true, false, true, "UNEXPECTED loss"},
+		{true, true, true, "UNEXPECTED loss"},
+		{false, false, false, "no measured loss"},
+		{false, false, true, "no measured loss"},
+		{false, true, false, "UNEXPECTED loss"},
+		{false, true, true, "intentional truncation"},
+	} {
+		surface := &Surface{}
+		event := &diagnostics.DebugEvent{TextFit: &diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{Element: uiID(t, "outcome"), Intent: diagnostics.TextFitTruncate, Clipped: test.clipped, Truncated: test.truncated, AllowTruncation: test.allow}}}}
+		rows := strings.Join(surface.detailRows(event, 100), " ")
+		if !strings.Contains(rows, "outcome[0]: "+test.want) {
+			t.Fatalf("%+v produced %q", test, rows)
+		}
+	}
+}
+
+func TestTextFitDetailCoverageAndEssentialBlocks(t *testing.T) {
+	surface := &Surface{loaded: true, screen: screenHealth}
+	if got := strings.Join(surface.detailRows(&diagnostics.DebugEvent{}, 100), " "); !strings.Contains(got, "unmeasured") || !strings.Contains(got, "unchecked") {
+		t.Fatalf("legacy coverage: %s", got)
+	}
+	layout := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
+	frame, err := surface.Render(shell.RenderContext{Layout: layout, Theme: terminalTheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, observation := range frame.TextFit().Observations {
+		if observation.LayoutRows == 6 && observation.AvailableRows == 6 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("health block not measured: %+v", frame.TextFit())
+	}
+}
+
+func TestTextFitRenderedReportReachesDetailAndExport(t *testing.T) {
+	const privateText = "PRIVATE_QUERY_界👩‍💻"
+	frame, err := view.NewFrame(2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := frame.PutTextBox(view.TextBoxOptions{Element: uiID(t, "essential"), Width: 2, Height: 1, Mode: view.TextClip}, []string{privateText}, view.Style{}); err != nil {
+		t.Fatal(err)
+	}
+	fit := frame.TextFit()
+	recorder := uiRecorder(t)
+	event := recordingEvent(t, "render.completed", "plugin.content")
+	event.TextFit = &fit
+	if err := recorder.RecordSemantic(event); err != nil {
+		t.Fatal(err)
+	}
+	fit.Observations[0].AvailableColumns = 999
+	var exported []byte
+	surface, err := newTestSurface(t, Options{Recorder: recorder, Exporter: func(_ context.Context, data []byte) error {
+		exported = append([]byte(nil), data...)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface.screen, surface.list = screenTimeline, screenTimeline
+	surface.openDetail()
+	detail := renderAt(t, surface, responsive.Size{Columns: 80, Rows: 40}, 1)
+	for _, want := range []string{"1 measured, 0 omitted", "UNEXPECTED loss", "available 2x1", "intent clip"} {
+		if !strings.Contains(frameText(detail), want) {
+			t.Fatalf("recorded detail missing %q", want)
+		}
+	}
+	if result := surface.exportWork()(context.Background()); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	var report diagnostics.DebugReport
+	if err := json.Unmarshal(exported, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Events) != 1 || report.Events[0].TextFit == nil || report.Events[0].TextFit.Observations[0].AvailableColumns != 2 {
+		t.Fatalf("export lost measured report: %s", exported)
+	}
+	if bytes.Contains(exported, []byte(privateText)) || strings.Contains(frameText(detail), privateText) {
+		t.Fatal("source text escaped into diagnostics")
+	}
+}
+
 func TestUIExportFallsBackByOmittingOversizedSessionIndex(t *testing.T) {
 	recorder := uiRecorder(t)
 	for index := range 40 {

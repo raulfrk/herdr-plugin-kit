@@ -1,10 +1,12 @@
 package diagnostics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/bits"
 	"time"
 )
@@ -70,6 +72,7 @@ type DebugEvent struct {
 	Duration          time.Duration
 	Geometry          Geometry
 	Visual            *VisualState
+	TextFit           *TextFitReport `json:"text_fit,omitempty"`
 }
 
 type DebugPage struct {
@@ -141,6 +144,7 @@ func cloneDebugEvent(event DebugEvent) DebugEvent {
 		visual := *event.Visual
 		event.Visual = &visual
 	}
+	event.TextFit = CloneTextFit(event.TextFit)
 	return event
 }
 
@@ -293,6 +297,36 @@ func projectSemanticDetails(event *DebugEvent, details map[string]any) {
 	event.Geometry.ReportedRows, _ = intDetail(details["reported_rows"])
 	event.Geometry.RenderColumns, _ = intDetail(details["render_columns"])
 	event.Geometry.RenderRows, _ = intDetail(details["render_rows"])
+	if raw, ok := details["text_fit"]; ok {
+		encoded, err := json.Marshal(raw)
+		if err == nil && textFitFieldsNonNull(encoded) {
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.DisallowUnknownFields()
+			var report TextFitReport
+			if decoder.Decode(&report) == nil && decoder.Decode(&struct{}{}) == io.EOF && validateTextFit(report) == nil {
+				event.TextFit = CloneTextFit(&report)
+			}
+		}
+	}
+}
+
+// Missing optional fields retain their defaults; explicit null is unmeasured.
+func textFitFieldsNonNull(encoded []byte) bool {
+	var shape struct {
+		Omitted      json.RawMessage              `json:"omitted"`
+		Observations []map[string]json.RawMessage `json:"observations"`
+	}
+	if json.Unmarshal(encoded, &shape) != nil || bytes.Equal(shape.Omitted, []byte("null")) {
+		return false
+	}
+	for _, observation := range shape.Observations {
+		for _, value := range observation {
+			if bytes.Equal(value, []byte("null")) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func decodeVisual(raw string) *VisualState {

@@ -171,7 +171,7 @@ func TestPTYResizeOutputAndSettlementTiming(t *testing.T) {
 	observedSettleDurations := make([]time.Duration, 0, 200)
 	persistedSettleDurations := make([]time.Duration, 0, 200)
 	generation := uint64(1)
-	var logOffset int64
+	var logCursor uint64
 	for trace := range 200 {
 		for step := range 3 {
 			generation++
@@ -186,8 +186,8 @@ func TestPTYResizeOutputAndSettlementTiming(t *testing.T) {
 		setPTYSize(t, command, master, 500, 200)
 		waitForOutputAfter(t, &output, offset, fmt.Sprintf("generation=%d size=500x200 settled=false", generation))
 		durations = append(durations, time.Since(finalStarted))
-		settleDuration, persistedAt, observedAt, nextOffset := waitForSettledAfter(t, directory, generation, logOffset)
-		logOffset = nextOffset
+		settleDuration, persistedAt, observedAt, nextCursor := waitForSettledAfter(t, directory, generation, logCursor)
+		logCursor = nextCursor
 		observedSettleDuration := observedAt.Sub(finalStarted)
 		persistedSettleDuration := persistedAt.Sub(finalStarted.Round(0))
 		settleDurations = append(settleDurations, settleDuration)
@@ -329,36 +329,105 @@ func assertNoObsoleteGenerationAfterFinal(t *testing.T, output string, want uint
 	}
 }
 
-func waitForSettledAfter(t *testing.T, directory string, generation uint64, offset int64) (time.Duration, time.Time, time.Time, int64) {
+// Only complete JSONL records advance the sequence cursor. Re-read canonical
+// files each poll: retention may replace a prefix and rotation may add a file.
+func recordedEventsAfter(directory string, cursor uint64) ([]diagnostics.Event, error) {
+	paths, err := canonicalLogFiles(directory)
+	if err != nil {
+		return nil, err
+	}
+	var events []diagnostics.Event
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		} // Retention raced this directory snapshot.
+		if err != nil {
+			return nil, err
+		}
+		for {
+			end := bytes.IndexByte(data, '\n')
+			if end < 0 {
+				break
+			}
+			line := data[:end]
+			data = data[end+1:]
+			var event diagnostics.Event
+			if json.Unmarshal(line, &event) != nil || event.Sequence <= cursor {
+				continue
+			}
+			events = append(events, event)
+			cursor = event.Sequence
+		}
+	}
+	return events, nil
+}
+
+func TestSegmentSequenceCursorSurvivesRetentionRotationAndPartialTail(t *testing.T) {
+	directory := t.TempDir()
+	live := filepath.Join(directory, "events-v1")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(live, "events-00000000000000000001.jsonl")
+	second := filepath.Join(live, "events-00000000000000000002.jsonl")
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sequences := func(cursor uint64, want ...uint64) {
+		t.Helper()
+		events, err := recordedEventsAfter(directory, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != len(want) {
+			t.Fatalf("cursor %d events=%+v want=%v", cursor, events, want)
+		}
+		for i, event := range events {
+			if event.Sequence != want[i] {
+				t.Fatalf("events=%+v want=%v", events, want)
+			}
+		}
+	}
+	write(first, "{\"sequence\":1}\n{\"sequence\":2}\n{\"sequence\":3")
+	sequences(1, 2)
+	// Retention atomically replaces a prefix; a byte offset would now be stale.
+	write(first, "{\"sequence\":2}\n")
+	write(second, "{\"sequence\":3}\n{\"sequence\":4")
+	sequences(2, 3)
+	if err := os.Remove(first); err != nil {
+		t.Fatal(err)
+	}
+	write(second, "{\"sequence\":3}\n{\"sequence\":4}\n")
+	sequences(3, 4)
+	sequences(4)
+	write(second, "{\"sequence\":4}\n"+
+		`{"sequence":5,"message":"resize.settled","action":"resize.settle","details":{"generation":1,"related_generation":1,"outcome":"applied","duration_ns":99}}`+"\n"+
+		`{"sequence":6,"message":"resize.settled","action":"resize.settle","details":{"generation":2,"related_generation":2,"outcome":"applied","duration_ns":7}}`+"\n")
+	duration, _, _, cursor := waitForSettledAfter(t, directory, 2, 4)
+	if duration != 7 || cursor != 6 {
+		t.Fatalf("settlement duration=%v cursor=%d", duration, cursor)
+	}
+}
+
+func waitForSettledAfter(t *testing.T, directory string, generation uint64, cursor uint64) (time.Duration, time.Time, time.Time, uint64) {
 	t.Helper()
-	path := filepath.Join(directory, diagnostics.EventLogName)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		file, err := os.Open(path)
-		if err != nil {
+		events, err := recordedEventsAfter(directory, cursor)
+		if os.IsNotExist(err) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		if _, err := file.Seek(offset, io.SeekStart); err != nil {
-			file.Close()
-			t.Fatal(err)
-		}
-		data, err := io.ReadAll(file)
-		file.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
-		consumed := int64(0)
-		for {
-			newline := bytes.IndexByte(data, '\n')
-			if newline < 0 {
-				break
-			}
-			line := data[:newline]
-			data = data[newline+1:]
-			consumed += int64(newline + 1)
-			var event diagnostics.Event
-			if json.Unmarshal(line, &event) != nil || event.Message != "resize.settled" {
+		for _, event := range events {
+			cursor = event.Sequence
+			if event.Message != "resize.settled" {
 				continue
 			}
 			value, currentGeneration := event.Details["generation"].(float64)
@@ -369,13 +438,13 @@ func waitForSettledAfter(t *testing.T, directory string, generation uint64, offs
 				if !ok || duration < 0 {
 					t.Fatalf("settled event for generation %d has invalid duration %#v", generation, event.Details["duration_ns"])
 				}
-				return time.Duration(duration), event.Time, time.Now(), offset + consumed
+				return time.Duration(duration), event.Time, time.Now(), cursor
 			}
 		}
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("missing settled event for generation %d", generation)
-	return 0, time.Time{}, time.Time{}, offset
+	return 0, time.Time{}, time.Time{}, cursor
 }
 
 func terminalState(t *testing.T, path string) string {

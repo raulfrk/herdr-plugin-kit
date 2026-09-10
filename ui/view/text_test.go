@@ -24,6 +24,9 @@ func TestTruncatePreservesGraphemesAndCellBudget(t *testing.T) {
 		{text: "exact", width: 5, marker: "…", want: "exact"},
 		{text: "界a", width: 2, marker: "", want: "界"},
 		{text: "界a", width: 1, marker: "…", want: "…"},
+		{text: "\x00ab", width: 1, marker: "…", want: "…"},
+		{text: "🇺abcd", width: 4, marker: "🇸", want: "🇺🇸"},
+		{text: "abc", width: 1, marker: "\u0301", want: "a\u0301"},
 	} {
 		got := view.Truncate(test.text, test.width, test.marker)
 		if got != test.want || test.width >= 0 && uniseg.StringWidth(got) > test.width {

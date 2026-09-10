@@ -126,6 +126,7 @@ func debuggerSemantic(event diagnostics.SemanticEvent) bool {
 }
 
 func copySemantic(event diagnostics.SemanticEvent) diagnostics.SemanticEvent {
+	event.TextFit = diagnostics.CloneTextFit(event.TextFit)
 	if event.Visual != nil {
 		visual := *event.Visual
 		event.Visual = &visual

@@ -12,6 +12,11 @@ import (
 
 type Event interface{ shellEvent() }
 
+// ActionEvent invokes a declared command independently of its current binding.
+type ActionEvent struct{ ID string }
+
+func (ActionEvent) shellEvent() {}
+
 type KeyCode string
 
 const (

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -78,39 +77,31 @@ func TestFocusValidatesCompleteIdentity(t *testing.T) {
 		t.Fatal("session replacement accepted")
 	}
 }
-func TestClassifyTerminalFirstAndHostFallback(t *testing.T) {
-	tests := []struct {
-		name, kind, host, text string
-		status                 Status
-		reason                 Reason
+func TestNonCodexHostStatus(t *testing.T) {
+	for _, tc := range []struct {
+		host   string
+		status Status
 	}{
-		{"queue beats question", "codex", "blocked", "queued follow-up inputs: would you like this?", Working, Queue},
-		{"question", "codex", "working", "Please choose one [y/n] · esc to cancel", Blocked, Question},
-		{"narrow background wait", "codex", "idle", "background termin… running", Working, TerminalWait},
-		{"stale done ready composer", "codex", "done", "Ask Codex", Idle, Composer},
-		{"stale blocked ready composer", "codex", "blocked", "› Ask Codex", Idle, Composer},
-		{"empty detection is not a composer", "codex", "idle", "", Unknown, Unrecognized},
-		{"idle without composer", "codex", "idle", "ordinary completed output", Unknown, Unrecognized},
-		{"done fallback", "codex", "done", "ordinary completed output", Done, HostReport},
-		{"mixed agent host report", "claude", "working", "Ask Codex", Working, HostReport},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			a := mustPublic(t, validWireAgent("w:p"))
-			a.Kind, a.Status = tc.kind, tc.host
-			s, r := classify(a, tc.text)
-			if s != tc.status || r != tc.reason {
-				t.Fatalf("got %s/%s", s, r)
+		{"working", Working}, {"blocked", Blocked}, {"done", Done}, {"idle", Unknown}, {"unknown", Unknown},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			a := validWireAgent("w:p")
+			a.AgentStatus = tc.host
+			runner := &scriptedRunner{results: observationResults(t, a, "Ask Codex", a, "please approve")}
+			got, err := fastProbe(Host{Runner: runner}).Assess(context.Background(), mustPublic(t, a))
+			if err != nil || !got.Stable || got.Status != tc.status || got.Reason != HostReport {
+				t.Fatalf("got=%+v error=%v", got, err)
 			}
 		})
 	}
 }
 func TestChangingTextSameClassificationAndStableStatusSeqSucceeds(t *testing.T) {
 	a := validWireAgent("w:p")
+	a.AgentStatus = "working"
 	results := observationResults(t, a, "running command alpha", a, "running command beta")
 	runner := &scriptedRunner{results: results}
 	got, err := fastProbe(Host{Runner: runner}).Assess(context.Background(), mustPublic(t, a))
-	if err != nil || !got.Stable || got.Status != Working || got.Reason != TerminalWait {
+	if err != nil || !got.Stable || got.Status != Working || got.Reason != HostReport {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
 	if len(runner.calls) != 6 || !reflect.DeepEqual(runner.calls[0][1:], []string{"agent", "list"}) || !reflect.DeepEqual(runner.calls[1][1:], []string{"pane", "read", "w:p", "--source", "detection", "--lines", "60", "--format", "text"}) {
@@ -266,6 +257,7 @@ func TestPropertyObservationCoherence(t *testing.T) {
 		revision := rapid.Uint64().Draw(rt, "revision")
 		a := validWireAgent("w:p")
 		a.Revision = revision
+		a.AgentStatus = "working"
 		results := observationResults(t, a, "messages to be submitted at end of turn: one", a, "edit last queued message: two")
 		got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
 		if err != nil || !got.Stable || got.Status != Working {
@@ -282,9 +274,9 @@ func TestAssessmentRejectsEveryCrossSampleIdentityAndSemanticChange(t *testing.T
 		text   string
 		want   Assessment
 	}{
-		{"kind", func(a *wireAgent) { a.Agent = "claude" }, "Ask Codex", Assessment{}}, {"workspace", func(a *wireAgent) { a.WorkspaceID = "w2" }, "Ask Codex", Assessment{}},
+		{"kind", func(a *wireAgent) { a.Agent = "codex" }, "Ask Codex", Assessment{}}, {"workspace", func(a *wireAgent) { a.WorkspaceID = "w2" }, "Ask Codex", Assessment{}},
 		{"tab", func(a *wireAgent) { a.TabID = "w1:t2" }, "Ask Codex", Assessment{}}, {"pane", func(a *wireAgent) { a.PaneID = "w:p2" }, "Ask Codex", Assessment{}},
-		{"host status", func(a *wireAgent) { a.AgentStatus = "working" }, "Ask Codex", Assessment{Status: Unknown, Reason: Unsettled}}, {"semantic", func(*wireAgent) {}, "running command", Assessment{Status: Unknown, Reason: Unsettled}},
+		{"host status", func(a *wireAgent) { a.AgentStatus = "working" }, "Ask Codex", Assessment{Status: Unknown, Reason: Unsettled}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,34 +351,15 @@ func TestTargetAndSessionValidationBoundaries(t *testing.T) {
 	}
 }
 
-func TestDetectionAndTailExactBoundaries(t *testing.T) {
+func TestDetectionExactBoundary(t *testing.T) {
 	a := validWireAgent("w:p")
 	exact := strings.Repeat("x", MaxDetectionBytes)
 	results := observationResults(t, a, exact, a, exact)
 	got, err := fastProbe(Host{Runner: &scriptedRunner{results: results}}).Assess(context.Background(), mustPublic(t, a))
-	if err != nil || !got.Stable || got.Status != Unknown || got.Reason != Unrecognized {
+	if err != nil || !got.Stable || got.Status != Unknown || got.Reason != HostReport {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
-	sixty := make([]string, DetectionLines)
-	for i := range sixty {
-		sixty[i] = fmt.Sprintf("line-%d", i)
-	}
-	tail := strings.Split(boundedTail(strings.Join(sixty, "\n")), "\n")
-	if len(tail) != DetectionLines || tail[0] != "line-0" {
-		t.Fatalf("60-line tail=%q", tail)
-	}
-	tail = strings.Split(boundedTail(strings.Join(append([]string{"discard"}, sixty...), "\n")), "\n")
-	if len(tail) != DetectionLines || tail[0] != "line-0" {
-		t.Fatalf("61-line tail=%q", tail)
-	}
-	twelve := append([]string{"queued follow-up inputs"}, make([]string, classifierLines-1)...)
-	if !strings.Contains(normalize(strings.Join(twelve, "\n")), "queued follow-up inputs") {
-		t.Fatal("12-line marker lost")
-	}
-	thirteen := append([]string{"queued follow-up inputs", "ordinary"}, make([]string, classifierLines-1)...)
-	if strings.Contains(normalize(strings.Join(thirteen, "\n")), "queued follow-up inputs") {
-		t.Fatal("old marker retained")
-	}
+
 }
 
 func observationResults(t *testing.T, a wireAgent, textA string, b wireAgent, textB string) []command.Result {
@@ -396,7 +369,7 @@ func oneObservation(t *testing.T, before, after wireAgent, text string) []comman
 	return []command.Result{jsonResult(t, listResponse(before)), {Stdout: []byte(text)}, jsonResult(t, listResponse(after))}
 }
 func validWireAgent(pane string) wireAgent {
-	return wireAgent{Agent: "codex", AgentStatus: "idle", Focused: true, InteractiveReady: true, PaneID: pane, Revision: 7, StateChangeSeq: 11, TabID: "w1:t1", WorkspaceID: "w1"}
+	return wireAgent{Agent: "claude", AgentStatus: "idle", Focused: true, InteractiveReady: true, PaneID: pane, Revision: 7, StateChangeSeq: 11, TabID: "w1:t1", WorkspaceID: "w1"}
 }
 func mustPublic(t *testing.T, w wireAgent) Agent {
 	t.Helper()

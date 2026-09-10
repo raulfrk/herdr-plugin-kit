@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/pelletier/go-toml/v2 v2.2.3
 	github.com/rivo/uniseg v0.4.7

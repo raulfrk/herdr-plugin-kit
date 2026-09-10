@@ -86,6 +86,50 @@ func TestCellAtFrameBoundaries(t *testing.T) {
 	}
 }
 
+func TestBlankFrameCellAndRendererParity(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		width, height int
+		ansi          string
+	}{{"one cell", 1, 1, " \x1b[0m"}, {"multiple rows", 3, 2, "   \n   \x1b[0m"}} {
+		t.Run(test.name, func(t *testing.T) {
+			frame, err := view.NewFrame(test.width, test.height)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for y := range test.height {
+				for x := range test.width {
+					if cell, ok := frame.CellAt(x, y); !ok || cell != (view.Cell{}) {
+						t.Fatalf("blank cell (%d,%d) = %+v, present=%t", x, y, cell, ok)
+					}
+				}
+			}
+			if got := view.ANSI(frame); got != test.ansi {
+				t.Fatalf("blank ANSI = %q, want %q", got, test.ansi)
+			}
+			encoded, err := view.PNG(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := png.Decode(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := image.Rect(0, 0, test.width*view.PNGCellWidth, test.height*view.PNGCellHeight)
+			if decoded.Bounds() != want {
+				t.Fatalf("blank PNG dimensions = %v, want %v", decoded.Bounds(), want)
+			}
+			for y := range want.Dy() {
+				for x := range want.Dx() {
+					if r, g, b, a := decoded.At(x, y).RGBA(); r != 0 || g != 0 || b != 0 || a != 0 {
+						t.Fatalf("blank PNG pixel (%d,%d) is not transparent", x, y)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestANSIAndPNGDeterminismDimensionsAndStyleParity(t *testing.T) {
 	frame, _ := view.NewFrame(4, 2)
 	style := view.Style{Foreground: "#fefefe", Background: "#123456", Bold: true, Dim: true, Underline: true}

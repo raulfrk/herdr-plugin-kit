@@ -59,13 +59,13 @@ type debugTestReporter interface {
 	Fatalf(string, ...any)
 }
 
-func cachedStoredEvent(t debugTestReporter, event Event) storedEvent {
+func cachedStoredEvent(t debugTestReporter, event Event) *storedEvent {
 	t.Helper()
 	projected, ok := projectDebugEvent(event)
 	if !ok {
 		t.Fatalf("event did not produce a safe debug projection: %+v", event)
 	}
-	return storedEvent{event: event, debug: &projected}
+	return &storedEvent{event: event, debug: &projected}
 }
 
 func TestDebugProjectsCurrentRecorderNewestFirstAndPagesExactly(t *testing.T) {
@@ -301,7 +301,7 @@ func TestDebugReportJSONPreservesNestedSemanticIDs(t *testing.T) {
 func TestDebugSessionsTrackFirstLastAndStableOrder(t *testing.T) {
 	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	semantic := map[string]any{"semantic_schema": semanticSchemaVersion, "outcome": "applied"}
-	recorder := &Recorder{health: Health{Writable: true}, records: []storedEvent{
+	recorder := &Recorder{health: Health{Writable: true}, records: []*storedEvent{
 		cachedStoredEvent(t, Event{Sequence: 1, Time: base.Add(2 * time.Minute), Plugin: "beta", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
 		cachedStoredEvent(t, Event{Sequence: 2, Time: base, Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
 		cachedStoredEvent(t, Event{Sequence: 3, Time: base.Add(2 * time.Minute), Plugin: "alpha", Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic}),
@@ -325,7 +325,7 @@ func TestDebugSessionIndexOmitsZeroSessionAndDropsBeforeOversizeExport(t *testin
 		config:   Config{MaxReportBytes: 1 << 20},
 		reportAt: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
 		health:   Health{Writable: true},
-		records: []storedEvent{cachedStoredEvent(t, Event{
+		records: []*storedEvent{cachedStoredEvent(t, Event{
 			Sequence: 1, Time: time.Now(), Message: "event", Level: LevelInfo, Kind: KindDiagnostic, Details: semantic,
 		})},
 	}

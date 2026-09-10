@@ -39,9 +39,10 @@ type Loader func(context.Context, string, Cursor) (Page, error)
 type Activator func(context.Context, Item) error
 
 type PickerOptions struct {
-	Title    string
-	Load     Loader
-	Activate Activator
+	Title     string
+	Namespace string
+	Load      Loader
+	Activate  Activator
 }
 
 const queryDebounce time.Duration = 80_000_000
@@ -89,6 +90,7 @@ type Picker struct {
 	pendingActivation    bool
 	queryDirty           bool
 	queryRevision        uint64
+	targetRevision       uint64
 	loadGeneration       uint64
 	activationGeneration uint64
 	hasError             bool
@@ -105,9 +107,29 @@ func NewPicker(options PickerOptions) (*Picker, error) {
 	if options.Load == nil {
 		return nil, errors.New("picker loader is nil")
 	}
-	loadKey, _ := shell.NewRequestKey("interaction.picker.load")
-	activationKey, _ := shell.NewRequestKey("interaction.picker.activate")
-	queryDebounceCode, _ := shell.NewEventCode("interaction.picker.query")
+	namespace := options.Namespace
+	if namespace == "" {
+		namespace = "interaction.picker"
+	} else if _, err := diagnostics.NewID(namespace); err != nil {
+		return nil, fmt.Errorf("invalid picker namespace: %w", err)
+	}
+	loadKey, err := shell.NewRequestKey(namespace + ".load")
+	if err != nil {
+		return nil, fmt.Errorf("invalid picker load key: %w", err)
+	}
+	activationKey, err := shell.NewRequestKey(namespace + ".activate")
+	if err != nil {
+		return nil, fmt.Errorf("invalid picker activation key: %w", err)
+	}
+	queryDebounceCode, err := shell.NewEventCode(namespace + ".query")
+	if err != nil {
+		return nil, fmt.Errorf("invalid picker query timer: %w", err)
+	}
+	for _, suffix := range []string{".results", ".editing", ".detail", ".help"} {
+		if _, err := diagnostics.NewID(namespace + suffix); err != nil {
+			return nil, fmt.Errorf("invalid picker context: %w", err)
+		}
+	}
 	return &Picker{options: options, loadKey: loadKey, activationKey: activationKey, queryDebounceCode: queryDebounceCode}, nil
 }
 
@@ -117,6 +139,11 @@ func (picker *Picker) Editing() bool { return picker.editing }
 // Selected returns the current enabled item. The false result covers empty
 // pages, invalid selection state, and disabled items.
 func (picker *Picker) Selected() (Item, bool) { return picker.selectedItem() }
+
+// Refresh reloads the first page while preserving the query and selected item identity.
+func (picker *Picker) Refresh(events shell.EventContext) []shell.Effect {
+	return picker.startLoad(events, Cursor{}, false)
+}
 
 func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event) []shell.Effect {
 	switch event := event.(type) {
@@ -136,6 +163,8 @@ func (picker *Picker) Update(eventContext shell.EventContext, event shell.Event)
 		return picker.text(eventContext, event.Text)
 	case shell.KeyEvent:
 		return picker.key(eventContext, event.Code)
+	case shell.ActionEvent:
+		return picker.action(eventContext, event.ID)
 	case shell.ResultEvent:
 		picker.result(event)
 	case shell.TimerEvent:
@@ -363,6 +392,7 @@ func (picker *Picker) applyPage(result loadResult) error {
 	}
 	picker.loaded, picker.hasError = true, false
 	picker.restoreSelection()
+	picker.targetRevision++
 	return nil
 }
 
@@ -548,32 +578,27 @@ func (picker *Picker) Render(context shell.RenderContext) (*view.Frame, error) {
 func (picker *Picker) renderRecovery(frame *view.Frame, palette theme.Palette, reported responsive.Size) {
 	header := view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
 	frame.Fill(0, 0, frame.Width(), 1, header)
-	frame.PutText(1, 0, fitCells(picker.options.Title, frame.Width()-2), header)
+	putTextBox(frame, "picker-recovery-title", 0, 1, 0, frame.Width()-2, 1, view.TextTruncate, false, []string{picker.options.Title}, header)
 	lines := []string{
 		"Terminal is too small",
 		fmt.Sprintf("Need 40×10 · received %d×%d", reported.Columns, reported.Rows),
 		"Resize to continue; your state is preserved.",
 	}
-	for row, line := range lines {
-		if row+2 >= frame.Height() {
-			break
-		}
-		frame.PutText(1, row+2, fitCells(line, frame.Width()-2), view.Style{Foreground: palette.Text, Background: palette.Background})
-	}
+	putTextBox(frame, "picker-recovery-body", 0, 1, 2, frame.Width()-2, frame.Height()-2, view.TextTruncate, false, lines, view.Style{Foreground: palette.Text, Background: palette.Background})
 }
 
 func (picker *Picker) renderRoot(frame *view.Frame, palette theme.Palette, split bool) {
 	width, height := frame.Width(), frame.Height()
 	header := view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
 	frame.Fill(0, 0, width, 1, header)
-	frame.PutText(1, 0, fitCells(picker.options.Title, width-2), header)
+	putTextBox(frame, "picker-title", 0, 1, 0, width-2, 1, view.TextTruncate, false, []string{picker.options.Title}, header)
 	search := "Search: " + picker.query.Text()
 	if picker.editing {
 		search = "Search: " + picker.queryWithCursor()
 	}
 	frame.PutText(0, 1, "▌", view.Style{Foreground: palette.Accent, Background: palette.Background, Bold: true})
-	frame.PutText(2, 1, fitCells(search, width-3), view.Style{Foreground: palette.Text, Background: palette.Background})
-	frame.PutText(1, 2, fitCells(picker.status(), width-2), view.Style{Foreground: palette.Muted, Background: palette.Background})
+	putTextBox(frame, "picker-search", 0, 2, 1, width-3, 1, view.TextTruncate, false, []string{search}, view.Style{Foreground: palette.Text, Background: palette.Background})
+	putTextBox(frame, "picker-status", 0, 1, 2, width-2, 1, view.TextTruncate, false, []string{picker.status()}, view.Style{Foreground: palette.Muted, Background: palette.Background})
 	listWidth := width
 	if split {
 		listWidth = width * 2 / 3
@@ -600,47 +625,43 @@ func (picker *Picker) renderRoot(frame *view.Frame, palette theme.Palette, split
 		frame.PutText(0, row+3, fitCells(prefix+item.Label, listWidth), style)
 	}
 	footer := "? help · / search · j/k move · o open · n/p page · q quit"
-	frame.PutText(0, height-1, fitCells(footer, width), view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
+	putTextBox(frame, "picker-footer", 0, 0, height-1, width, 1, view.TextTruncate, false, []string{footer}, view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
 }
 
 func (picker *Picker) renderCompactDetail(frame *view.Frame, palette theme.Palette) {
 	width, height := frame.Width(), frame.Height()
 	header := view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
 	frame.Fill(0, 0, width, 1, header)
-	frame.PutText(1, 0, fitCells("Detail · "+picker.options.Title, width-2), header)
+	putTextBox(frame, "picker-detail-header", 0, 1, 0, width-2, 1, view.TextTruncate, false, []string{"Detail · " + picker.options.Title}, header)
 	picker.renderDetail(frame, palette, 1, 2, width-2, height-4)
-	frame.PutText(0, height-1, fitCells("Enter/a activate · Backspace/Esc back · ? help", width), view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
+	putTextBox(frame, "picker-detail-footer", 0, 0, height-1, width, 1, view.TextTruncate, false, []string{"Enter/a activate · Backspace/Esc back · ? help"}, view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
 }
 
 func (picker *Picker) renderDetail(frame *view.Frame, palette theme.Palette, x, y, width, height int) {
 	item, ok := picker.selectedItem()
-	if !ok || width <= 0 || height <= 0 {
+	if !ok {
 		return
 	}
-	frame.PutText(x, y, fitCells(item.Label, width), view.Style{Foreground: palette.Text, Background: palette.PanelBackground, Bold: true})
+	putTextBox(frame, "picker-detail-title", 0, x, y, width, min(1, max(0, height)), view.TextTruncate, false, []string{item.Label}, view.Style{Foreground: palette.Text, Background: palette.PanelBackground, Bold: true})
 	lines := append([]string{item.Description}, item.Detail...)
-	for row, line := range lines {
-		if row+1 >= height {
-			break
-		}
-		frame.PutText(x, y+row+1, fitCells(line, width), view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
-	}
+	putTextBox(frame, "picker-detail-body", 0, x, y+1, width, height-1, view.TextTruncate, false, lines, view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
 }
 
 func (picker *Picker) renderHelp(frame *view.Frame, palette theme.Palette) {
 	width := frame.Width()
 	lines := []string{"PICKER HELP", "/ focus search · arrows edit/move", "Home/End first/last · PageUp/PageDown page", "Enter open/activate · Tab next region", "Backspace edit/back · Escape back/close", "Mobile: j/k move · n/p page · o open", "? close help · q/Ctrl-C quit"}
-	for row, line := range lines {
-		if row >= frame.Height() {
-			break
-		}
-		style := view.Style{Foreground: palette.Text, Background: palette.Background}
-		if row == 0 {
-			style = view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
-			frame.Fill(0, 0, width, 1, style)
-		}
-		frame.PutText(1, row, fitCells(line, width-2), style)
-	}
+	header := view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
+	frame.Fill(0, 0, width, 1, header)
+	putTextBox(frame, "picker-help-header", 0, 1, 0, width-2, 1, view.TextTruncate, false, lines[:1], header)
+	putTextBox(frame, "picker-help-body", 0, 1, 1, width-2, frame.Height()-1, view.TextTruncate, false, lines[1:], view.Style{Foreground: palette.Text, Background: palette.Background})
+}
+
+func putTextBox(frame *view.Frame, element string, instance, x, y, width, height int, mode view.TextMode, allowTruncation bool, lines []string, style view.Style) {
+	id, _ := diagnostics.NewID(element)
+	_ = frame.PutTextBox(view.TextBoxOptions{
+		Element: id, Instance: instance, X: x, Y: y, Width: max(0, width), Height: max(0, height),
+		Mode: mode, AllowTruncation: allowTruncation,
+	}, lines, style)
 }
 
 func (picker *Picker) status() string {

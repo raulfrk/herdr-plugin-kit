@@ -145,12 +145,18 @@ func TestRecordingCopiesSemanticValuesBeforeAdmissionAndReportsWriteFailure(t *t
 		_ = recording.Close()
 	})
 	event := recordingEvent(t, "copy", "debug.detail")
+	event.TextFit = &diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{
+		Element: uiID(t, "detail"), OriginalColumns: 4, LayoutRows: 1,
+		AvailableColumns: 2, AvailableRows: 1, Intent: diagnostics.TextFitClip, Clipped: true,
+	}}}
 	wantScreen := event.Visual.Screen
 	if err := recording.RecordSemantic(event); err != nil {
 		t.Fatal(err)
 	}
 	awaitRecordingCallback(t, entered)
 	event.Visual.Screen = uiID(t, "mutated.after.admission")
+	event.TextFit.Observations[0].OriginalColumns = 999
+	event.TextFit.Omitted = 999
 	close(release)
 	released = true
 	if err := recording.Close(); err == nil {
@@ -158,6 +164,9 @@ func TestRecordingCopiesSemanticValuesBeforeAdmissionAndReportsWriteFailure(t *t
 	}
 	if got.Visual == nil || got.Visual.Screen != wantScreen {
 		t.Fatalf("worker observed caller mutation: %+v", got.Visual)
+	}
+	if got.TextFit == nil || got.TextFit.Omitted != 0 || got.TextFit.Observations[0].OriginalColumns != 4 {
+		t.Fatalf("worker observed caller text-fit mutation: %+v", got.TextFit)
 	}
 	status := recording.Status()
 	if status.Pending != 0 || status.Persisted != 0 || status.PersistenceFailed != 1 || !status.Closed {

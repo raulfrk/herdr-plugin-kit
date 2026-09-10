@@ -81,6 +81,7 @@ type Surface struct {
 	pendingRequest   projectionIdentity
 	anchors          [2]inspectionAnchor
 	detail           *diagnostics.DebugEvent
+	detailOffset     int
 	evicted          bool
 	visibleTop       [2]uint64
 	displayedQuery   diagnostics.DebugQuery
@@ -187,6 +188,8 @@ func (surface *Surface) Update(events shell.EventContext, event shell.Event) []s
 		}
 	case shell.KeyEvent:
 		return surface.key(events, event.Code)
+	case shell.ActionEvent:
+		return surface.action(events, event.ID)
 	case shell.TextEvent:
 		if surface.editing {
 			surface.appendDraft(event.Text)
@@ -244,6 +247,31 @@ func (surface *Surface) key(events shell.EventContext, key shell.KeyCode) []shel
 	}
 	if !surface.loaded && key != shell.KeyCtrlC && key != shell.KeySpace && key != shell.KeyEscape && key != shell.KeyBackspace {
 		return nil
+	}
+	if surface.screen == screenDetail {
+		height := max(0, surface.layout.Render.Rows-4)
+		limit := max(0, len(surface.detailRows(surface.selectedEvent(), max(0, surface.layout.Render.Columns-2)))-height)
+		scroll := true
+		switch key {
+		case shell.KeyUp:
+			surface.detailOffset--
+		case shell.KeyDown:
+			surface.detailOffset++
+		case shell.KeyHome:
+			surface.detailOffset = 0
+		case shell.KeyEnd:
+			surface.detailOffset = limit
+		case shell.KeyPageUp:
+			surface.detailOffset -= max(1, height)
+		case shell.KeyPageDown:
+			surface.detailOffset += max(1, height)
+		default:
+			scroll = false
+		}
+		if scroll {
+			surface.detailOffset = min(max(0, surface.detailOffset), limit)
+			return nil
+		}
 	}
 	switch key {
 	case shell.KeyCtrlC:
@@ -764,6 +792,8 @@ func (surface *Surface) openDetail() {
 		copy.Visual = &visual
 	}
 	surface.detail = &copy
+	copy.TextFit = diagnostics.CloneTextFit(event.TextFit)
+	surface.detailOffset = 0
 	surface.previous, surface.screen = surface.screen, screenDetail
 }
 

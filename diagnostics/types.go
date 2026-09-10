@@ -14,7 +14,7 @@ import (
 const (
 	EventSchemaVersion  = 1
 	ReportSchemaVersion = 1
-	EventLogName        = "events.jsonl"
+	EventLogName        = "events.jsonl" // Legacy import filename; use Export for full history.
 )
 
 var (

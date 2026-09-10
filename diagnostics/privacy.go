@@ -11,13 +11,22 @@ import (
 var sensitiveKeyPatterns = compileSensitiveKeyPatterns()
 
 func redactValue(value any) any {
+	return redactValueWithKeys(value, make(map[string]redactionKey))
+}
+
+type redactionKey struct {
+	sensitive bool
+	redacted  string
+}
+
+func redactValueWithKeys(value any, decisions map[string]redactionKey) any {
 	switch value := value.(type) {
 	case string:
 		return snapshot.Redact(value)
 	case []any:
 		result := make([]any, len(value))
 		for index := range value {
-			result[index] = redactValue(value[index])
+			result[index] = redactValueWithKeys(value[index], decisions)
 		}
 		return result
 	case map[string]any:
@@ -29,11 +38,19 @@ func redactValue(value any) any {
 		sort.Strings(keys)
 		for _, key := range keys {
 			item := value[key]
-			if sensitiveDetailKey(key) {
+			decision, ok := decisions[key]
+			if !ok {
+				decision.sensitive = sensitiveDetailKey(key)
+				if !decision.sensitive {
+					decision.redacted = snapshot.Redact(key)
+				}
+				decisions[key] = decision
+			}
+			if decision.sensitive {
 				result[key] = snapshot.Replacement
 				continue
 			}
-			result[snapshot.Redact(key)] = redactValue(item)
+			result[decision.redacted] = redactValueWithKeys(item, decisions)
 		}
 		return result
 	default:

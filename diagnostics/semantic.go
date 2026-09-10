@@ -123,6 +123,48 @@ type SemanticEvent struct {
 	Duration          time.Duration
 	Geometry          Geometry
 	Visual            *VisualState
+	TextFit           *TextFitReport
+}
+
+const MaxTextFitObservations = 256
+
+type TextFitIntent string
+
+const (
+	TextFitClip     TextFitIntent = "clip"
+	TextFitTruncate TextFitIntent = "truncate"
+	TextFitWrap     TextFitIntent = "wrap"
+)
+
+type TextFitObservation struct {
+	Element          ID            `json:"element"`
+	Instance         int           `json:"instance"`
+	OriginalColumns  int           `json:"original_columns"`
+	LayoutRows       int           `json:"layout_rows"`
+	AvailableColumns int           `json:"available_columns"`
+	AvailableRows    int           `json:"available_rows"`
+	Intent           TextFitIntent `json:"intent"`
+	Wrapped          bool          `json:"wrapped,omitempty"`
+	Truncated        bool          `json:"truncated,omitempty"`
+	Clipped          bool          `json:"clipped,omitempty"`
+	AllowTruncation  bool          `json:"allow_truncation,omitempty"`
+}
+
+type TextFitReport struct {
+	Observations []TextFitObservation `json:"observations"`
+	Omitted      int                  `json:"omitted,omitempty"`
+}
+
+func CloneTextFit(report *TextFitReport) *TextFitReport {
+	if report == nil {
+		return nil
+	}
+	cloned := *report
+	cloned.Observations = append([]TextFitObservation(nil), report.Observations...)
+	if report.Observations != nil && cloned.Observations == nil {
+		cloned.Observations = []TextFitObservation{}
+	}
+	return &cloned
 }
 
 type SemanticSink interface {
@@ -151,6 +193,20 @@ func (r *Recorder) RecordSemanticWithSequence(input SemanticEvent) (uint64, erro
 		"render_columns": input.Geometry.RenderColumns, "render_rows": input.Geometry.RenderRows,
 		"state_before": input.Before.String(), "state_after": input.After.String(),
 	}
+	if input.TextFit != nil {
+		if err := validateTextFit(*input.TextFit); err != nil {
+			return 0, err
+		}
+		encoded, err := json.Marshal(CloneTextFit(input.TextFit))
+		if err != nil {
+			return 0, err
+		}
+		var wire any
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			return 0, err
+		}
+		details["text_fit"] = wire
+	}
 	event := Event{
 		Level: input.Level, Kind: input.Kind, Plugin: input.Plugin.String(),
 		Component: input.Component.String(), Action: input.Action.String(),
@@ -165,6 +221,32 @@ func (r *Recorder) RecordSemanticWithSequence(input SemanticEvent) (uint64, erro
 	}
 	stored, err := r.record(event)
 	return stored.Sequence, err
+}
+
+func validateTextFit(report TextFitReport) error {
+	if report.Observations == nil {
+		return errors.New("text-fit observations are missing")
+	}
+	if len(report.Observations) > MaxTextFitObservations || report.Omitted < 0 || uint64(report.Omitted) > 1<<53-1 {
+		return errors.New("invalid text-fit bounds")
+	}
+	for _, observation := range report.Observations {
+		if observation.Element.IsZero() || observation.Instance < 0 || observation.OriginalColumns < 0 ||
+			observation.LayoutRows < 0 || observation.AvailableColumns < 0 || observation.AvailableRows < 0 {
+			return errors.New("invalid text-fit observation")
+		}
+		for _, value := range []int{observation.Instance, observation.OriginalColumns, observation.LayoutRows, observation.AvailableColumns, observation.AvailableRows} {
+			if uint64(value) > 1<<53-1 {
+				return errors.New("invalid text-fit integer bounds")
+			}
+		}
+		switch observation.Intent {
+		case TextFitClip, TextFitTruncate, TextFitWrap:
+		default:
+			return errors.New("invalid text-fit intent")
+		}
+	}
+	return nil
 }
 
 func validateSemanticEvent(input SemanticEvent) error {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rivo/uniseg"
+
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
 	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
@@ -22,7 +24,7 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 	header := view.Style{Foreground: palette.Accent, Background: palette.PanelBackground, Bold: true}
 	frame.Fill(0, 0, size.Columns, size.Rows, base)
 	frame.Fill(0, 0, size.Columns, 1, header)
-	frame.PutText(1, 0, fit("DEBUG · "+strings.ToUpper(surface.screen.String()), size.Columns-2), header)
+	putLines(frame, 1, 0, size.Columns-2, 1, []string{"DEBUG · " + strings.ToUpper(surface.screen.String())}, header)
 	if context.Layout.Class == responsive.Recovery {
 		putLines(frame, 1, 2, size.Columns-2, max(0, size.Rows-2), []string{
 			"Terminal is too small",
@@ -39,10 +41,10 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 		return frame, nil
 	}
 	status := surface.status(context)
-	frame.PutText(1, 1, fit(status, size.Columns-2), muted)
+	putLines(frame, 1, 1, size.Columns-2, 1, []string{status}, muted)
 	bottom := size.Rows - 1
 	if bottom > 1 {
-		frame.PutText(1, bottom, fit(surface.footer(size.Columns), size.Columns-2), muted)
+		putLines(frame, 1, bottom, size.Columns-2, 1, []string{surface.footer(size.Columns)}, muted)
 	}
 	if surface.projectionFailed {
 		putLines(frame, 1, 3, size.Columns-2, bottom-3, []string{"! Debug data unavailable", "Previous safe projection retained.", "r retry"}, base)
@@ -53,7 +55,7 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 	if surface.editing {
 		filter = "▌ Filter code: " + surface.draft + "▏"
 	}
-	frame.PutText(1, 2, fit(filter, size.Columns-2), view.Style{Foreground: palette.Text, Background: palette.Background})
+	putLines(frame, 1, 2, size.Columns-2, 1, []string{filter}, view.Style{Foreground: palette.Text, Background: palette.Background})
 	contentTop, contentHeight := 3, max(0, bottom-3)
 	switch surface.screen {
 	case screenHealth:
@@ -65,7 +67,10 @@ func (surface *Surface) render(context shell.RenderContext) (*view.Frame, error)
 	case screenHUD:
 		putLines(frame, 1, contentTop, size.Columns-2, contentHeight, surface.hudLines(context), base)
 	case screenDetail:
-		putLines(frame, 1, contentTop, size.Columns-2, contentHeight, surface.detailLines(surface.selectedEvent()), base)
+		lines := surface.detailRows(surface.selectedEvent(), size.Columns-2)
+		surface.detailOffset = min(max(0, surface.detailOffset), max(0, len(lines)-contentHeight))
+		end := min(len(lines), surface.detailOffset+contentHeight)
+		putLines(frame, 1, contentTop, size.Columns-2, contentHeight, lines[surface.detailOffset:end], base)
 	case screenHelp:
 		putLines(frame, 1, contentTop, size.Columns-2, contentHeight, helpLines(), base)
 	}
@@ -209,7 +214,7 @@ func (surface *Surface) renderEvents(frame *view.Frame, palette theme.Palette, t
 		frame.PutText(0, top+row, fit(line, listWidth), style)
 	}
 	if split {
-		putLines(frame, listWidth+2, top, frame.Width()-listWidth-3, height, surface.detailLines(surface.selectedEvent()), view.Style{Foreground: palette.Text, Background: palette.PanelBackground})
+		putLines(frame, listWidth+2, top, frame.Width()-listWidth-3, height, surface.detailRows(surface.selectedEvent(), frame.Width()-listWidth-3), view.Style{Foreground: palette.Text, Background: palette.PanelBackground})
 	}
 }
 
@@ -232,6 +237,46 @@ func (surface *Surface) detailLines(event *diagnostics.DebugEvent) []string {
 			"selection "+valueOrDash(event.Visual.Selection)+" · state "+valueOrDash(event.Visual.State),
 			fmt.Sprintf("items %d · selected %d · pending %t · error %t", event.Visual.ItemCount, event.Visual.SelectedIndex, event.Visual.Pending, event.Visual.HasError),
 		)
+	}
+	return lines
+}
+
+func (surface *Surface) detailRows(event *diagnostics.DebugEvent, width int) []string {
+	lines := surface.detailLines(event)
+	metadata := []string{"Text fit: unmeasured; other content unchecked."}
+	if event != nil && event.TextFit != nil {
+		report := event.TextFit
+		metadata = []string{fmt.Sprintf("Text fit: %d measured, %d omitted; other content unchecked.", len(report.Observations), report.Omitted)}
+		for _, observation := range report.Observations {
+			outcome := "no measured loss"
+			if observation.Clipped || observation.Truncated && !observation.AllowTruncation {
+				outcome = "UNEXPECTED loss"
+			} else if observation.Truncated {
+				outcome = "intentional truncation"
+			}
+			metadata = append(metadata,
+				fmt.Sprintf("%s[%d]: %s", observation.Element.String(), observation.Instance, outcome),
+				fmt.Sprintf("original %d columns; layout %d rows; available %dx%d; intent %s", observation.OriginalColumns, observation.LayoutRows, observation.AvailableColumns, observation.AvailableRows, observation.Intent),
+				fmt.Sprintf("wrapped %t; truncated %t; clipped %t; allow truncation %t", observation.Wrapped, observation.Truncated, observation.Clipped, observation.AllowTruncation))
+		}
+	}
+	// Only the new metadata wraps; preserve the existing event presentation.
+	// Detail scrolling makes every metadata row reachable, so offscreen rows
+	// are not counted as clipped content in the current frame.
+	for _, line := range metadata {
+		row, columns := "", 0
+		graphemes := uniseg.NewGraphemes(line)
+		for graphemes.Next() {
+			part := graphemes.Str()
+			cells := uniseg.StringWidth(part)
+			if columns+cells > width && row != "" {
+				lines = append(lines, row)
+				row, columns = "", 0
+			}
+			row += part
+			columns += cells
+		}
+		lines = append(lines, row)
 	}
 	return lines
 }
@@ -288,6 +333,9 @@ func valueOrDashOutcome(value diagnostics.OutcomeCode) string {
 }
 
 func putLines(frame *view.Frame, x, y, width, height int, lines []string, style view.Style) {
+	// Measure complete blocks before viewport limits, then retain the established
+	// three-dot presentation (PutTextBox uses a single-cell ellipsis).
+	_ = frame.PutTextBox(view.TextBoxOptions{Element: id("debug.content"), Instance: max(0, y), X: x, Y: y, Width: max(0, width), Height: max(0, height), Mode: view.TextTruncate}, lines, style)
 	if width <= 0 || height <= 0 {
 		return
 	}

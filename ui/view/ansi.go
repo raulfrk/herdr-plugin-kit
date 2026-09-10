@@ -13,6 +13,10 @@ func ANSI(frame *Frame) string {
 	if frame.width == 0 || frame.height == 0 {
 		return ""
 	}
+	if frame.cells == nil {
+		row := strings.Repeat(" ", frame.width)
+		return strings.Repeat(row+"\n", frame.height-1) + row + "\x1b[0m"
+	}
 	var output strings.Builder
 	for y := 0; y < frame.height; y++ {
 		active := Style{}

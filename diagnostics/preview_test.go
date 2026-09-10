@@ -259,7 +259,12 @@ func TestPreviewStoreRejectsUnsafeRegistryKindsAndModes(t *testing.T) {
 			}
 			return os.Symlink(target, path)
 		},
-		"group readable": func(path string) error { return os.WriteFile(path, []byte("[]"), 0o640) },
+		"group readable": func(path string) error {
+			if err := os.WriteFile(path, []byte("[]"), 0o640); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o640)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stateDirectory := t.TempDir()

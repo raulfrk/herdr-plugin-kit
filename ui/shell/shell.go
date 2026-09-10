@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymap"
 	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
 	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
@@ -42,6 +43,7 @@ type ProgramOptions struct {
 	Events   diagnostics.SemanticSink
 	Input    io.Reader
 	Output   io.Writer
+	Keymap   *keymap.Runtime
 }
 
 func NewProgram(options ProgramOptions, surface Surface) (*tea.Program, error) {
@@ -56,6 +58,11 @@ func NewProgram(options ProgramOptions, surface Surface) (*tea.Program, error) {
 	}
 	if surface == nil {
 		return nil, errors.New("shell surface is nil")
+	}
+	if options.Keymap != nil {
+		if _, ok := surface.(ActionSurface); !ok {
+			return nil, errors.New("keymap surface does not declare actions")
+		}
 	}
 	model := newModel(options, surface)
 	programOptions := []tea.ProgramOption{tea.WithAltScreen()}
@@ -136,6 +143,13 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			event = KeyEvent{Code: key, Alt: message.Alt}
 			code = "input.key"
 			needsRender = true
+		} else if model.options.Keymap != nil {
+			if normalized, err := keymap.Normalize(message.String()); err == nil {
+				event = KeyEvent{Code: KeyCode(normalized)}
+				code, needsRender = "input.key", true
+			} else {
+				code, outcome = "input.unsupported", diagnostics.OutcomeRejected
+			}
 		} else {
 			code, outcome = "input.unsupported", diagnostics.OutcomeRejected
 		}
@@ -198,10 +212,20 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if filter, ok := model.surface.(DiagnosticFilter); ok {
 			model.suppressCycle = filter.SuppressEventDiagnostics(event)
 		}
-		effects = model.surface.Update(context, event)
+		if model.options.Keymap != nil {
+			effects = model.dispatchKeymap(context, event, receivedAt)
+		} else {
+			effects = model.surface.Update(context, event)
+		}
 	}
 	if diagnosticEvent == nil {
 		diagnosticEvent = event
+	}
+	if model.options.Keymap != nil {
+		switch diagnosticEvent.(type) {
+		case KeyEvent, TextEvent:
+			diagnosticEvent = nil
+		}
 	}
 	if diagnosticEvent != nil {
 		if filter, ok := model.surface.(DiagnosticFilter); ok && filter.SuppressEventDiagnostics(diagnosticEvent) {
@@ -317,6 +341,10 @@ func (model *model) render(receivedAt time.Time) {
 	if model.layout.Class == responsive.Recovery || contractFailed {
 		frame = model.recoveryFrame(err)
 	}
+	var textFit *diagnostics.TextFitReport
+	if report := frame.TextFit(); len(report.Observations) > 0 || report.Omitted > 0 {
+		textFit = &report
+	}
 	model.rendered = view.ANSI(frame)
 	if model.layout.Projected {
 		model.rendered = "\x1b[2J\x1b[H" + model.rendered
@@ -326,7 +354,7 @@ func (model *model) render(receivedAt time.Time) {
 	if contractFailed {
 		outcome = diagnostics.OutcomeFailed
 	}
-	model.record("render.completed", outcome, state, state, nil, time.Since(receivedAt))
+	model.recordWithTextFit("render.completed", outcome, state, state, nil, time.Since(receivedAt), textFit)
 }
 
 func (model *model) recoveryFrame(renderErr error) *view.Frame {
@@ -346,14 +374,20 @@ func (model *model) recoveryFrame(renderErr error) *view.Frame {
 	} else if model.layout.Class == responsive.Recovery {
 		message += " · expand to at least 40x10"
 	}
-	frame.PutText(0, 0, message, style)
+	messageID, _ := diagnostics.NewID("recovery-message")
+	_ = frame.PutTextBox(view.TextBoxOptions{Element: messageID, Width: width, Height: 1, Mode: view.TextClip}, []string{message}, style)
 	if height > 1 {
-		frame.PutText(0, height-1, "q quit · d debug", style)
+		helpID, _ := diagnostics.NewID("recovery-help")
+		_ = frame.PutTextBox(view.TextBoxOptions{Element: helpID, Y: height - 1, Width: width, Height: 1, Mode: view.TextClip}, []string{"q quit · d debug"}, style)
 	}
 	return frame
 }
 
 func (model *model) record(code string, outcome diagnostics.OutcomeCode, before, after diagnostics.VisualState, event Event, duration time.Duration) {
+	model.recordWithTextFit(code, outcome, before, after, event, duration, nil)
+}
+
+func (model *model) recordWithTextFit(code string, outcome diagnostics.OutcomeCode, before, after diagnostics.VisualState, event Event, duration time.Duration, textFit *diagnostics.TextFitReport) {
 	if model.diagnosticFailed || model.suppressCycle {
 		return
 	}
@@ -370,7 +404,8 @@ func (model *model) record(code string, outcome diagnostics.OutcomeCode, before,
 			ReportedColumns: model.layout.Reported.Columns, ReportedRows: model.layout.Reported.Rows,
 			RenderColumns: model.layout.Render.Columns, RenderRows: model.layout.Render.Rows,
 		},
-		Visual: &after,
+		Visual:  &after,
+		TextFit: diagnostics.CloneTextFit(textFit),
 	}
 	if text, ok := event.(TextEvent); ok {
 		semantic.Bytes = len(text.Text)
@@ -381,6 +416,9 @@ func (model *model) record(code string, outcome diagnostics.OutcomeCode, before,
 	if key, ok := event.(KeyEvent); ok {
 		semantic.Action, _ = diagnostics.NewID(string(key.Code))
 		semantic.Alt = key.Alt
+	}
+	if action, ok := event.(ActionEvent); ok {
+		semantic.Action, _ = diagnostics.NewID(action.ID)
 	}
 	if result, ok := event.(ResultEvent); ok {
 		semantic.Action, _ = diagnostics.NewID(result.Key.String())

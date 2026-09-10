@@ -1,9 +1,10 @@
 package diagnostics_test
 
 import (
+	"context"
 	"encoding/json"
-	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,125 @@ import (
 )
 
 var _ diagnostics.SemanticSink = (*diagnostics.Recorder)(nil)
+
+func TestTextFitEmptyCapAndZeroMeasurementsRoundTrip(t *testing.T) {
+	if diagnostics.CloneTextFit(nil) != nil {
+		t.Fatal("nil clone became measured")
+	}
+	empty := &diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{}}
+	cloned := diagnostics.CloneTextFit(empty)
+	if cloned == nil || cloned.Observations == nil || len(cloned.Observations) != 0 {
+		t.Fatal("empty clone lost measured distinction")
+	}
+	capped := &diagnostics.TextFitReport{Observations: make([]diagnostics.TextFitObservation, 256)}
+	for i := range capped.Observations {
+		capped.Observations[i] = diagnostics.TextFitObservation{Element: mustID(t, "field"), Instance: i, Intent: diagnostics.TextFitClip}
+	}
+	for _, report := range []*diagnostics.TextFitReport{empty, capped} {
+		recorder := openRecorder(t, diagnostics.DefaultConfig(t.TempDir()))
+		if err := recorder.RecordSemantic(diagnostics.SemanticEvent{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Code: mustID(t, "render.completed"), Outcome: diagnostics.OutcomeApplied, TextFit: report}); err != nil {
+			t.Fatal(err)
+		}
+		page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 1})
+		if err != nil || len(page.Events) != 1 || !reflect.DeepEqual(page.Events[0].TextFit, report) {
+			t.Fatalf("roundtrip mismatch: %+v err=%v", page, err)
+		}
+	}
+}
+
+func TestTextFitIntegerSafeBoundaries(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("all platform ints already fit the exact JSON range")
+	}
+	safe := int64(1<<53 - 1)
+	for _, field := range []string{"omitted", "instance", "original_columns", "layout_rows", "available_columns", "available_rows"} {
+		t.Run(field, func(t *testing.T) {
+			recorder := openRecorder(t, testConfig(t.TempDir()))
+			for _, value := range []int64{safe, safe + 1, int64(^uint(0) >> 1)} {
+				report := &diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{Element: mustID(t, "field"), Intent: diagnostics.TextFitClip}}}
+				observation := &report.Observations[0]
+				switch field {
+				case "omitted":
+					report.Omitted = int(value)
+				case "instance":
+					observation.Instance = int(value)
+				case "original_columns":
+					observation.OriginalColumns = int(value)
+				case "layout_rows":
+					observation.LayoutRows = int(value)
+				case "available_columns":
+					observation.AvailableColumns = int(value)
+				case "available_rows":
+					observation.AvailableRows = int(value)
+				}
+				err := recorder.RecordSemantic(diagnostics.SemanticEvent{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Code: mustID(t, "render.completed"), Outcome: diagnostics.OutcomeApplied, TextFit: report})
+				if value == safe && err != nil || value > safe && err == nil {
+					t.Fatalf("value %d admission err=%v", value, err)
+				}
+				page, pageErr := recorder.Debug(diagnostics.DebugQuery{PageSize: 10})
+				if pageErr != nil || len(page.Events) != 1 {
+					t.Fatalf("invalid admission count=%d err=%v", len(page.Events), pageErr)
+				}
+				if value == safe && !reflect.DeepEqual(page.Events[0].TextFit, report) {
+					t.Fatal("max safe integer rounded")
+				}
+			}
+		})
+	}
+}
+
+func TestTextFitPublicSnapshotCopiesRemainIndependent(t *testing.T) {
+	recorder := openRecorder(t, testConfig(t.TempDir()))
+	want := diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{
+		Element: mustID(t, "field"), Instance: 2, OriginalColumns: 8,
+		AvailableColumns: 4, AvailableRows: 1, LayoutRows: 1,
+		Intent: diagnostics.TextFitClip, Clipped: true,
+	}}, Omitted: 3}
+	if err := recorder.RecordSemantic(diagnostics.SemanticEvent{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic,
+		Code: mustID(t, "render.completed"), Outcome: diagnostics.OutcomeApplied, TextFit: &want,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	snapshot, err := recorder.DebugSnapshot(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := diagnostics.DebugQuery{PageSize: 1}
+	selected, err := snapshot.Select(ctx, query, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := selected.Window(diagnostics.DebugWindowQuery{})
+	window.Events[0].TextFit.Omitted = 99
+	window.Events[0].TextFit.Observations[0].OriginalColumns = 99
+	fresh := selected.Window(diagnostics.DebugWindowQuery{})
+	second, err := snapshot.Select(ctx, query, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := recorder.Debug(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, events := range [][]diagnostics.DebugEvent{fresh.Events, second.Window(diagnostics.DebugWindowQuery{}).Events, page.Events} {
+		if len(events) != 1 || !reflect.DeepEqual(events[0].TextFit, &want) {
+			t.Fatalf("public mutation changed captured/cached report: %+v", events)
+		}
+	}
+	data, err := selected.ExportWindow(ctx, fresh, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported diagnostics.DebugReport
+	if err := json.Unmarshal(data, &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Events) != 1 || !reflect.DeepEqual(exported.Events[0].TextFit, &want) {
+		t.Fatalf("export changed original report: %+v", exported.Events)
+	}
+}
 
 func mustID(t *testing.T, value string) diagnostics.ID {
 	t.Helper()
@@ -50,7 +170,7 @@ func TestSemanticRecordPersistsCompleteAllowlistedProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	events := readEvents(t, directory)
 	if len(events) != 1 {
 		t.Fatalf("semantic events = %#v", events)
 	}
@@ -119,9 +239,82 @@ func TestSemanticRecordAcceptsEventWithoutVisualState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordSemantic() rejected event without visual state: %v", err)
 	}
-	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	events := readEvents(t, directory)
 	if len(events) != 1 || events[0].UISnapshot != nil {
 		t.Fatalf("semantic events = %#v", events)
+	}
+}
+
+func TestSemanticTextFitRoundTripsWithoutContentOrAliasing(t *testing.T) {
+	directory := t.TempDir()
+	recorder := openRecorder(t, testConfig(directory))
+	observations := []diagnostics.TextFitObservation{{
+		Element: mustID(t, "picker-title"), Instance: 2, OriginalColumns: 12, LayoutRows: 2,
+		AvailableColumns: 8, AvailableRows: 1, Intent: diagnostics.TextFitWrap, Wrapped: true, Clipped: true,
+	}}
+	report := &diagnostics.TextFitReport{Observations: observations, Omitted: 3}
+	if err := recorder.RecordSemantic(diagnostics.SemanticEvent{
+		Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Code: mustID(t, "render.completed"),
+		Outcome: diagnostics.OutcomeApplied, TextFit: report,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	observations[0].OriginalColumns = 999
+
+	page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || page.Events[0].TextFit == nil {
+		t.Fatalf("text-fit projection = %+v", page.Events)
+	}
+	got := page.Events[0].TextFit
+	if got.Omitted != 3 || len(got.Observations) != 1 || got.Observations[0].OriginalColumns != 12 {
+		t.Fatalf("text-fit report = %+v", got)
+	}
+	got.Observations[0].OriginalColumns = 777
+	second, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Events[0].TextFit.Observations[0].OriginalColumns != 12 {
+		t.Fatal("mutating a debug page changed recorder-owned text-fit data")
+	}
+	encoded, err := json.Marshal(page.Events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"PRIVATE-TEXT-FIT", "snippet", "hash", "content"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("text-fit projection contains forbidden field %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestSemanticTextFitRejectsInvalidBoundsAndMetadata(t *testing.T) {
+	recorder := openRecorder(t, testConfig(t.TempDir()))
+	valid := diagnostics.TextFitObservation{Element: mustID(t, "field"), Intent: diagnostics.TextFitClip}
+	tooMany := make([]diagnostics.TextFitObservation, diagnostics.MaxTextFitObservations+1)
+	for i := range tooMany {
+		tooMany[i] = valid
+	}
+	for _, test := range []struct {
+		name   string
+		report diagnostics.TextFitReport
+	}{
+		{"missing observations", diagnostics.TextFitReport{}},
+		{"negative omitted", diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{}, Omitted: -1}},
+		{"too many", diagnostics.TextFitReport{Observations: tooMany}},
+		{"zero element", diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{Intent: diagnostics.TextFitClip}}}},
+		{"negative dimension", diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{Element: valid.Element, Intent: diagnostics.TextFitClip, AvailableRows: -1}}}},
+		{"invalid intent", diagnostics.TextFitReport{Observations: []diagnostics.TextFitObservation{{Element: valid.Element, Intent: "scroll"}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := recorder.RecordSemantic(diagnostics.SemanticEvent{Level: diagnostics.LevelInfo, Kind: diagnostics.KindDiagnostic, Code: mustID(t, "render.completed"), Outcome: diagnostics.OutcomeApplied, TextFit: &test.report})
+			if err == nil {
+				t.Fatal("RecordSemantic() accepted invalid text-fit report")
+			}
+		})
 	}
 }
 

@@ -19,6 +19,8 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/documentstore"
 	"github.com/raulfrk/herdr-plugin-kit/ui/debugui"
 	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymap"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymapui"
 	"github.com/raulfrk/herdr-plugin-kit/ui/responsive"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
 	"github.com/raulfrk/herdr-plugin-kit/ui/theme"
@@ -26,12 +28,12 @@ import (
 )
 
 type observedSurface struct {
-	shell.Surface
+	keymapui.MappedSurface
 	states chan diagnostics.VisualState
 }
 
 func (surface *observedSurface) DiagnosticState() diagnostics.VisualState {
-	state := surface.Surface.DiagnosticState()
+	state := surface.MappedSurface.DiagnosticState()
 	select {
 	case surface.states <- state:
 	default:
@@ -223,15 +225,14 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := &surfaceRouter{
-		main: picker, debug: debugSurface,
-		mainEditing: picker.Editing, debugEditing: debugSurface.Editing,
-	}
+	router, err := keymapui.New(keymapui.Options{Main: picker, Debug: debugSurface, ConfigDirectory: t.TempDir()})
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(func() { _ = router.Close() })
 	initialPalette, _ := theme.Builtin("catppuccin")
 	plugin, _ := diagnostics.NewID(pluginID)
 	input, inputWriter := io.Pipe()
 	program, err := shell.NewProgram(shell.ProgramOptions{
-		PluginID: plugin, Theme: initialPalette, Events: recorder,
+		PluginID: plugin, Theme: initialPalette, Events: recorder, Keymap: router.Runtime(),
 		Input: input, Output: io.Discard,
 	}, router)
 	if err != nil {
@@ -255,19 +256,21 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 		{Columns: 70, Rows: 37}, {Columns: 70, Rows: 67}, {Columns: 148, Rows: 39},
 		{Columns: 5000, Rows: 2000},
 	}
+	generation := router.DiagnosticState().ResizeGeneration
 	for _, themeID := range theme.IDs() {
 		palette, err := theme.Builtin(themeID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, size := range sizes {
-			generation := router.lastResize.Generation + 1
+			generation++
 			layout := responsive.Resolve(size)
 			router.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: generation})
 			stale := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
 			router.Update(shell.EventContext{}, shell.ResizeEvent{Layout: stale, Generation: generation - 1})
-			if router.lastResize.Generation != generation || router.lastResize.Layout != layout {
-				t.Fatalf("%s %+v retained resize = %+v", themeID, size, router.lastResize)
+			state := router.DiagnosticState()
+			if state.ResizeGeneration != generation || state.Geometry.RenderColumns != layout.Render.Columns || state.Geometry.RenderRows != layout.Render.Rows {
+				t.Fatalf("%s %+v retained resize = %+v", themeID, size, state)
 			}
 			context := shell.RenderContext{Layout: layout, Theme: palette, ResizeGeneration: generation, Settled: true}
 			mainFrame, err := router.Render(context)
@@ -276,11 +279,11 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 			}
 			if layout.Class != responsive.Recovery {
 				plain := view.ANSI(mainFrame)
-				if !strings.Contains(plain, "Recall the plugin plan") || !strings.Contains(plain, "? help") {
+				if !strings.Contains(plain, "Recall the plugin plan") || !strings.Contains(plain, "Actions") {
 					t.Fatalf("%s %+v missing loaded row or controls", themeID, size)
 				}
 			}
-			router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+			router.Update(shell.EventContext{}, shell.ActionEvent{ID: "keymap.debug"})
 			debugFrame, err := router.Render(context)
 			if err != nil || debugFrame.Width() != layout.Render.Columns || debugFrame.Height() != layout.Render.Rows {
 				t.Fatalf("%s %+v debug frame = %v, %v", themeID, size, debugFrame, err)
@@ -291,12 +294,12 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 			if size == (responsive.Size{Columns: 5000, Rows: 2000}) && (!layout.Projected || layout.Render != (responsive.Size{Columns: 500, Rows: 200})) {
 				t.Fatalf("oversized projection = %+v", layout)
 			}
-			router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+			router.Update(shell.EventContext{}, shell.ActionEvent{ID: "keymap.debug"})
 		}
 	}
 
 	layout := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
-	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: router.lastResize.Generation + 1})
+	picker.Update(shell.EventContext{}, shell.ResizeEvent{Layout: layout, Generation: generation + 1})
 	picker.Update(shell.EventContext{}, shell.TextEvent{Text: "?"})
 	palette, _ := theme.Builtin("catppuccin")
 	frame, err := picker.Render(shell.RenderContext{Layout: layout, Theme: palette})
@@ -455,16 +458,15 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	observedDebug := &observedSurface{Surface: debugSurface, states: make(chan diagnostics.VisualState, 64)}
-	router := &surfaceRouter{
-		main: picker, debug: observedDebug,
-		mainEditing: picker.Editing, debugEditing: debugSurface.Editing,
-	}
+	observedDebug := &observedSurface{MappedSurface: debugSurface, states: make(chan diagnostics.VisualState, 64)}
+	router, err := keymapui.New(keymapui.Options{Main: picker, Debug: observedDebug, ConfigDirectory: t.TempDir()})
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(func() { _ = router.Close() })
 	palette, _ := theme.Builtin("catppuccin")
 	input, inputWriter := io.Pipe()
 	t.Cleanup(func() { _ = inputWriter.Close() })
 	program, err := shell.NewProgram(shell.ProgramOptions{
-		PluginID: plugin, Theme: palette, Events: previewingSink{resources}, Input: input, Output: io.Discard,
+		PluginID: plugin, Theme: palette, Events: previewingSink{resources}, Keymap: router.Runtime(), Input: input, Output: io.Discard,
 	}, router)
 	if err != nil {
 		t.Fatal(err)
@@ -486,17 +488,21 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("unavailable")})
 	waitForVisualState(t, recorder, "ready", 1)
 	program.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitForAction(t, recorder, "enter")
+	waitForAction(t, recorder, "picker.edit-finish")
+	program.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
+	waitForObservedState(t, observedDebug.states, "ready")
 	if _, err := os.Stat(filepath.Join(stateDirectory, "last-activation.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("disabled selection produced activation receipt: %v", err)
 	}
 
-	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
-	waitForObservedState(t, observedDebug.states, "ready")
 	program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	waitForAction(t, recorder, "debug.export")
 	reportPath := filepath.Join(stateDirectory, "debug-report.json")
 	var reportData []byte
-	deadline := time.Now().Add(2 * time.Second)
+	// Allow bounded export I/O under -race on shared hosts.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		reportData, err = os.ReadFile(reportPath)
 		if err == nil {
@@ -543,7 +549,7 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 
 func waitForVisualState(t *testing.T, recorder *diagnostics.Recorder, state string, itemCount int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
 		if err != nil {
@@ -561,7 +567,7 @@ func waitForVisualState(t *testing.T, recorder *diagnostics.Recorder, state stri
 
 func waitForObservedState(t *testing.T, states <-chan diagnostics.VisualState, want string) {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
@@ -577,7 +583,7 @@ func waitForObservedState(t *testing.T, states <-chan diagnostics.VisualState, w
 
 func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 100})
 		if err != nil {
@@ -594,6 +600,7 @@ func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) 
 }
 
 type testSurface struct {
+	name string
 	results  int
 	resizes  int
 	texts    int
@@ -615,6 +622,18 @@ func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []sh
 	return nil
 }
 
+func (surface *testSurface) KeymapCatalog() []keymap.Action {
+	return []keymap.Action{{ID: "test.action", Label: "Test", Context: surface.name+".results"}}
+}
+func (surface *testSurface) KeymapContext() keymap.Context { return keymap.Context{ID: surface.name+".results"} }
+func (*testSurface) ActionState(string) keymap.State { return keymap.State{Enabled:true} }
+func testRouter(t *testing.T, main, debug *testSurface) *keymapui.Surface {
+	t.Helper();main.name="main";debug.name="debug"
+	router,err:=keymapui.New(keymapui.Options{Main:main,Debug:debug,ConfigDirectory:t.TempDir()})
+	if err!=nil{t.Fatal(err)}
+	t.Cleanup(func(){_ = router.Close()});return router
+}
+
 func (*testSurface) Render(shell.RenderContext) (*view.Frame, error)     { return nil, nil }
 func (*testSurface) DiagnosticState() diagnostics.VisualState            { return diagnostics.VisualState{} }
 func (surface *testSurface) SuppressEventDiagnostics(shell.Event) bool   { return surface.suppress }
@@ -622,57 +641,28 @@ func (surface *testSurface) SuppressEffectDiagnostics(shell.Effect) bool { retur
 
 func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 	mainSurface, debugSurface := &testSurface{}, &testSurface{}
-	router := &surfaceRouter{main: mainSurface, debug: debugSurface, mainEditing: func() bool { return false }}
+	router := testRouter(t,mainSurface,debugSurface)
 	router.Update(shell.EventContext{}, shell.ResizeEvent{Generation: 1})
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	router.Update(shell.EventContext{}, shell.ActionEvent{ID: "keymap.debug"})
 	router.Update(shell.EventContext{}, shell.ResultEvent{})
 	router.Update(shell.EventContext{}, shell.TimerEvent{})
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
+	router.Update(shell.EventContext{}, shell.ActionEvent{ID: "keymap.debug"})
 	if mainSurface.results != 1 || debugSurface.results != 1 {
 		t.Fatalf("result deliveries = main %d, debug %d", mainSurface.results, debugSurface.results)
 	}
 	if mainSurface.timers != 1 || debugSurface.timers != 1 {
 		t.Fatalf("timer deliveries = main %d, debug %d", mainSurface.timers, debugSurface.timers)
 	}
-	if mainSurface.resizes != 2 || debugSurface.resizes != 1 || router.showingDebug {
-		t.Fatalf("resize/switch state = main %d, debug %d, showing debug %t", mainSurface.resizes, debugSurface.resizes, router.showingDebug)
+	if mainSurface.resizes != 2 || debugSurface.resizes != 1 {
+		t.Fatalf("resize/switch state = main %d, debug %d", mainSurface.resizes, debugSurface.resizes)
 	}
 }
 
 func TestRouterDelegatesDebugMaintenanceSuppressionWhileMainIsActive(t *testing.T) {
 	mainSurface, debugSurface := &testSurface{}, &testSurface{suppress: true}
-	router := &surfaceRouter{main: mainSurface, debug: debugSurface, mainEditing: func() bool { return false }}
-	if router.showingDebug || !router.SuppressEventDiagnostics(shell.TimerEvent{}) || !router.SuppressEffectDiagnostics(shell.Effect{}) {
+	router := testRouter(t,mainSurface,debugSurface)
+	if !router.SuppressEventDiagnostics(shell.TimerEvent{}) || !router.SuppressEffectDiagnostics(shell.Effect{}) {
 		t.Fatal("main-active router did not delegate maintenance suppression to debug surface")
-	}
-}
-
-func TestRouterPlainDebugKeyDoesNotStealQueryInput(t *testing.T) {
-	mainSurface, debugSurface := &testSurface{}, &testSurface{}
-	editing := true
-	debugEditing := false
-	router := &surfaceRouter{
-		main: mainSurface, debug: debugSurface,
-		mainEditing: func() bool { return editing }, debugEditing: func() bool { return debugEditing },
-	}
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
-	if router.showingDebug || mainSurface.texts != 1 {
-		t.Fatalf("editing route = showing debug %t, main texts %d", router.showingDebug, mainSurface.texts)
-	}
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d", Alt: true})
-	if !router.showingDebug {
-		t.Fatal("Alt+D did not open diagnostics while editing")
-	}
-	editing = false
-	debugEditing = true
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
-	if !router.showingDebug || debugSurface.texts != 1 {
-		t.Fatalf("debug editing route = showing debug %t, debug texts %d", router.showingDebug, debugSurface.texts)
-	}
-	debugEditing = false
-	router.Update(shell.EventContext{}, shell.TextEvent{Text: "d"})
-	if router.showingDebug {
-		t.Fatal("plain d did not return from diagnostics")
 	}
 }
 

@@ -258,7 +258,11 @@ func (v *DebugView) ExportWindow(ctx context.Context, window DebugWindow, maxByt
 	if maxBytes > v.maxReportBytes {
 		return nil, errors.New("debug report byte limit exceeds recorder maximum")
 	}
-	report := DebugReport{Version: ReportSchemaVersion, GeneratedAt: v.generatedAt.Format("2006-01-02T15:04:05.000000000Z07:00"), Health: v.health, Sessions: v.Sessions(), Events: append([]DebugEvent(nil), window.Events...)}
+	reportEvents := make([]DebugEvent, len(window.Events))
+	for i := range window.Events {
+		reportEvents[i] = cloneDebugEvent(window.Events[i])
+	}
+	report := DebugReport{Version: ReportSchemaVersion, GeneratedAt: v.generatedAt.Format("2006-01-02T15:04:05.000000000Z07:00"), Health: v.health, Sessions: v.Sessions(), Events: reportEvents}
 	for _, event := range window.Events {
 		if err := ctx.Err(); err != nil {
 			return nil, err

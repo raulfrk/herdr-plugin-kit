@@ -1,13 +1,10 @@
 package diagnostics
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +24,9 @@ type Recorder struct {
 	mu       sync.Mutex
 	config   Config
 	file     *os.File
-	records  []storedEvent
+	segments []segment
+	storage  storageHooks
+	records  []*storedEvent
 	next     uint64
 	bytes    int64
 	health   Health
@@ -36,6 +35,10 @@ type Recorder struct {
 }
 
 func Open(config Config) (*Recorder, error) {
+	return openRecorder(config, defaultStorageHooks())
+}
+
+func openRecorder(config Config, storage storageHooks) (*Recorder, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -45,135 +48,22 @@ func Open(config Config) (*Recorder, error) {
 	if err := os.MkdirAll(config.Directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create diagnostics directory: %w", err)
 	}
-	directoryInfo, err := os.Lstat(config.Directory)
-	if err != nil {
-		return nil, fmt.Errorf("inspect diagnostics directory: %w", err)
-	}
-	if !directoryInfo.IsDir() {
-		return nil, fmt.Errorf("diagnostics directory must be a real directory")
-	}
-	if err := os.Chmod(config.Directory, 0o700); err != nil {
+	if err := privateStoragePath(config.Directory, true); err != nil {
 		return nil, fmt.Errorf("secure diagnostics directory: %w", err)
 	}
-	path := filepath.Join(config.Directory, EventLogName)
-	if eventInfo, inspectErr := os.Lstat(path); inspectErr == nil {
-		if !eventInfo.Mode().IsRegular() {
-			return nil, fmt.Errorf("diagnostics event log must be a regular file")
+	r := &Recorder{
+		config: config, storage: storage, reportAt: config.Now().UTC(),
+		health: Health{Writable: true, MaxEvents: config.MaxEvents, MaxBytes: config.MaxBytes},
+	}
+	if err := r.openSegments(); err != nil {
+		if r.file != nil {
+			_ = r.file.Close()
+			r.file = nil
 		}
-	} else if !os.IsNotExist(inspectErr) {
-		return nil, fmt.Errorf("inspect diagnostics event log: %w", inspectErr)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open diagnostics event log: %w", err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("secure diagnostics event log: %w", err)
-	}
-	now := config.Now().UTC()
-	recorder := &Recorder{
-		config: config, file: file,
-		health:   Health{Writable: true, MaxEvents: config.MaxEvents, MaxBytes: config.MaxBytes},
-		reportAt: now,
-	}
-	if err := recorder.load(now); err != nil {
-		file.Close()
-		return nil, err
-	}
-	return recorder, nil
-}
-
-func (r *Recorder) load(now time.Time) error {
-	info, err := r.file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat diagnostics event log: %w", err)
-	}
-	start := int64(0)
-	readLimit := r.config.MaxBytes
-	if info.Size() > r.config.MaxBytes {
-		start = info.Size() - r.config.MaxBytes
-		r.health.Dropped++
-		r.health.Pressure = true
-	}
-	tailStartsAtBoundary := start == 0
-	if start > 0 {
-		if _, err := r.file.Seek(start-1, 0); err != nil {
-			return fmt.Errorf("seek diagnostics boundary byte: %w", err)
-		}
-		var previous [1]byte
-		if _, err := io.ReadFull(r.file, previous[:]); err != nil {
-			return fmt.Errorf("read diagnostics boundary byte: %w", err)
-		}
-		tailStartsAtBoundary = previous[0] == '\n'
-	}
-	if _, err := r.file.Seek(start, 0); err != nil {
-		return fmt.Errorf("seek diagnostics event log: %w", err)
-	}
-	data, err := io.ReadAll(io.LimitReader(r.file, readLimit))
-	if err != nil {
-		return fmt.Errorf("read diagnostics event log: %w", err)
-	}
-	corrupt := uint64(0)
-	changed := start > 0
-	if !tailStartsAtBoundary {
-		if boundary := bytes.IndexByte(data, '\n'); boundary >= 0 {
-			data = data[boundary+1:]
-		} else {
-			data = nil
-			corrupt++
-		}
-	}
-	if missingFinalDelimiter(data) {
-		changed = true
-	}
-	var previousSequence uint64
-	var previousTime time.Time
-	for _, line := range bytes.Split(data, []byte{'\n'}) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var event Event
-		if !validStoredEvent(line, &event, previousSequence, previousTime) {
-			corrupt++
-			continue
-		}
-		event = r.sanitize(event)
-		canonical, _ := json.Marshal(event)
-		encoded := append(canonical, '\n')
-		if !bytes.Equal(encoded, append(append([]byte(nil), line...), '\n')) {
-			changed = true
-		}
-		projected, projectedOK := projectDebugEvent(event)
-		var cached *DebugEvent
-		if projectedOK {
-			cached = &projected
-		}
-		r.records = append(r.records, storedEvent{event: event, data: encoded, debug: cached})
-		r.bytes += int64(len(encoded))
-		r.next = event.Sequence
-		previousSequence = event.Sequence
-		previousTime = event.Time
-		r.reportAt = event.Time
-	}
-	if corrupt > 0 {
-		r.health.CorruptRecords = corrupt
-		r.health.LastError = fmt.Sprintf("recovered %d corrupt or truncated prior record(s)", corrupt)
-		r.health.Pressure = true
-		changed = true
-	}
-	if r.applyRetention(now) {
-		changed = true
-	}
-	if changed {
-		if err := r.rewrite(); err != nil {
-			return fmt.Errorf("recover diagnostics event log: %w", err)
-		}
-	} else if _, err := r.file.Seek(0, 2); err != nil {
-		return fmt.Errorf("seek diagnostics append position: %w", err)
+		return nil, fmt.Errorf("open diagnostics storage: %w", err)
 	}
 	r.updateUsage()
-	return nil
+	return r, nil
 }
 
 func missingFinalDelimiter(data []byte) bool {
@@ -226,33 +116,33 @@ func (r *Recorder) record(input Event) (Event, error) {
 		return Event{}, ErrEventTooLarge
 	}
 
-	previousRecords := append([]storedEvent(nil), r.records...)
-	previousBytes := r.bytes
-	previousDropped := r.health.Dropped
 	projected, projectedOK := projectDebugEvent(event)
 	var cached *DebugEvent
 	if projectedOK {
 		cached = &projected
 	}
-	r.records = append(r.records, storedEvent{event: event, data: data, debug: cached})
-	r.bytes += int64(len(data))
-	changed := r.applyRetention(event.Time)
-	if changed {
-		err = r.rewrite()
-	} else {
-		_, err = r.file.Write(data)
+	pending := &storedEvent{event: event, data: data, debug: cached}
+	staged := append(r.records, pending)
+	drop, total := r.retentionDecision(staged, r.bytes+int64(len(data)), event.Time)
+	err = r.appendSegment(data, drop > 0)
+	if err == nil && drop != 0 {
+		err = r.trimSegments(staged, drop)
 	}
 	if err != nil {
-		r.records = previousRecords
-		r.bytes = previousBytes
-		r.health.Dropped = previousDropped
+		// append may reuse capacity, but never changes the previously published
+		// slice length or its immutable records. Do not claim disk rollback.
+		staged[len(r.records)] = nil
 		r.fail(err)
 		r.updateUsage()
 		return Event{}, fmt.Errorf("persist diagnostics event: %w", err)
 	}
+	clear(staged[:drop])
+	r.records = staged[drop:]
+	r.bytes = total
+	r.health.Dropped += uint64(drop)
+	r.health.Pressure = r.health.Pressure || drop > 0
 	r.next = event.Sequence
 	r.reportAt = event.Time
-	r.health.Writable = true
 	r.updateUsage()
 	return event, nil
 }
@@ -260,6 +150,9 @@ func (r *Recorder) record(input Event) (Event, error) {
 func (r *Recorder) normalize(input Event) (Event, error) {
 	if err := validateEvent(input); err != nil {
 		return Event{}, err
+	}
+	if r.next == ^uint64(0) {
+		return Event{}, errors.New("diagnostics sequence exhausted")
 	}
 	input.Version = EventSchemaVersion
 	input.Sequence = r.next + 1
@@ -325,81 +218,8 @@ func truncate(value string, limit int, already bool) (string, bool) {
 	return strings.ToValidUTF8(value[:limit], ""), true
 }
 
-func (r *Recorder) applyRetention(now time.Time) bool {
-	changed := false
-	cutoff := now.Add(-r.config.MaxAge)
-	for range len(r.records) {
-		if !r.records[0].event.Time.Before(cutoff) {
-			break
-		}
-		r.dropOldest()
-		changed = true
-	}
-	for range len(r.records) {
-		if len(r.records) <= r.config.MaxEvents && r.bytes <= r.config.MaxBytes {
-			break
-		}
-		r.dropOldest()
-		changed = true
-	}
-	if changed {
-		r.health.Pressure = true
-	}
-	return changed
-}
-
-func (r *Recorder) dropOldest() {
-	r.bytes -= int64(len(r.records[0].data))
-	r.records[0] = storedEvent{}
-	r.records = r.records[1:]
-	r.health.Dropped++
-}
-
-func (r *Recorder) rewrite() error {
-	temporary, err := os.CreateTemp(r.config.Directory, ".events-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	remove := true
-	defer func() {
-		temporary.Close()
-		if remove {
-			os.Remove(name)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	for _, record := range r.records {
-		if _, err := temporary.Write(record.data); err != nil {
-			return err
-		}
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := r.file.Close(); err != nil {
-		return err
-	}
-	path := filepath.Join(r.config.Directory, EventLogName)
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	remove = false
-	r.file, err = os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
-	return errors.Join(err, syncDirectory(r.config.Directory))
-}
-
 func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
+	return defaultStorageHooks().syncDirectory(path)
 }
 
 func (r *Recorder) Cleanup() error {
@@ -411,21 +231,25 @@ func (r *Recorder) Cleanup() error {
 	if !r.health.Writable {
 		return ErrStorage
 	}
-	previousRecords := append([]storedEvent(nil), r.records...)
-	previousBytes := r.bytes
-	previousDropped := r.health.Dropped
 	now := r.config.Now().UTC()
-	if !r.applyRetention(now) {
+	drop, total := r.retentionDecision(r.records, r.bytes, now)
+	if drop == 0 {
 		return nil
 	}
-	if err := r.rewrite(); err != nil {
-		r.records = previousRecords
-		r.bytes = previousBytes
-		r.health.Dropped = previousDropped
+	err := r.storage.sync(r.file)
+	if err == nil {
+		err = r.trimSegments(r.records, drop)
+	}
+	if err != nil {
 		r.fail(err)
 		r.updateUsage()
 		return fmt.Errorf("clean diagnostics event log: %w", err)
 	}
+	clear(r.records[:drop])
+	r.records = r.records[drop:]
+	r.bytes = total
+	r.health.Dropped += uint64(drop)
+	r.health.Pressure = true
 	r.updateUsage()
 	r.reportAt = now
 	return nil
@@ -438,14 +262,14 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.closed = true
-	if err := r.file.Sync(); err != nil {
-		r.fail(err)
-		_ = r.file.Close()
-		return fmt.Errorf("sync diagnostics event log: %w", err)
+	if r.file == nil {
+		return nil
 	}
-	if err := r.file.Close(); err != nil {
+	syncErr := r.storage.sync(r.file)
+	err := errors.Join(syncErr, r.storage.closeFile(&r.file))
+	if err != nil {
 		r.fail(err)
-		return fmt.Errorf("close diagnostics event log: %w", err)
+		return fmt.Errorf("close diagnostics storage: %w", err)
 	}
 	return nil
 }

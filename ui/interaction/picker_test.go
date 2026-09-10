@@ -609,6 +609,92 @@ func TestPickerCompactDrillInAndEighteenRowRule(t *testing.T) {
 	}
 }
 
+func TestPickerTextFitMeasuresEssentialContentOnly(t *testing.T) {
+	picker := newPickerForTest(t)
+	picker.options.Title = "Commands " + strings.Repeat("界", 60)
+	items := []Item{{Key: "selected", Label: "Selected", Description: "A long selected description", Detail: []string{"detail one", "detail two"}}}
+	for index := 1; index < 30; index++ {
+		items = append(items, Item{Key: fmt.Sprintf("item-%d", index), Label: fmt.Sprintf("Virtual item %d", index)})
+	}
+	_ = picker.applyPage(loadResult{page: Page{Items: items}})
+	palette, _ := theme.Builtin("terminal")
+	frame, err := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 100, Rows: 20}), Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := frame.TextFit()
+	want := map[string]bool{
+		"picker-title": true, "picker-search": true, "picker-status": true,
+		"picker-detail-title": true, "picker-detail-body": true, "picker-footer": true,
+	}
+	for _, observation := range report.Observations {
+		delete(want, observation.Element.String())
+		if observation.Element.String() == "picker-title" && !observation.Truncated {
+			t.Fatalf("long Unicode title was not reported truncated: %+v", observation)
+		}
+		if strings.Contains(observation.Element.String(), "item-") || observation.Instance != 0 {
+			t.Fatalf("virtualized/data-derived picker observation = %+v", observation)
+		}
+	}
+	if len(want) != 0 || report.Omitted != 0 {
+		t.Fatalf("missing picker observations %v; report=%+v", want, report)
+	}
+
+	picker.screen = detailScreen
+	compactLayout := responsive.Resolve(responsive.Size{Columns: 79, Rows: 18})
+	compact, _ := picker.Render(shell.RenderContext{Layout: compactLayout, Theme: palette})
+	compactIDs := map[string]bool{}
+	for _, observation := range compact.TextFit().Observations {
+		compactIDs[observation.Element.String()] = true
+	}
+	for _, id := range []string{"picker-detail-header", "picker-detail-title", "picker-detail-body", "picker-detail-footer"} {
+		if !compactIDs[id] {
+			t.Fatalf("compact detail omitted %s: %v", id, compactIDs)
+		}
+	}
+
+	picker.screen = helpScreen
+	helpSize := responsive.Size{Columns: 40, Rows: 3}
+	help, _ := picker.Render(shell.RenderContext{Layout: responsive.Layout{Reported: helpSize, Render: helpSize, Class: responsive.Compact}, Theme: palette})
+	helpReport := help.TextFit()
+	if len(helpReport.Observations) != 2 || helpReport.Observations[0].Element.String() != "picker-help-header" ||
+		helpReport.Observations[1].Element.String() != "picker-help-body" || !helpReport.Observations[1].Clipped || helpReport.Observations[1].LayoutRows != 6 {
+		t.Fatalf("help text-fit report = %+v", helpReport)
+	}
+
+	recovery, _ := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 20, Rows: 5}), Theme: palette})
+	recoveryReport := recovery.TextFit()
+	if len(recoveryReport.Observations) != 2 || recoveryReport.Observations[0].Element.String() != "picker-recovery-title" ||
+		recoveryReport.Observations[1].Element.String() != "picker-recovery-body" || !recoveryReport.Observations[1].Truncated {
+		t.Fatalf("recovery text-fit report = %+v", recoveryReport)
+	}
+}
+
+func TestPickerNarrowFootersReportUnexpectedTruncation(t *testing.T) {
+	picker := newPickerForTest(t)
+	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}}})
+	palette, _ := theme.Builtin("terminal")
+	for _, screen := range []pickerScreen{rootScreen, detailScreen} {
+		picker.screen = screen
+		frame, err := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}), Theme: palette})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, observation := range frame.TextFit().Observations {
+			if observation.Element.String() == "picker-footer" || observation.Element.String() == "picker-detail-footer" {
+				found = true
+				if !observation.Truncated || observation.AllowTruncation {
+					t.Fatalf("essential footer fit=%+v", observation)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("footer unmeasured")
+		}
+	}
+}
+
 func TestPickerDiagnosticStateCannotLeakQueryItemOrValue(t *testing.T) {
 	canary := "private-query_日本語_/secret/path"
 	picker := newPickerForTest(t)

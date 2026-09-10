@@ -7,12 +7,120 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/raulfrk/herdr-plugin-kit/ui/snapshot"
 )
 
 func TestSyncDirectoryReportsMissingPath(t *testing.T) {
 	err := syncDirectory(filepath.Join(t.TempDir(), "missing"))
 	if err == nil || !os.IsNotExist(err) {
 		t.Fatalf("syncDirectory() error = %v", err)
+	}
+}
+
+func TestTextFitProjectionRejectsExplicitNullFields(t *testing.T) {
+	for _, field := range []string{"omitted", "instance", "original_columns", "layout_rows", "available_columns", "available_rows", "wrapped", "truncated", "clipped", "allow_truncation"} {
+		for _, alias := range []string{field, strings.ToUpper(field), strings.ToUpper(field[:1]) + field[1:]} {
+			t.Run(alias, func(t *testing.T) {
+				observation := map[string]any{"element": "field", "intent": "clip"}
+				report := map[string]any{"observations": []any{observation}}
+				if field == "omitted" {
+					report[alias] = nil
+				} else {
+					observation[alias] = nil
+				}
+				event := DebugEvent{}
+				projectSemanticDetails(&event, map[string]any{"text_fit": report})
+				if event.TextFit != nil {
+					t.Fatalf("explicit null %s projected as measured", alias)
+				}
+			})
+		}
+	}
+	for _, report := range []any{
+		map[string]any{"observations": []any{}},
+		map[string]any{"observations": []any{map[string]any{"element": "field", "intent": "clip"}}},
+	} {
+		event := DebugEvent{}
+		projectSemanticDetails(&event, map[string]any{"text_fit": report})
+		if event.TextFit == nil {
+			t.Fatal("valid missing optional fields rejected")
+		}
+	}
+	event := DebugEvent{}
+	projectSemanticDetails(&event, map[string]any{"text_fit": map[string]any{
+		"observations": []any{map[string]any{"element": "field", "intent": "clip", "CLIPPED": true}},
+	}})
+	if event.TextFit == nil || len(event.TextFit.Observations) != 1 || !event.TextFit.Observations[0].Clipped {
+		t.Fatal("valid aliased CLIPPED value was not preserved")
+	}
+}
+
+func TestTextFitProjectionRejectsUnsafeIntegers(t *testing.T) {
+	for _, field := range []string{"omitted", "instance", "original_columns", "layout_rows", "available_columns", "available_rows"} {
+		for _, value := range []uint64{1 << 53, uint64(^uint(0) >> 1)} {
+			if value <= 1<<53-1 {
+				continue
+			}
+			observation := map[string]any{"element": "field", "intent": "clip"}
+			report := map[string]any{"observations": []any{observation}}
+			if field == "omitted" {
+				report[field] = value
+			} else {
+				observation[field] = value
+			}
+			event := DebugEvent{}
+			projectSemanticDetails(&event, map[string]any{"text_fit": report})
+			if event.TextFit != nil {
+				t.Fatalf("unsafe raw %s=%d admitted", field, value)
+			}
+		}
+	}
+}
+
+func TestRedactRepeatedKeysPreservesValuesCollisionsAndCopies(t *testing.T) {
+	input := map[string]any{
+		"rows": []any{
+			map[string]any{"safe": "token=one", "auth.token": "first-secret"},
+			map[string]any{"safe": "visible", "auth.token": "second-secret"},
+		},
+		"TOKEN=one": "first",
+		"TOKEN=two": "second",
+	}
+	before, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := redactMetadata(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := got["rows"].([]any)
+	if rows[0].(map[string]any)["safe"] != snapshot.Redact("token=one") || rows[1].(map[string]any)["safe"] != "visible" {
+		t.Fatalf("repeated key reused a value: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.(map[string]any)["auth.token"] != snapshot.Replacement {
+			t.Fatalf("dotted sensitive key not redacted: %+v", row)
+		}
+	}
+	if len(got) != 2 || got[snapshot.Redact("TOKEN=one")] != "second" {
+		t.Fatalf("sorted collision winner changed: %+v", got)
+	}
+	rows[0].(map[string]any)["safe"] = "mutated"
+	rows[1] = nil
+	got["extra"] = true
+	after, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("redacted result aliases input")
+	}
+	input["rows"].([]any)[0].(map[string]any)["safe"] = "changed"
+	again := redactValue(input).(map[string]any)
+	if again["rows"].([]any)[0].(map[string]any)["safe"] != "changed" {
+		t.Fatal("redaction retained values across calls")
 	}
 }
 
@@ -92,4 +200,37 @@ func padReportToSize(t *testing.T, report *Report, target int, set func(string))
 
 func hasOnlyReason(reasons []string, wanted string) bool {
 	return len(reasons) == 1 && reasons[0] == wanted
+}
+
+func TestProjectTextFitTreatsMalformedWireAsUnmeasured(t *testing.T) {
+	validID, err := NewID("field")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := map[string]any{"observations": []any{map[string]any{"element": "field", "instance": 0.0, "original_columns": 4.0, "layout_rows": 1.0, "available_columns": 3.0, "available_rows": 1.0, "intent": "truncate", "truncated": true}}}
+	for _, test := range []struct {
+		name string
+		raw  any
+		want bool
+	}{
+		{"valid", valid, true},
+		{"missing observations", map[string]any{}, false},
+		{"null observations", map[string]any{"observations": nil}, false},
+		{"unknown field", map[string]any{"observations": []any{}, "content": "private"}, false},
+		{"bad identifier", map[string]any{"observations": []any{map[string]any{"element": "PRIVATE", "intent": "clip"}}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := DebugEvent{}
+			projectSemanticDetails(&event, map[string]any{"text_fit": test.raw})
+			if (event.TextFit != nil) != test.want {
+				t.Fatalf("TextFit = %+v, want measured %t", event.TextFit, test.want)
+			}
+		})
+	}
+	report := &TextFitReport{Observations: []TextFitObservation{{Element: validID, Intent: TextFitClip}}}
+	clone := CloneTextFit(report)
+	clone.Observations[0].AvailableRows = 9
+	if report.Observations[0].AvailableRows != 0 {
+		t.Fatal("CloneTextFit aliases observations")
+	}
 }

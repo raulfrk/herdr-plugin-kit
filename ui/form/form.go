@@ -69,6 +69,7 @@ type Model struct {
 	resizeGeneration   uint64
 	applyGeneration    uint64
 	rollbackGeneration uint64
+	targetRevision     uint64
 	pendingApply       bool
 	pendingRollback    bool
 	state              state
@@ -144,6 +145,8 @@ func (model *Model) Update(events shell.EventContext, event shell.Event) []shell
 		model.changed()
 	case shell.KeyEvent:
 		return model.key(events, event.Code)
+	case shell.ActionEvent:
+		return model.action(events, event.ID)
 	case shell.ResultEvent:
 		model.resolve(event)
 	}
@@ -309,6 +312,7 @@ func (model *Model) resolve(event shell.ResultEvent) {
 		model.rollbackToken = ""
 		model.compensationNeeded = false
 		model.state = stateRolledBack
+		model.targetRevision++
 	}
 }
 

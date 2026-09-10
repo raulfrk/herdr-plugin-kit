@@ -22,6 +22,8 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymap"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymapui"
 )
 
 func TestConsumerReadiness(t *testing.T) {
@@ -31,6 +33,7 @@ func TestConsumerReadiness(t *testing.T) {
 	t.Run("Session Switcher", testSessionSwitcher)
 	t.Run("Plugin Configurator", testPluginConfigurator)
 	t.Run("Action Finder", testActionFinder)
+	t.Run("Shared plugin shortcuts", testSharedPluginShortcuts)
 }
 
 func testRecall(t *testing.T) {
@@ -170,7 +173,7 @@ func testSessionSwitcher(t *testing.T) {
 		t.Fatalf("session agents = %+v, error = %v", agents, err)
 	}
 	assessment, err := agenthost.NewProbe(agentHost).Assess(context.Background(), agents[0])
-	if err != nil || !assessment.Stable || assessment.Status != agenthost.Idle || assessment.Reason != agenthost.Composer {
+	if err != nil || !assessment.Stable || assessment.Status != agenthost.Done || assessment.Reason != agenthost.HostReport {
 		t.Fatalf("session agent assessment = %+v, error = %v", assessment, err)
 	}
 }
@@ -357,7 +360,7 @@ func (fixture *actionTransportFixture) AwaitReceipt(context.Context, actionhost.
 
 func agentFixture(status string, sequence uint64) map[string]any {
 	return map[string]any{
-		"agent": "codex", "agent_status": status, "focused": true,
+		"agent": "claude", "agent_status": status, "focused": true,
 		"pane_id": "ws-1:pane-1", "revision": 1, "state_change_seq": sequence,
 		"tab_id": "tab-1", "workspace_id": "ws-1", "cwd": "/tmp/plugin-kit",
 	}
@@ -390,5 +393,33 @@ func awaitUpdate[T any](t *testing.T, updates <-chan config.Update[T]) config.Up
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for configuration update")
 		return config.Update[T]{}
+	}
+}
+
+func testSharedPluginShortcuts(t *testing.T) {
+	picker, err := interaction.NewPicker(interaction.PickerOptions{Title: "Example", Load: func(context.Context, string, interaction.Cursor) (interaction.Page, error) {
+		return interaction.Page{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface, err := keymapui.New(keymapui.Options{Main: picker, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer surface.Close()
+	document := keymap.Document{Version: 1, Bindings: []keymap.Binding{{Context: "interaction.picker.results", Action: "picker.next", Sequences: []keymap.Sequence{{"g", "r"}}}}}
+	if err := surface.Runtime().Apply(document); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if id, _ := surface.Runtime().Step(surface.KeymapContext(), "j", now); id != "" {
+		t.Fatal("cleared default still resolves")
+	}
+	if id, consumed := surface.Runtime().Step(surface.KeymapContext(), "g", now); id != "" || !consumed {
+		t.Fatal("sequence prefix not retained")
+	}
+	if id, _ := surface.Runtime().Step(surface.KeymapContext(), "r", now); id != "picker.next" {
+		t.Fatalf("sequence action = %q", id)
 	}
 }

@@ -19,10 +19,9 @@ const (
 	MaxDetectionBytes = 64 << 10
 	maxIdentityBytes  = 256
 	maxPathBytes      = 4096
-	classifierLines   = 12
 )
 
-// DefaultSettle returns the quiet interval required between status samples.
+// DefaultSettle returns the quiet interval between non-Codex status samples.
 func DefaultSettle() time.Duration { return 400 * time.Millisecond }
 
 var ErrStaleReport = errors.New("agent report changed during probe")
@@ -49,9 +48,13 @@ const (
 type Reason string
 
 const (
-	Queue        Reason = "codex_queue"
-	Question     Reason = "codex_question"
+	// Deprecated: Codex assessment no longer classifies terminal text.
+	Queue Reason = "codex_queue"
+	// Deprecated: Codex assessment no longer classifies terminal text.
+	Question Reason = "codex_question"
+	// Deprecated: Codex assessment no longer classifies terminal text.
 	TerminalWait Reason = "codex_terminal_wait"
+	// Deprecated: Codex assessment no longer classifies terminal text.
 	Composer     Reason = "codex_ready_composer"
 	HostReport   Reason = "host_report"
 	Unsettled    Reason = "unsettled"
@@ -64,6 +67,8 @@ type Assessment struct {
 	Stable bool
 }
 type Host struct {
+	// CodexSocket is an absolute Unix App Server socket path. Empty disables Codex assessment.
+	CodexSocket    string
 	Runner         command.Runner
 	Herdr, Session string
 }
@@ -72,7 +77,8 @@ type Probe struct {
 	wait func(context.Context, time.Duration) error
 }
 
-// NewProbe creates a status probe with the production settle policy.
+// NewProbe creates a status probe. Codex uses one bounded App Server snapshot;
+// other agents use the production settle policy.
 func NewProbe(host Host) Probe { return Probe{Host: host, wait: wait} }
 
 func (h Host) List(ctx context.Context) ([]Agent, error) {
@@ -124,6 +130,9 @@ func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 	return a, nil
 }
 func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
+	if strings.EqualFold(target.Kind, "codex") {
+		return p.assessCodex(ctx, target)
+	}
 	if p.wait == nil {
 		return Assessment{}, errors.New("assess agent: probe must be created with NewProbe")
 	}
@@ -166,8 +175,7 @@ func (p Probe) observe(ctx context.Context, target Agent, requireVersion bool) (
 	if !sameImmutable(target, before) || requireVersion && (target.Status != before.Status || target.Revision != before.Revision || target.StateChangeSeq != before.StateChangeSeq) {
 		return observation{}, ErrStaleReport
 	}
-	screen, err := p.Host.readDetection(ctx, target.PaneID)
-	if err != nil {
+	if err := p.Host.readDetection(ctx, target.PaneID); err != nil {
 		return observation{}, err
 	}
 	after, err := p.Host.find(ctx, target.PaneID)
@@ -177,7 +185,7 @@ func (p Probe) observe(ctx context.Context, target Agent, requireVersion bool) (
 	if !sameImmutable(before, after) || before.Status != after.Status || before.Revision != after.Revision || before.StateChangeSeq != after.StateChangeSeq {
 		return observation{}, ErrStaleReport
 	}
-	status, reason := classify(after, screen)
+	status, reason := hostStatus(after.Status), HostReport
 	return observation{after, status, reason}, nil
 }
 func (h Host) find(ctx context.Context, pane string) (Agent, error) {
@@ -192,22 +200,22 @@ func (h Host) find(ctx context.Context, pane string) (Agent, error) {
 	}
 	return Agent{}, ErrStaleReport
 }
-func (h Host) readDetection(ctx context.Context, pane string) (string, error) {
+func (h Host) readDetection(ctx context.Context, pane string) error {
 	args, err := h.args([]string{"pane", "read", pane, "--source", "detection", "--lines", "60", "--format", "text"})
 	if err != nil {
-		return "", err
+		return err
 	}
 	r, err := herdrcmd.Run(ctx, h.Runner, h.Herdr, args)
 	if err != nil {
-		return "", fmt.Errorf("read agent detection: %w", err)
+		return fmt.Errorf("read agent detection: %w", err)
 	}
 	if len(r.Stdout) > MaxDetectionBytes {
-		return "", errors.New("read agent detection: output exceeds 64 KiB")
+		return errors.New("read agent detection: output exceeds 64 KiB")
 	}
 	if !utf8.Valid(r.Stdout) {
-		return "", errors.New("read agent detection: output is not UTF-8")
+		return errors.New("read agent detection: output is not UTF-8")
 	}
-	return boundedTail(string(r.Stdout)), nil
+	return nil
 }
 func (h Host) runJSON(ctx context.Context, a []string, target any) error {
 	args, err := h.args(a)
@@ -236,53 +244,6 @@ func wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func classify(a Agent, screen string) (Status, Reason) {
-	if !strings.EqualFold(a.Kind, "codex") {
-		return hostStatus(a.Status), HostReport
-	}
-	tail := normalize(screen)
-	switch {
-	case containsAny(tail, "queued follow-up inputs", "messages to be submitted after next tool call", "messages to be submitted at end of turn", "edit last queued message"):
-		return Working, Queue
-	case containsAny(tail, "please confirm", "please choose", "please provide", "please select", "please enter", "please approve", "need your input", "needs your input", "requires your input", "do you want", "would you like", "[y/n]", "press enter to confirm", "enter to confirm", "esc to cancel", "approval required"):
-		return Blocked, Question
-	case containsAny(tail, "background termin", "waiting for terminal", "terminal active", "running command", "command active", "command is active", "process active", "process running", "continuing in background", "still running", "still working"):
-		return Working, TerminalWait
-	case isReadyComposer(tail):
-		return Idle, Composer
-	default:
-		status := hostStatus(a.Status)
-		if status == Unknown {
-			return Unknown, Unrecognized
-		}
-		return status, HostReport
-	}
-}
-func boundedTail(s string) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) > DetectionLines {
-		lines = lines[len(lines)-DetectionLines:]
-	}
-	return strings.Join(lines, "\n")
-}
-func normalize(s string) string {
-	lines := strings.Split(boundedTail(s), "\n")
-	if len(lines) > classifierLines {
-		lines = lines[len(lines)-classifierLines:]
-	}
-	return strings.ToLower(strings.Join(strings.Fields(strings.Join(lines, "\n")), " "))
-}
-func containsAny(s string, ms ...string) bool {
-	for _, m := range ms {
-		if strings.Contains(s, m) {
-			return true
-		}
-	}
-	return false
-}
-func isReadyComposer(s string) bool {
-	return containsAny(s, "ask codex", "tab to queue", "tab-to-queue") || strings.HasSuffix(s, "›") || strings.HasSuffix(s, ">")
-}
 func hostStatus(s string) Status {
 	switch s {
 	case "working":

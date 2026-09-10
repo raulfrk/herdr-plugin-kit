@@ -132,7 +132,7 @@ func TestRecordNormalizesSchemaAndRedactsEveryTextPath(t *testing.T) {
 		t.Fatalf("safe screenshot context changed: %#v", event.Screenshot)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(directory, diagnostics.EventLogName))
+	raw, err := readStoredBytes(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestRecordClampsAClockRegressionToTheLastEventTime(t *testing.T) {
 		}
 	}
 
-	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	events := readEvents(t, directory)
 	if len(events) != 2 || !events[0].Time.Equal(firstTime) || !events[1].Time.Equal(firstTime) {
 		t.Fatalf("event times after clock regression = %#v", events)
 	}
@@ -217,7 +217,7 @@ func TestDetailBudgetSmallerThanMarkerStillBoundsPayload(t *testing.T) {
 	if !event.DetailsTruncated || event.Details != nil {
 		t.Fatalf("one-byte details budget = %#v", event)
 	}
-	raw, err := os.ReadFile(filepath.Join(config.Directory, diagnostics.EventLogName))
+	raw, err := readStoredBytes(config.Directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,10 +287,10 @@ func TestOpenUsesPrivateModesAndRecoversCorruptRecords(t *testing.T) {
 	if mode := mustMode(t, directory); mode.Perm() != 0o700 {
 		t.Fatalf("directory mode = %o", mode.Perm())
 	}
-	if mode := mustMode(t, filepath.Join(directory, diagnostics.EventLogName)); mode.Perm() != 0o600 {
+	if mode := mustMode(t, filepath.Join(directory, "events-v1", "events-00000000000000000001.jsonl")); mode.Perm() != 0o600 {
 		t.Fatalf("event log mode = %o", mode.Perm())
 	}
-	for _, line := range nonemptyLines(t, filepath.Join(directory, diagnostics.EventLogName)) {
+	for _, line := range nonemptyLines(t, directory) {
 		var decoded diagnostics.Event
 		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
 			t.Fatalf("recovered log still contains corrupt record %q: %v", line, err)
@@ -323,7 +323,7 @@ func TestOpenRejectsEachInvalidStoredEventIndependently(t *testing.T) {
 	if health := recorder.Health(); health.CorruptRecords != 7 {
 		t.Fatalf("independent corrupt record count = %d, want 7", health.CorruptRecords)
 	}
-	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	events := readEvents(t, directory)
 	if len(events) != 2 || events[0].Sequence != 1 || events[1].Sequence != 8 {
 		t.Fatalf("valid records around corruption = %#v", events)
 	}
@@ -344,7 +344,7 @@ func TestOpenRepairsMissingDelimiterBeforeAppending(t *testing.T) {
 	if _, err := diagnostics.RecordWireForTest(recorder, diagnostics.Event{Level: diagnostics.LevelInfo, Kind: diagnostics.KindLifecycle, Message: "next"}); err != nil {
 		t.Fatal(err)
 	}
-	events := readEvents(t, filepath.Join(directory, diagnostics.EventLogName))
+	events := readEvents(t, directory)
 	if len(events) != 2 || events[0].Sequence != 7 || events[1].Sequence != 8 {
 		t.Fatalf("repaired events = %#v", events)
 	}
@@ -374,12 +374,12 @@ func TestOpenRetainsNewestRecordsWhenExistingLogExceedsNewByteBudget(t *testing.
 	if event.Sequence != 31 {
 		t.Fatalf("next sequence = %d, want 31", event.Sequence)
 	}
-	events := readEvents(t, path)
+	events := readEvents(t, directory)
 	if len(events) == 0 || events[len(events)-1].Sequence != 31 || events[0].Sequence == 1 {
 		t.Fatalf("oversized recovery did not preserve newest tail: %#v", events)
 	}
-	if info, err := os.Stat(path); err != nil || info.Size() > config.MaxBytes {
-		t.Fatalf("recovered log size = %v, error = %v", info, err)
+	if data, err := readStoredBytes(directory); err != nil || int64(len(data)) > config.MaxBytes {
+		t.Fatalf("recovered log bytes = %d, error = %v", len(data), err)
 	}
 }
 
@@ -416,7 +416,7 @@ func TestOpenRetainsCompleteTailStartingAtExactRecordBoundary(t *testing.T) {
 	config.MaxBytes = maxBytes
 	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 2, 0, 0, time.UTC) }
 	recorder := openRecorder(t, config)
-	events := readEvents(t, path)
+	events := readEvents(t, directory)
 	if len(events) != 1 || events[0].Sequence != 2 || recorder.Health().Bytes != maxBytes {
 		t.Fatalf("exact bounded tail = events %#v, health %#v", events, recorder.Health())
 	}
@@ -446,7 +446,7 @@ func TestOpenDoesNotRewriteAValidLogAtItsExactByteBudget(t *testing.T) {
 	if err := recorder.Close(); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(directory, diagnostics.EventLogName)
+	path := filepath.Join(directory, "events-v1", "events-00000000000000000001.jsonl")
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -496,7 +496,7 @@ func TestOpenRetainsTailWhenByteWindowStartsOnRecordSeparator(t *testing.T) {
 	config.MaxBytes = tailBytes + 1
 	config.Now = func() time.Time { return time.Date(2026, 9, 3, 10, 2, 0, 0, time.UTC) }
 	recorder := openRecorder(t, config)
-	events := readEvents(t, path)
+	events := readEvents(t, directory)
 	health := recorder.Health()
 	if len(events) != 1 || events[0].Sequence != 2 || health.Bytes != tailBytes || health.CorruptRecords != 0 {
 		t.Fatalf("separator-aligned tail = events %#v, health %#v", events, health)
@@ -519,7 +519,7 @@ func TestOpenReportsOversizedUndelimitedTailAsCorrupt(t *testing.T) {
 	if health.CorruptRecords != 1 || health.Dropped != 1 || health.LastError == "" || health.Events != 0 || health.Bytes != 0 {
 		t.Fatalf("oversized undelimited recovery health = %#v", health)
 	}
-	if data, err := os.ReadFile(path); err != nil || len(data) != 0 {
+	if data, err := readStoredBytes(directory); err != nil || len(data) != 0 {
 		t.Fatalf("oversized undelimited recovery log = %q, error = %v", data, err)
 	}
 }
@@ -583,7 +583,7 @@ func TestRetentionByCountBytesAndAge(t *testing.T) {
 	if health.Events != 3 || health.Bytes > config.MaxBytes || health.Dropped != 5 || !health.Pressure {
 		t.Fatalf("retention health = %#v", health)
 	}
-	events := readEvents(t, filepath.Join(config.Directory, diagnostics.EventLogName))
+	events := readEvents(t, config.Directory)
 	for _, event := range events {
 		if event.Time.Before(now.Add(-config.MaxAge)) {
 			t.Fatalf("expired event retained: %v", event.Time)
@@ -670,11 +670,11 @@ func TestConcurrentRecordingHasUniqueSequenceAndSettledQuota(t *testing.T) {
 	if health.Bytes > config.MaxBytes || health.Events > config.MaxEvents {
 		t.Fatalf("settled quota exceeded: %#v", health)
 	}
-	if info, err := os.Stat(filepath.Join(config.Directory, diagnostics.EventLogName)); err != nil || info.Size() > config.MaxBytes {
-		t.Fatalf("settled event log exceeds quota: info=%v err=%v", info, err)
+	if data, err := readStoredBytes(config.Directory); err != nil || int64(len(data)) > config.MaxBytes {
+		t.Fatalf("settled event log exceeds quota: bytes=%d err=%v", len(data), err)
 	}
 	seen := make(map[uint64]bool)
-	for _, event := range readEvents(t, filepath.Join(config.Directory, diagnostics.EventLogName)) {
+	for _, event := range readEvents(t, config.Directory) {
 		if seen[event.Sequence] {
 			t.Fatalf("duplicate sequence %d", event.Sequence)
 		}
@@ -867,6 +867,9 @@ func TestOpenRejectsSymlinkedPrivateStorageWithoutTouchingTarget(t *testing.T) {
 	if err := os.Mkdir(targetDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(targetDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	linkedDirectory := filepath.Join(root, "linked-directory")
 	if err := os.Symlink(targetDirectory, linkedDirectory); err != nil {
 		t.Fatal(err)
@@ -891,6 +894,9 @@ func TestOpenRejectsSymlinkedPrivateStorageWithoutTouchingTarget(t *testing.T) {
 	}
 	targetFile := filepath.Join(root, "target-file")
 	if err := os.WriteFile(targetFile, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(targetFile, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(targetFile, filepath.Join(directory, diagnostics.EventLogName)); err != nil {
@@ -1101,9 +1107,9 @@ func mustMode(t *testing.T, path string) os.FileMode {
 	return info.Mode()
 }
 
-func nonemptyLines(t *testing.T, path string) []string {
+func nonemptyLines(t *testing.T, directory string) []string {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	data, err := readStoredBytes(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1131,4 +1137,25 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+// Read canonical disk bytes, not Export's independently sanitized projection.
+func readStoredBytes(directory string) ([]byte, error) {
+	live := filepath.Join(directory, "events-v1")
+	entries, err := os.ReadDir(live)
+	if err != nil {
+		return nil, err
+	}
+	var data []byte
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "events-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil, fmt.Errorf("unexpected log entry %q", entry.Name())
+		}
+		b, err := os.ReadFile(filepath.Join(live, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, b...)
+	}
+	return data, nil
 }

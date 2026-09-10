@@ -3,6 +3,7 @@ package form
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -678,6 +679,94 @@ func TestErrorAtBottomBoundaryDoesNotOverwriteHelp(t *testing.T) {
 	if got := frameRow(frame, 3); !strings.HasPrefix(got, "Tab/↑↓ field") || strings.Contains(got, "invalid") {
 		t.Fatalf("bottom help row = %q", got)
 	}
+	report := frame.TextFit()
+	if report.Omitted != 0 {
+		t.Fatalf("unexpected omitted form observations: %+v", report)
+	}
+	var boundaryError *diagnostics.TextFitObservation
+	for index := range report.Observations {
+		if report.Observations[index].Element.String() == "form-field-error" {
+			boundaryError = &report.Observations[index]
+		}
+	}
+	if boundaryError == nil || boundaryError.Instance != 0 || boundaryError.AvailableRows != 0 || !boundaryError.Clipped {
+		t.Fatalf("bottom-boundary error fit = %+v", boundaryError)
+	}
+}
+
+func TestFormTextFitMeasuresVisibleContentWithoutLeakingSecrets(t *testing.T) {
+	const secret = "PRIVATE-FORM-SECRET-/path/界界界"
+	model, err := New(Options{Fields: []Field{
+		{ID: "first", Label: "First", Value: secret, Secret: true, Error: "a long required error"},
+		{ID: "second", Label: "Second", Value: "two"},
+		{ID: "third", Label: "Third", Value: "three"},
+		{ID: "hidden", Label: "Hidden", Value: secret},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	palette, _ := theme.Builtin("terminal")
+	frame, err := model.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}), Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := frame.TextFit()
+	want := map[string]int{"form-header": 1, "form-status": 1, "form-footer": 1, "form-field": 3, "form-field-error": 1}
+	fieldInstances := map[int]bool{}
+	for _, observation := range report.Observations {
+		id := observation.Element.String()
+		want[id]--
+		if id == "form-field" {
+			fieldInstances[observation.Instance] = true
+		}
+		if id == "form-field" && observation.Instance == 3 || id == "form-field-error" && observation.Instance != 0 {
+			t.Fatalf("offscreen or mismatched form observation = %+v", observation)
+		}
+	}
+	for id, remaining := range want {
+		if remaining != 0 {
+			t.Fatalf("form observation %s remaining=%d report=%+v", id, remaining, report)
+		}
+	}
+	if len(fieldInstances) != 3 || !fieldInstances[0] || !fieldInstances[1] || !fieldInstances[2] {
+		t.Fatalf("visible field instances = %v", fieldInstances)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(secret)) || bytes.Contains(encoded, []byte("required error")) {
+		t.Fatalf("text-fit metadata leaked form content: %s", encoded)
+	}
+
+	recovery, _ := model.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 20, Rows: 5}), Theme: palette})
+	recoveryReport := recovery.TextFit()
+	if len(recoveryReport.Observations) != 2 || recoveryReport.Observations[0].Element.String() != "form-header" ||
+		recoveryReport.Observations[1].Element.String() != "form-recovery" || !recoveryReport.Observations[1].Truncated {
+		t.Fatalf("form recovery text-fit = %+v", recoveryReport)
+	}
+}
+
+func TestFormNarrowFooterReportsUnexpectedTruncation(t *testing.T) {
+	model := newForm(t, nil)
+	palette, _ := theme.Builtin("terminal")
+	frame, err := model.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}), Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observation := range frame.TextFit().Observations {
+		if observation.Element.String() == "form-footer" {
+			if !observation.Truncated || observation.AllowTruncation {
+				t.Fatalf("essential footer fit=%+v", observation)
+			}
+			want := view.Truncate("Tab/↑↓ field · Enter apply · Alt-r rollback · Ctrl-C close", 40, "…")
+			if frameRow(frame, 9) != want {
+				t.Fatalf("footer rendering changed: %q", frameRow(frame, 9))
+			}
+			return
+		}
+	}
+	t.Fatal("footer unmeasured")
 }
 
 func TestFormValuesAreClonedProperty(t *testing.T) {

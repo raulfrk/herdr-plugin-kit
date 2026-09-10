@@ -120,7 +120,7 @@ func TestDebugSnapshotCancellationCheckpoints(t *testing.T) {
 	requireValidCancellation(t, ctx)
 
 	recorder := debugRecorder(t)
-	recorder.records = []storedEvent{{debug: refs[0]}}
+	recorder.records = []*storedEvent{{debug: refs[0]}}
 	previews, err := OpenPreviewStore(t.TempDir(), DefaultPreviewLimits())
 	if err != nil {
 		t.Fatal(err)

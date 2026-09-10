@@ -8,7 +8,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +38,22 @@ type failingSink struct{ calls int }
 func (sink *failingSink) RecordSemantic(diagnostics.SemanticEvent) error {
 	sink.calls++
 	return errors.New("record failed")
+}
+
+type mutatingTextFitSink struct {
+	calls  int
+	events []diagnostics.SemanticEvent
+}
+
+func (sink *mutatingTextFitSink) RecordSemantic(event diagnostics.SemanticEvent) error {
+	sink.calls++
+	captured := event
+	captured.TextFit = diagnostics.CloneTextFit(event.TextFit)
+	sink.events = append(sink.events, captured)
+	if event.TextFit != nil && len(event.TextFit.Observations) > 0 {
+		event.TextFit.Observations[0].Instance = 999
+	}
+	return nil
 }
 
 func (sink *memorySink) RecordSemantic(event diagnostics.SemanticEvent) error {
@@ -209,7 +227,7 @@ func TestUnicodeTextReachesSurfaceButNotPersistedDiagnostics(t *testing.T) {
 	if len(surface.texts) != 1 || surface.texts[0].Text != canary || !surface.texts[0].Paste {
 		t.Fatalf("surface text delivery = %#v", surface.texts)
 	}
-	logData, err := os.ReadFile(filepath.Join(directory, diagnostics.EventLogName))
+	logData, err := readCanonicalLog(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +251,52 @@ func TestUnicodeTextReachesSurfaceButNotPersistedDiagnostics(t *testing.T) {
 	if input.Details["bytes"] != float64(len(canary)) || input.Details["graphemes"] != float64(wantGraphemes) {
 		t.Fatalf("persisted input measurements = %#v, want bytes %d graphemes %d", input.Details, len(canary), wantGraphemes)
 	}
+}
+
+// Inspect canonical on-disk bytes so privacy checks do not rely on Export's
+// separate sanitization. os.ReadDir provides lexical segment order.
+func canonicalLogFiles(directory string) ([]string, error) {
+	live := filepath.Join(directory, "events-v1")
+	entries, err := os.ReadDir(live)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if len(name) != 33 || !strings.HasPrefix(name, "events-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		ordinal, err := strconv.ParseUint(name[7:27], 10, 64)
+		if err != nil || ordinal == 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("canonical log is not a regular file")
+		}
+		paths = append(paths, filepath.Join(live, name))
+	}
+	return paths, nil
+}
+
+func readCanonicalLog(directory string) ([]byte, error) {
+	paths, err := canonicalLogFiles(directory)
+	if err != nil {
+		return nil, err
+	}
+	var data []byte
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, b...)
+	}
+	return data, nil
 }
 
 func TestReplacementCancelsWorkAndOnlyLatestResultReachesSurface(t *testing.T) {
@@ -749,6 +813,11 @@ func TestRenderPassesContextAndPreservesValidSurfaceFrame(t *testing.T) {
 }
 
 func TestRenderContractFailuresRecoverIndependently(t *testing.T) {
+	discardedID := testID(t, "discarded-contract-frame")
+	instrument := func(frame *view.Frame) *view.Frame {
+		_ = frame.PutTextBox(view.TextBoxOptions{Element: discardedID, Width: 1, Height: 1, Mode: view.TextClip}, []string{"x"}, view.Style{})
+		return frame
+	}
 	tests := []struct {
 		name        string
 		render      func(RenderContext) (*view.Frame, error)
@@ -758,7 +827,7 @@ func TestRenderContractFailuresRecoverIndependently(t *testing.T) {
 			name: "error with exact frame",
 			render: func(context RenderContext) (*view.Frame, error) {
 				frame, _ := view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows)
-				return frame, errors.New("private render detail")
+				return instrument(frame), errors.New("private render detail")
 			},
 			wantMessage: "UI unavailable",
 		},
@@ -766,14 +835,16 @@ func TestRenderContractFailuresRecoverIndependently(t *testing.T) {
 		{
 			name: "wrong width only",
 			render: func(context RenderContext) (*view.Frame, error) {
-				return view.NewFrame(context.Layout.Render.Columns-1, context.Layout.Render.Rows)
+				frame, err := view.NewFrame(context.Layout.Render.Columns-1, context.Layout.Render.Rows)
+				return instrument(frame), err
 			},
 			wantMessage: "Window 70x30",
 		},
 		{
 			name: "wrong height only",
 			render: func(context RenderContext) (*view.Frame, error) {
-				return view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows-1)
+				frame, err := view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows-1)
+				return instrument(frame), err
 			},
 			wantMessage: "Window 70x30",
 		},
@@ -790,6 +861,8 @@ func TestRenderContractFailuresRecoverIndependently(t *testing.T) {
 			events := sink.snapshot()
 			if got := events[len(events)-1]; got.Outcome != diagnostics.OutcomeFailed {
 				t.Fatalf("contract failure diagnostic = %#v", got)
+			} else if got.TextFit == nil || len(got.TextFit.Observations) != 2 || got.TextFit.Observations[0].Element == discardedID || got.TextFit.Observations[1].Element == discardedID {
+				t.Fatalf("contract failure text fit = %+v", got.TextFit)
 			}
 		})
 	}
@@ -826,6 +899,83 @@ func TestRecoveryAndProjectedRendering(t *testing.T) {
 			t.Fatalf("projected render prefix = %q", model.View()[:min(len(model.View()), 20)])
 		}
 	})
+}
+
+func TestRenderCompletedAttachesOnlySelectedFrameTextFit(t *testing.T) {
+	model, base, _ := testModel(t)
+	sink := &mutatingTextFitSink{}
+	model.options.Events = sink
+	model.layout = responsive.Resolve(responsive.Size{Columns: 70, Rows: 30})
+	instrumented := true
+	model.surface = &probeSurface{testSurface: base, render: func(context RenderContext) (*view.Frame, error) {
+		frame, err := view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows)
+		if err != nil {
+			return nil, err
+		}
+		if instrumented {
+			err = frame.PutTextBox(view.TextBoxOptions{Element: testID(t, "surface-title"), Instance: 4, Width: 3, Height: 1, Mode: view.TextClip}, []string{"title"}, view.Style{})
+		}
+		return frame, err
+	}}
+
+	model.render(time.Now())
+	if sink.calls != 1 || len(sink.events) != 1 {
+		t.Fatalf("render diagnostics calls = %d events = %d", sink.calls, len(sink.events))
+	}
+	first := sink.events[0]
+	if first.Code.String() != "render.completed" || first.Outcome != diagnostics.OutcomeApplied || first.TextFit == nil || len(first.TextFit.Observations) != 1 {
+		t.Fatalf("instrumented render event = %+v", first)
+	}
+	observation := first.TextFit.Observations[0]
+	if observation.Element.String() != "surface-title" || observation.Instance != 4 || !observation.Clipped {
+		t.Fatalf("instrumented text fit = %+v", observation)
+	}
+
+	instrumented = false
+	model.render(time.Now())
+	if sink.calls != 2 || sink.events[1].TextFit != nil {
+		t.Fatalf("uninstrumented render event = %+v, calls = %d", sink.events[1], sink.calls)
+	}
+	if first.TextFit.Observations[0].Instance != 4 {
+		t.Fatal("sink mutation changed an admitted or later text-fit report")
+	}
+}
+
+func TestRecoveryAttachesActualFrameTextFitAndPreservesRendering(t *testing.T) {
+	model, base, sink := testModel(t)
+	model.layout = responsive.Resolve(responsive.Size{Columns: 39, Rows: 9})
+	model.surface = &probeSurface{testSurface: base, render: func(context RenderContext) (*view.Frame, error) {
+		frame, err := view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows)
+		if err != nil {
+			return nil, err
+		}
+		_ = frame.PutTextBox(view.TextBoxOptions{Element: testID(t, "discarded-frame"), Width: 1, Height: 1, Mode: view.TextClip}, []string{"x"}, view.Style{})
+		return frame, nil
+	}}
+	model.render(time.Now())
+
+	events := sink.snapshot()
+	got := events[len(events)-1]
+	if got.Outcome != diagnostics.OutcomeApplied || got.TextFit == nil || len(got.TextFit.Observations) != 2 {
+		t.Fatalf("recovery render event = %+v", got)
+	}
+	if got.TextFit.Observations[0].Element.String() != "recovery-message" || got.TextFit.Observations[1].Element.String() != "recovery-help" {
+		t.Fatalf("recovery text-fit IDs = %+v", got.TextFit.Observations)
+	}
+	for _, observation := range got.TextFit.Observations {
+		if observation.Element.String() == "discarded-frame" {
+			t.Fatal("discarded surface frame metadata leaked into recovery")
+		}
+	}
+
+	expected, _ := view.NewFrame(39, 9)
+	style := view.Style{Foreground: model.options.Theme.Text, Background: model.options.Theme.Background}
+	expected.Fill(0, 0, 39, 9, style)
+	expected.PutText(0, 0, "Window 39x9 · expand to at least 40x10", style)
+	expected.PutText(0, 8, "q quit · d debug", style)
+	if want := view.ANSI(expected); model.View() != want {
+		t.Fatalf("instrumented recovery rendering changed\n got: %q\nwant: %q", model.View(), want)
+	}
 }
 
 func TestRecoveryFrameClampsAndFooterRows(t *testing.T) {
@@ -899,37 +1049,199 @@ func TestDiagnosticFailureLatches(t *testing.T) {
 }
 
 func TestWorstSupportedResizeBurstP95(t *testing.T) {
-	if os.Getenv("HERDR_PLUGIN_KIT_TIMING") != "1" {
-		t.Skip("run make test-timing for isolated wall-clock verification")
-	}
-	if raceEnabled || testing.CoverMode() != "" {
-		t.Skip("wall-clock latency is measured without instrumentation")
-	}
 	palette, _ := theme.Builtin("terminal")
-	surface := newTestSurface(t)
-	model := newModel(ProgramOptions{
-		PluginID: testID(t, "timing"), Theme: palette, Events: discardSink{},
-	}, surface)
-	random := rand.New(rand.NewSource(1))
-	durations := make([]time.Duration, 0, 200)
-	for range 200 {
-		for range 3 {
-			model.Update(tea.WindowSizeMsg{
-				Width:  40 + random.Intn(461),
-				Height: 10 + random.Intn(191),
-			})
-		}
-		started := time.Now()
-		model.Update(tea.WindowSizeMsg{Width: 500, Height: 200})
-		durations = append(durations, time.Since(started))
-	}
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-	p95 := durations[(len(durations)*95+99)/100-1]
-	evidence, _ := json.Marshal(map[string]any{
-		"seed": 1, "traces": len(durations), "p95_view_ns": p95.Nanoseconds(),
-	})
-	t.Log(string(evidence))
-	if p95 > 50*time.Millisecond {
-		t.Fatalf("p95 final resize-to-view = %s, want <= 50ms", p95)
+	rowID := testID(t, "resize-row")
+	// More than 500 columns, including wide and combining graphemes.
+	line := strings.Repeat("界e\u0301🙂abc", 80)
+	for _, phase := range []string{"functional", "timing"} {
+		t.Run(phase, func(t *testing.T) {
+			measuring := phase == "timing"
+			if measuring && (os.Getenv("HERDR_PLUGIN_KIT_TIMING") != "1" || raceEnabled || testing.CoverMode() != "") {
+				t.Skip("isolated timing requires HERDR_PLUGIN_KIT_TIMING=1 without race/coverage")
+			}
+			for _, variant := range []string{"empty-baseline", "unicode-baseline", "annotated-memory", "annotated-count-retention", "annotated-byte-retention"} {
+				t.Run(variant, func(t *testing.T) {
+					annotated := strings.HasPrefix(variant, "annotated-")
+					memory := &memorySink{}
+					var sink diagnostics.SemanticSink = memory
+					var recorder *diagnostics.Recorder
+					var directory string
+					limit := 50 * time.Millisecond
+					if strings.HasSuffix(variant, "retention") {
+						directory = t.TempDir()
+						config := diagnostics.DefaultConfig(directory)
+						if variant == "annotated-count-retention" {
+							config.MaxEvents = 32
+						} else {
+							config.MaxBytes = 512 << 10
+						}
+						var err error
+						recorder, err = diagnostics.Open(config)
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() {
+							if err := recorder.Close(); err != nil {
+								t.Error(err)
+							}
+						})
+						sink = recorder
+						// Accepted revised integrated resize threshold.
+						limit = 100 * time.Millisecond
+					}
+					surface := &probeSurface{testSurface: newTestSurface(t)}
+					surface.render = func(ctx RenderContext) (*view.Frame, error) {
+						frame, err := view.NewFrame(ctx.Layout.Render.Columns, ctx.Layout.Render.Rows)
+						if err != nil {
+							return nil, err
+						}
+						if variant != "empty-baseline" {
+							for row := 0; row < frame.Height(); row++ {
+								if annotated {
+									if err := frame.PutTextBox(view.TextBoxOptions{Element: rowID, Instance: row, Y: row, Width: frame.Width(), Height: 1, Mode: view.TextTruncate}, []string{line}, view.Style{}); err != nil {
+										return nil, err
+									}
+								} else {
+									frame.PutText(0, row, view.Truncate(line, frame.Width(), "…"), view.Style{})
+								}
+							}
+						}
+						return frame, nil
+					}
+					model := newModel(ProgramOptions{PluginID: testID(t, "timing"), Theme: palette, Events: sink}, surface)
+					random := rand.New(rand.NewSource(1))
+					traces := 16
+					if measuring {
+						traces = 200
+					}
+					durations := make([]time.Duration, 0, traces)
+					var allocatedBytes, allocations uint64
+					boundedRenders := 0
+					var boundedReport *diagnostics.TextFitReport
+					for range traces {
+						for range 3 {
+							model.Update(tea.WindowSizeMsg{Width: 40 + random.Intn(461), Height: 10 + random.Intn(191)})
+						}
+						if measuring {
+							var before, after runtime.MemStats
+							runtime.ReadMemStats(&before)
+							started := time.Now()
+							model.Update(tea.WindowSizeMsg{Width: 500, Height: 200})
+							_ = model.View()
+							durations = append(durations, time.Since(started))
+							runtime.ReadMemStats(&after)
+							allocatedBytes += after.TotalAlloc - before.TotalAlloc
+							allocations += after.Mallocs - before.Mallocs
+						} else {
+							model.Update(tea.WindowSizeMsg{Width: 500, Height: 200})
+						}
+						if measuring && recorder == nil {
+							// Outside the latency and allocation measurements.
+							for _, event := range memory.events {
+								if event.Code.String() == "render.completed" {
+									boundedRenders++
+									boundedReport = event.TextFit
+									if annotated != (event.TextFit != nil) {
+										t.Fatal("unexpected render report presence")
+									}
+								} else if event.TextFit != nil {
+									t.Fatal("report attached to non-render event")
+								}
+							}
+							clear(memory.events)
+							memory.events = memory.events[:0]
+						}
+					}
+					if model.diagnosticFailed {
+						t.Fatal("recorder failed during resize burst")
+					}
+					if variant != "empty-baseline" {
+						expected, _ := view.NewFrame(500, 200)
+						for row := 0; row < 200; row++ {
+							expected.PutText(0, row, view.Truncate(line, 500, "…"), view.Style{})
+						}
+						if model.View() != view.ANSI(expected) {
+							t.Fatal("Unicode resize output differs from existing rendering")
+						}
+					}
+					var report *diagnostics.TextFitReport
+					var retainedBytes int
+					if recorder == nil {
+						renders := boundedRenders
+						report = boundedReport
+						for _, event := range memory.snapshot() {
+							if event.Code.String() == "render.completed" {
+								renders++
+								report = event.TextFit
+							} else if event.TextFit != nil {
+								t.Fatal("report attached to non-render event")
+							}
+						}
+						if renders != traces*4 {
+							t.Fatalf("render count=%d want=%d", renders, traces*4)
+						}
+					} else {
+						paths, err := canonicalLogFiles(directory)
+						if err != nil || len(paths) == 0 {
+							t.Fatalf("segments=%v err=%v", paths, err)
+						}
+						lastOrdinal, err := strconv.ParseUint(filepath.Base(paths[len(paths)-1])[7:27], 10, 64)
+						if err != nil || lastOrdinal <= 1 {
+							t.Fatalf("rotation not exercised: %v", paths)
+						}
+						data, err := readCanonicalLog(directory)
+						if err != nil {
+							t.Fatal(err)
+						}
+						retainedBytes = len(data)
+						lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+						var first, last diagnostics.Event
+						if err := json.Unmarshal(lines[0], &first); err != nil {
+							t.Fatal(err)
+						}
+						if err := json.Unmarshal(lines[len(lines)-1], &last); err != nil {
+							t.Fatal(err)
+						}
+						if first.Sequence <= 1 || last.Message != "render.completed" {
+							t.Fatalf("retention/final render missing: first=%d last=%s", first.Sequence, last.Message)
+						}
+						page, err := recorder.Debug(diagnostics.DebugQuery{PageSize: 1})
+						if err != nil || len(page.Events) != 1 {
+							t.Fatalf("debug projection err=%v page=%+v", err, page)
+						}
+						report = page.Events[0].TextFit
+						t.Logf("rotation last_ordinal=%d retained_events=%d first_sequence=%d retained_wire_bytes=%d", lastOrdinal, len(lines), first.Sequence, retainedBytes)
+					}
+					if annotated {
+						if report == nil || len(report.Observations) != 200 || report.Omitted != 0 {
+							t.Fatalf("final annotated report=%+v", report)
+						}
+						for row, observation := range report.Observations {
+							if observation.Element != rowID || observation.Instance != row || observation.AvailableColumns != 500 || !observation.Truncated {
+								t.Fatalf("row %d report=%+v", row, observation)
+							}
+						}
+					} else if report != nil {
+						t.Fatal("baseline unexpectedly measured")
+					}
+					if measuring {
+						sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+						p95 := durations[(len(durations)*95+99)/100-1]
+						payloadBytes := 0
+						if report != nil {
+							payload, err := json.Marshal(report)
+							if err != nil {
+								t.Fatal(err)
+							}
+							payloadBytes = len(payload)
+						}
+						t.Logf("seed=1 traces=%d p95_view=%s max_view=%s mean_allocations=%d mean_allocated_bytes=%d text_fit_json_bytes=%d ansi_bytes=%d (allocations are process-wide deltas for final updates; no CPU measurement)", traces, p95, durations[len(durations)-1], allocations/uint64(traces), allocatedBytes/uint64(traces), payloadBytes, len(model.View()))
+						if p95 > limit {
+							t.Fatalf("p95 final resize-to-view=%s want<=%s", p95, limit)
+						}
+					}
+				})
+			}
+		})
 	}
 }

@@ -380,8 +380,12 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 		"Generated with Herdr Plugin Kit v0.1.0.\n\n" +
 		"Build with `" + strings.Join(buildCommand, " ") + "`, then link this directory with Herdr. " +
 		"The generated starter is a deterministic searchable plugin: it demonstrates provider-owned fuzzy ranking, opaque cursor paging, Unicode, stable ties, disabled results, and observable activation. " +
-		"The main and diagnostics views are responsive from 40x10 through 500x200; press d to switch views, or Alt+D while editing search text. " +
+		"Run `plugin ui` for search or `plugin debug` for diagnostics; add `--default-keymap` to ignore saved shortcut overrides for that run. " +
+		"The main and diagnostics views are responsive from 40x10 through 500x200. Outside shortcut recording and the key checker, Alt+D switches views and Ctrl+K opens Actions. Outside text entry, d switches views and : also opens Actions. Tab reaches the Actions control, and Ctrl+C always quits. " +
+		"Edit shortcuts from Actions; bindings are private in `HERDR_PLUGIN_CONFIG_DIR/keymap.toml`, and other instances using that directory activate changes after their next completed 500 ms poll. " +
+		"Recorded shortcuts become bindings when the draft is saved; key-checker input is never saved, and captured values or paste contents are not logged. " +
 		"The Debug UI registers semantic previews and exports a bounded owner-only `debug-report.json`; activation writes an owner-only `last-activation.json` receipt under `HERDR_PLUGIN_STATE_DIR`. " +
+		"Instances sharing configuration must use distinct state directories because diagnostics have one writer per state directory. " +
 		"Copy `config.example.toml` to `HERDR_PLUGIN_CONFIG_DIR/config.toml` for local configuration.\n"
 	files := map[string][]byte{
 		"herdr-plugin.toml":   herdrData,
