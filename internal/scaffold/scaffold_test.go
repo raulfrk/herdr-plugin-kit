@@ -63,6 +63,10 @@ func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
 		t.Fatalf("generated go.mod = %s", goMod)
 	}
 	readme, _ := os.ReadFile(filepath.Join(output, "README.md"))
+	wantKitLabel := "Generated with Herdr Plugin Kit " + KitVersion + "."
+	if !bytes.Contains(readme, []byte(wantKitLabel)) {
+		t.Fatalf("generated README does not document %q", wantKitLabel)
+	}
 	wantBuild := "go build -mod=mod -buildvcs=false -o ./plugin ./cmd/" + options.ID
 	if !bytes.Contains(readme, []byte(wantBuild)) {
 		t.Fatalf("generated README does not document %q", wantBuild)

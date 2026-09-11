@@ -28,7 +28,7 @@ import (
 const (
 	Version      = "0.1.0"
 	KitModule    = "github.com/raulfrk/herdr-plugin-kit"
-	KitVersion   = "v0.1.0"
+	KitVersion   = "v0.2.0"
 	HerdrVersion = "0.8.2"
 	maxFileBytes = 1 << 20
 )
@@ -377,7 +377,7 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 	}
 	buildCommand := generatedBuildCommand("./plugin", options.ID)
 	readme := "# " + options.Name + "\n\n" + options.Description + "\n\n" +
-		"Generated with Herdr Plugin Kit v0.1.0.\n\n" +
+		"Generated with Herdr Plugin Kit " + KitVersion + ".\n\n" +
 		"Build with `" + strings.Join(buildCommand, " ") + "`, then link this directory with Herdr. " +
 		"The generated starter is a deterministic searchable plugin: it demonstrates provider-owned fuzzy ranking, opaque cursor paging, Unicode, stable ties, disabled results, and observable activation. " +
 		"Run `plugin ui` for search or `plugin debug` for diagnostics; add `--default-keymap` to ignore saved shortcut overrides for that run. " +

@@ -121,7 +121,7 @@ all shell correctness and concurrency tests.
 ## HYP-SCAFFOLD-02 — Both manifests describe one runnable private plugin
 
 - Claim: generated Herdr TOML and `plugin-kit.json` retain identical identity
-  and static actions, use argv-only build/action/pane commands, pin kit v0.1.0
+  and static actions, use argv-only build/action/pane commands, pin kit v0.2.0
   without `replace`, expose responsive main and Debug UI surfaces, and keep
   config/state under Herdr-provided directories.
 - Fault model: schema drift, shell command insertion, non-overlay panes,
