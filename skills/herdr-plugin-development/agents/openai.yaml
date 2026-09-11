@@ -1,0 +1,4 @@
+interface:
+  display_name: "Herdr Plugin Development"
+  short_description: "Build and validate Herdr plugins"
+  default_prompt: "Create a Herdr plugin with the released Herdr Plugin Kit."

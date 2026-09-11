@@ -1,0 +1,31 @@
+{
+  "name": "herdr-plugin-development",
+  "version": "0.1.0",
+  "description": "Create and validate Go plugins with Herdr Plugin Kit v0.2.0.",
+  "skills": "./skills/",
+  "author": {
+    "name": "Raul Farkas",
+    "url": "https://github.com/raulfrk"
+  },
+  "homepage": "https://github.com/raulfrk/herdr-plugin-kit",
+  "repository": "https://github.com/raulfrk/herdr-plugin-kit",
+  "keywords": [
+    "herdr",
+    "go",
+    "plugin-development",
+    "agent-skill"
+  ],
+  "interface": {
+    "displayName": "Herdr Plugin Development",
+    "shortDescription": "Build and validate Herdr plugins",
+    "longDescription": "Generate, customize, validate, test, and review Go plugins using the released Herdr Plugin Kit workflow.",
+    "developerName": "Raul Farkas",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/raulfrk/herdr-plugin-kit",
+    "defaultPrompt": "Use the Herdr plugin development skill to create a Herdr plugin."
+  }
+}

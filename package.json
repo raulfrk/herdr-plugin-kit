@@ -1,0 +1,24 @@
+{
+  "name": "@raulfrk/herdr-plugin-development",
+  "version": "0.1.0",
+  "description": "Agent skill for building Go plugins with Herdr Plugin Kit.",
+  "keywords": [
+    "pi-package",
+    "agent-skill",
+    "herdr",
+    "go"
+  ],
+  "homepage": "https://github.com/raulfrk/herdr-plugin-kit",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raulfrk/herdr-plugin-kit.git"
+  },
+  "files": [
+    "skills/herdr-plugin-development"
+  ],
+  "pi": {
+    "skills": [
+      "./skills/herdr-plugin-development"
+    ]
+  }
+}
