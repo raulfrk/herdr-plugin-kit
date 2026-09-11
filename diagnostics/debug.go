@@ -110,17 +110,10 @@ func (r *Recorder) Debug(query DebugQuery) (DebugPage, error) {
 	if query.Page < 0 {
 		return DebugPage{}, errors.New("debug page must not be negative")
 	}
-	if query.PageSize == 0 {
-		query.PageSize = DefaultDebugPageSize
-	}
-	if query.PageSize < 1 || query.PageSize > MaxDebugPageSize {
-		return DebugPage{}, errors.New("debug page size must be between 1 and 100")
-	}
-	if query.Level != "" && query.Level != LevelDebug && query.Level != LevelInfo && query.Level != LevelWarn && query.Level != LevelError {
-		return DebugPage{}, errors.New("invalid debug level filter")
-	}
-	if query.Kind != "" && query.Kind != KindLifecycle && query.Kind != KindInteraction && query.Kind != KindDiagnostic {
-		return DebugPage{}, errors.New("invalid debug kind filter")
+	var err error
+	query, err = normalizeDebugQuery(query)
+	if err != nil {
+		return DebugPage{}, err
 	}
 
 	requestedPage := query.Page
@@ -137,6 +130,22 @@ func (r *Recorder) Debug(query DebugQuery) (DebugPage, error) {
 	window := view.Window(DebugWindowQuery{Start: int(start)})
 	page := DebugPage{Sessions: view.Sessions(), Health: view.Health(), Events: window.Events, Page: requestedPage, PageSize: query.PageSize, Total: window.Total, HasPrev: requestedPage > 0, HasNext: window.HasNext}
 	return page, nil
+}
+
+func normalizeDebugQuery(query DebugQuery) (DebugQuery, error) {
+	if query.PageSize == 0 {
+		query.PageSize = DefaultDebugPageSize
+	}
+	if query.PageSize < 1 || query.PageSize > MaxDebugPageSize {
+		return DebugQuery{}, errors.New("debug page size must be between 1 and 100")
+	}
+	if query.Level != "" && query.Level != LevelDebug && query.Level != LevelInfo && query.Level != LevelWarn && query.Level != LevelError {
+		return DebugQuery{}, errors.New("invalid debug level filter")
+	}
+	if query.Kind != "" && query.Kind != KindLifecycle && query.Kind != KindInteraction && query.Kind != KindDiagnostic {
+		return DebugQuery{}, errors.New("invalid debug kind filter")
+	}
+	return query, nil
 }
 
 func cloneDebugEvent(event DebugEvent) DebugEvent {

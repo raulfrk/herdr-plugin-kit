@@ -66,13 +66,6 @@ func openRecorder(config Config, storage storageHooks) (*Recorder, error) {
 	return r, nil
 }
 
-func missingFinalDelimiter(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	return data[len(data)-1] != '\n'
-}
-
 func validStoredEvent(line []byte, event *Event, previousSequence uint64, previousTime time.Time) bool {
 	if json.Unmarshal(line, event) != nil {
 		return false

@@ -154,7 +154,9 @@ func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
 		return Assessment{}, fmt.Errorf("assess agent second sample: %w", err)
 	}
 	a := Assessment{Status: second.status, Reason: second.reason}
-	a.Stable = sameImmutable(first.agent, second.agent) && first.agent.Status == second.agent.Status && first.agent.StateChangeSeq == second.agent.StateChangeSeq && first.status == second.status && first.reason == second.reason
+	// The second observation uses first.agent as its target and verifies its
+	// immutable identity before and after reading the pane.
+	a.Stable = first.agent.Status == second.agent.Status && first.agent.StateChangeSeq == second.agent.StateChangeSeq && first.status == second.status && first.reason == second.reason
 	if !a.Stable {
 		return Assessment{Status: Unknown, Reason: Unsettled}, ErrStaleReport
 	}

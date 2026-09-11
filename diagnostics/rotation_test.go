@@ -29,6 +29,28 @@ func rotationRecord(t *testing.T, r *Recorder, message string) {
 	}
 }
 
+func TestRecordLatchesPressureWhenAgeRetentionDropsBelowUsageThreshold(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	c := rotationConfig(t)
+	c.MaxAge = time.Minute
+	c.MaxEvents = 100
+	c.MaxBytes = 1 << 20
+	c.Now = func() time.Time { return now }
+	r, err := Open(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	rotationRecord(t, r, "expired")
+	now = now.Add(2 * time.Minute)
+	rotationRecord(t, r, "retained")
+	health := r.Health()
+	if health.Events != 1 || health.Dropped != 1 || !health.Pressure {
+		t.Fatalf("health after age retention = %+v", health)
+	}
+}
+
 func TestSegmentsRotateOversizedAndRetainLoweredQuota(t *testing.T) {
 	c := rotationConfig(t)
 	r, err := Open(c)

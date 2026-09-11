@@ -227,7 +227,7 @@ func (r *Recorder) readSegmentRecords(reader *bufio.Reader, s *segment, maxLineB
 			if len(bytes.TrimSpace(raw)) == 0 {
 				s.dirty = true
 			} else if record, ok := r.decodeStored(raw); ok {
-				s.dirty = s.dirty || missingFinalDelimiter(line) || !bytes.Equal(line, record.data)
+				s.dirty = s.dirty || line[len(line)-1] != '\n' || !bytes.Equal(line, record.data)
 				s.count++
 				r.admitLoaded(record)
 			} else {

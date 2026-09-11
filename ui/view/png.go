@@ -24,8 +24,8 @@ func PNG(frame *Frame) ([]byte, error) {
 		return nil, nil
 	}
 	imageFrame := image.NewRGBA(image.Rect(0, 0, frame.width*PNGCellWidth, frame.height*PNGCellHeight))
-	for y := 0; y < frame.height; y++ {
-		for x := 0; x < frame.width; x++ {
+	for y := range frame.height {
+		for x := range frame.width {
 			cell, _ := frame.CellAt(x, y)
 			if background, ok := cell.Style.Background.RGBA(); ok {
 				draw.Draw(imageFrame, image.Rect(x*PNGCellWidth, y*PNGCellHeight, (x+1)*PNGCellWidth, (y+1)*PNGCellHeight), image.NewUniform(background), image.Point{}, draw.Src)

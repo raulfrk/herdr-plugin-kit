@@ -145,17 +145,10 @@ func (s *DebugSnapshot) Select(ctx context.Context, query DebugQuery, galleryOnl
 	if query.Page != 0 {
 		return nil, errors.New("snapshot selection requires page zero")
 	}
-	if query.PageSize == 0 {
-		query.PageSize = DefaultDebugPageSize
-	}
-	if query.PageSize < 1 || query.PageSize > MaxDebugPageSize {
-		return nil, errors.New("debug page size must be between 1 and 100")
-	}
-	if query.Level != "" && query.Level != LevelDebug && query.Level != LevelInfo && query.Level != LevelWarn && query.Level != LevelError {
-		return nil, errors.New("invalid debug level filter")
-	}
-	if query.Kind != "" && query.Kind != KindLifecycle && query.Kind != KindInteraction && query.Kind != KindDiagnostic {
-		return nil, errors.New("invalid debug kind filter")
+	var err error
+	query, err = normalizeDebugQuery(query)
+	if err != nil {
+		return nil, err
 	}
 	events := make([]*DebugEvent, 0, len(s.events))
 	for i := len(s.events) - 1; i >= 0; i-- {
