@@ -701,8 +701,19 @@ func TestNewProgramForwardsInputAndOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := program.Run(); err != nil {
-		t.Fatal(err)
+	runDone := make(chan error, 1)
+	go func() {
+		_, runErr := program.Run()
+		runDone <- runErr
+	}()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		program.Kill()
+		t.Fatal("program did not consume the configured input")
 	}
 	if len(base.texts) != 1 || base.texts[0].Text != "x" {
 		t.Fatalf("forwarded input = %#v", base.texts)
