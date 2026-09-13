@@ -72,8 +72,8 @@ func TestLaunchRejectsEachCreationReceiptDrift(t *testing.T) {
 					t.Fatalf("receipt accepted: %v", err)
 				}
 				for _, call := range runner.calls {
-					if len(call) > 2 && call[1] == "pane" && call[2] == "run" {
-						t.Fatalf("delivered command: %q", call)
+					if len(call) > 2 && call[1] == "pane" && (call[2] == "run" || call[2] == "process-info") {
+						t.Fatalf("continued launch after invalid receipt: %q", call)
 					}
 				}
 			})
@@ -338,5 +338,22 @@ func TestCleanupOwnershipRequiresCompleteDistinctLocation(t *testing.T) {
 	_, err := (Host{Runner: runner}).currentPane(context.Background(), Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"})
 	if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(runner.calls, [][]string{{"herdr", "pane", "get", "w1:p2"}}) {
 		t.Fatalf("location drift %v", err)
+	}
+}
+
+func TestNamedSessionDoesNotSelectAnotherOrDefaultSession(t *testing.T) {
+	for _, output := range []string{sessionListJSON("other", "/tmp/other.sock", true), sessionListJSON("named", "/tmp/default.sock", false)} {
+		_, err := (Host{Session: "named", Runner: &scriptedRunner{outputs: []string{output}}}).sessionSocket(context.Background())
+		if !errors.Is(err, ErrStaleTarget) {
+			t.Fatalf("incorrect session accepted: %s err=%v", output, err)
+		}
+	}
+}
+
+func TestCurrentPaneRejectsDifferentPaneInSameTab(t *testing.T) {
+	runner := &scriptedRunner{outputs: []string{paneJSON("w1:p3", "w1", "w1:t1", "/tmp", false)}}
+	_, err := (Host{Runner: runner}).currentPane(context.Background(), Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"})
+	if !errors.Is(err, ErrStaleTarget) {
+		t.Fatalf("different pane accepted: %v", err)
 	}
 }

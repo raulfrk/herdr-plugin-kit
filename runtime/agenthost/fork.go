@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	DefaultForkReadyTimeout = 30 * time.Second
-	MaxForkReadyTimeout     = 5 * time.Minute
+	DefaultForkReadyTimeout time.Duration = 30_000_000_000  // 30 seconds
+	MaxForkReadyTimeout     time.Duration = 300_000_000_000 // 5 minutes
 )
 
 var ErrUnsupportedFork = errors.New("unsupported native fork")

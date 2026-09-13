@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	MaxArgv           = 128
-	MaxArgBytes       = 4096
-	MaxCommandLen     = 64 << 10
-	ShellReadyTimeout = 5 * time.Second
+	MaxArgv                         = 128
+	MaxArgBytes                     = 4096
+	MaxCommandLen                   = 64 << 10
+	ShellReadyTimeout time.Duration = 5_000_000_000 // 5 seconds
 )
 
 var (
