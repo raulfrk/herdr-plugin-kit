@@ -80,7 +80,21 @@ gate_report="$run_root/gate.json"
 gate_stderr="$run_root/gate.stderr"
 before_manifest="$run_root/source-before.sha256"
 after_manifest="$run_root/source-after.sha256"
-(cd "$worktree" && git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$before_manifest"
+write_source_manifest() {
+  git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sh -c '
+    for file do
+      if [ -L "$file" ]; then
+        target=$(readlink -- "$file")
+        digest=$(printf %s "$target" | sha256sum)
+        digest=${digest%% *}
+        printf "%s  %s\n" "$digest" "$file"
+      else
+        sha256sum "$file"
+      fi
+    done
+  ' sh
+}
+(cd "$worktree" && write_source_manifest) > "$before_manifest"
 
 set -- unleash --workers "$workers" --output "$report"
 if [ "$mode" = changed ]; then
@@ -88,7 +102,7 @@ if [ "$mode" = changed ]; then
 fi
 
 (cd "$worktree" && gremlins "$@")
-(cd "$worktree" && git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$after_manifest"
+(cd "$worktree" && write_source_manifest) > "$after_manifest"
 cmp "$before_manifest" "$after_manifest"
 if [ -n "$(git -C "$worktree" status --porcelain --untracked-files=all)" ]; then
   echo "mutation run changed the candidate worktree" >&2
