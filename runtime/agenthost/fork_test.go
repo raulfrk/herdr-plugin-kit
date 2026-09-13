@@ -232,3 +232,40 @@ func TestForkRejectsFocusedChildCWDDriftAndCleansCreatedPane(t *testing.T) {
 		t.Fatalf("error=%v cleanup=%+v", err, topology.cleanupCalls)
 	}
 }
+
+func TestForkRechecksSourceAfterSuccessfulFocus(t *testing.T) {
+	for _, state := range []string{"unchanged", "changed", "missing"} {
+		t.Run(state, func(t *testing.T) {
+			source := forkAgent("codex", "w1:p1", "thread-source", "/tmp/project")
+			child := forkAgent("codex", "w1:p2", "thread-child", "/tmp/project")
+			child.Focused = true
+			created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"}}
+			after := source
+			if state == "changed" {
+				after.CWD = "/other"
+			}
+			last := listForkResult(t, after)
+			if state == "missing" {
+				last = listForkResult(t)
+			}
+			runner := &scriptedRunner{results: []command.Result{listForkResult(t, source), listForkResult(t, child), listForkResult(t, source), jsonResult(t, infoResponse(forkWire(child))), last}}
+			topology := &fakeTopology{created: created}
+			forker := NewForker(Host{Runner: runner, Session: "named"})
+			forker.launcher = topology
+			result, err := forker.Fork(context.Background(), ForkRequest{Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewPane, Direction: "right", Focus: true})
+			if state == "unchanged" {
+				if err != nil || !result.Child.Focused || len(topology.cleanupCalls) != 0 {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+			} else if !errors.Is(err, ErrStaleReport) || len(topology.cleanupCalls) != 1 {
+				t.Fatalf("err=%v cleanup=%v", err, topology.cleanupCalls)
+			}
+		})
+	}
+}
+
+func TestForkReadinessDurationContract(t *testing.T) {
+	if readyTimeout(0) != 30*time.Second || readyTimeout(time.Minute) != time.Minute || MaxForkReadyTimeout != 300*time.Second {
+		t.Fatal("fork readiness duration contract changed")
+	}
+}
