@@ -751,6 +751,7 @@ func TestContractValidatorAcceptsAndExactlyMatchesGenericActionsAndEvents(t *tes
 	}
 
 	mutations := map[string]func(*manifest.Manifest, *herdrManifest){
+		"extra ID":           func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].ID = "changed" },
 		"extra metadata":     func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Description = "changed" },
 		"extra contexts":     func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Contexts = []string{"global", "pane"} },
 		"extra argv":         func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Command[3] = "changed" },

@@ -111,6 +111,7 @@ func TestManifestValidationBoundaries(t *testing.T) {
 		{"too many events", func(m *Manifest) { m.Events = make([]EventHook, MaxEvents+1) }},
 		{"too many interfaces", func(m *Manifest) { m.Interfaces = make([]Interface, MaxInterfaces+1) }},
 		{"empty action contexts", func(m *Manifest) { m.Actions[0].Contexts = []string{} }},
+		{"too many action contexts", func(m *Manifest) { m.Actions[0].Contexts = []string{"global", "workspace", "tab", "pane", "global"} }},
 		{"duplicate action context", func(m *Manifest) { m.Actions[0].Contexts = []string{"global", "global"} }},
 		{"unsupported action context", func(m *Manifest) { m.Actions[0].Contexts = []string{"window"} }},
 		{"empty action command", func(m *Manifest) { m.Actions[0].Command = []string{} }},
@@ -141,6 +142,9 @@ func TestManifestAcceptsCollectionLimits(t *testing.T) {
 	m.Args = make([]string, MaxArgs)
 	m.Capabilities = numberedIDs("cap", MaxCapabilities)
 	m.Actions = numberedActions(MaxActions)
+	m.Actions[0].Contexts = []string{"global", "workspace", "tab", "pane"}
+	m.Actions[0].Command = make([]string, MaxArgs)
+	m.Actions[0].Command[0] = "plugin"
 	m.Interfaces = numberedInterfaces(MaxInterfaces)
 	if err := m.Validate(); err != nil {
 		t.Fatalf("manifest at collection limits rejected: %v", err)
