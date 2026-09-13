@@ -57,6 +57,7 @@ type herdrManifest struct {
 	Platforms       []string       `toml:"platforms"`
 	Build           []herdrCommand `toml:"build"`
 	Actions         []herdrAction  `toml:"actions"`
+	Events          []herdrEvent   `toml:"events,omitempty"`
 	Panes           []herdrPane    `toml:"panes"`
 }
 
@@ -70,6 +71,11 @@ type herdrAction struct {
 	Description string   `toml:"description,omitempty"`
 	Contexts    []string `toml:"contexts"`
 	Command     []string `toml:"command"`
+}
+
+type herdrEvent struct {
+	On      string   `toml:"on"`
+	Command []string `toml:"command"`
 }
 
 type herdrPane struct {
@@ -336,9 +342,9 @@ func generatedManifest(options Options) manifest.Manifest {
 		Executable:   "./plugin",
 		Capabilities: []string{"diagnostics", "responsive-ui"},
 		Actions: []manifest.Action{
-			{ID: "open", Title: "Open " + options.Name},
-			{ID: "debug", Title: "Open " + options.Name + " diagnostics"},
-			{ID: "health", Title: "Check " + options.Name + " health"},
+			{ID: "open", Title: "Open " + options.Name, Contexts: []string{"global", "workspace", "tab", "pane"}, Command: []string{"./plugin", "action", "open"}},
+			{ID: "debug", Title: "Open " + options.Name + " diagnostics", Contexts: []string{"global", "workspace", "tab", "pane"}, Command: []string{"./plugin", "action", "debug"}},
+			{ID: "health", Title: "Check " + options.Name + " health", Contexts: []string{"global", "workspace", "tab", "pane"}, Command: []string{"./plugin", "action", "health"}},
 		},
 		Interfaces: []manifest.Interface{{ID: "health", Version: 1, Direction: manifest.InterfaceProvides}},
 	}
@@ -802,13 +808,30 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 	if !slices.Equal(kit.Capabilities, []string{"diagnostics", "responsive-ui"}) {
 		return errors.New("generated capability contract differs")
 	}
-	if len(kit.Actions) != len(wantActions) {
-		return errors.New("plugin-kit manifest must declare three actions")
+	if len(kit.Actions) < len(wantActions) {
+		return errors.New("plugin-kit manifest must declare the three starter actions")
 	}
-	if len(herdr.Actions) != len(wantActions) {
-		return errors.New("Herdr manifest must declare three actions")
+	if len(herdr.Actions) != len(kit.Actions) {
+		return errors.New("Herdr and plugin-kit action counts differ")
 	}
-	for index, id := range wantActions {
+	for index := range kit.Actions {
+		if index >= len(wantActions) {
+			if !slices.Equal(kit.Actions[index].Contexts, []string{"global"}) {
+				return fmt.Errorf("extra action %q must be global", kit.Actions[index].ID)
+			}
+			if len(kit.Actions[index].Command) == 0 {
+				return fmt.Errorf("extra action %q must declare a command", kit.Actions[index].ID)
+			}
+			if kit.Actions[index].ID != herdr.Actions[index].ID ||
+				kit.Actions[index].Title != herdr.Actions[index].Title ||
+				kit.Actions[index].Description != herdr.Actions[index].Description ||
+				!slices.Equal(kit.Actions[index].Contexts, herdr.Actions[index].Contexts) ||
+				!slices.Equal(kit.Actions[index].Command, herdr.Actions[index].Command) {
+				return fmt.Errorf("extra action %q differs between manifests", kit.Actions[index].ID)
+			}
+			continue
+		}
+		id := wantActions[index]
 		wantTitle := map[string]string{
 			"open": "Open " + kit.Name, "debug": "Open " + kit.Name + " diagnostics", "health": "Check " + kit.Name + " health",
 		}[id]
@@ -835,6 +858,20 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 		}
 		if !slices.Equal(herdr.Actions[index].Command, []string{binary, "action", id}) {
 			return fmt.Errorf("Herdr action %q has the wrong command", id)
+		}
+		if !slices.Equal(kit.Actions[index].Contexts, herdr.Actions[index].Contexts) {
+			return fmt.Errorf("plugin-kit action %q has the wrong contexts", id)
+		}
+		if !slices.Equal(kit.Actions[index].Command, herdr.Actions[index].Command) {
+			return fmt.Errorf("plugin-kit action %q has the wrong command", id)
+		}
+	}
+	if len(herdr.Events) != len(kit.Events) {
+		return errors.New("Herdr and plugin-kit event counts differ")
+	}
+	for index := range kit.Events {
+		if kit.Events[index].On != herdr.Events[index].On || !slices.Equal(kit.Events[index].Command, herdr.Events[index].Command) {
+			return fmt.Errorf("event hook %q differs between manifests", kit.Events[index].On)
 		}
 	}
 	if len(kit.Interfaces) != 1 {

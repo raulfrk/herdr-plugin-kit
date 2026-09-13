@@ -153,6 +153,70 @@ func TestGeneratedProjectBuildsWithoutChangingItsGoMod(t *testing.T) {
 	}
 }
 
+func TestAttentionShapedGeneratedConsumerUsesGenericFixedActionsAndEvents(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := filepath.Abs(filepath.Join(workingDirectory, "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	output := filepath.Join(root, "plugin")
+	options := Options{ID: "attention.sessions", Name: "Attention & Sessions", Description: "Fixture-only consumer.", Output: output}
+	if err := Generate(options); err != nil {
+		t.Fatal(err)
+	}
+
+	kitPath := filepath.Join(output, "plugin-kit.json")
+	var kit manifest.Manifest
+	decodeJSONFile(t, kitPath, &kit)
+	extras := []manifest.Action{
+		{ID: "open-launcher", Title: "Open launcher", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "open-launcher"}},
+		{ID: "toggle-autofocus", Title: "Toggle autofocus", Description: "Toggle fixture behavior", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "toggle-autofocus"}},
+		{ID: "observe-event", Title: "Observe event", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "observe-event"}},
+	}
+	kit.Actions = append(kit.Actions, extras...)
+	kit.Events = []manifest.EventHook{
+		{On: "pane.focused", Command: []string{"./plugin", "action", "observe-event"}},
+		{On: "pane.agent_status_changed", Command: []string{"./plugin", "action", "observe-event"}},
+	}
+	writeJSONFile(t, kitPath, kit)
+	mutateHerdr(t, output, func(value *herdrManifest) {
+		for _, action := range extras {
+			value.Actions = append(value.Actions, herdrAction{
+				ID: action.ID, Title: action.Title, Description: action.Description,
+				Contexts: append([]string(nil), action.Contexts...), Command: append([]string(nil), action.Command...),
+			})
+		}
+		for _, event := range kit.Events {
+			value.Events = append(value.Events, herdrEvent{On: event.On, Command: append([]string(nil), event.Command...)})
+		}
+	})
+	mainPath := filepath.Join(output, "cmd", options.ID, "main.go")
+	mutateText(t, mainPath, `case "health":`, `case "open-launcher", "toggle-autofocus", "observe-event":
+		return nil
+	case "health":`)
+
+	if err := Validate(output); err != nil {
+		t.Fatalf("Attention-shaped fixture validation failed: %v", err)
+	}
+	workspace := filepath.Join(root, "go.work")
+	workspaceData := []byte("go 1.27\n\nuse " + output + "\n\nreplace " + KitModule + " " + KitVersion + " => " + repository + "\n")
+	if err := os.WriteFile(workspace, workspaceData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"test", "./..."}, {"build", "-buildvcs=false", "./cmd/" + options.ID}} {
+		command := exec.Command("go", args...)
+		command.Dir = output
+		command.Env = append(os.Environ(), "GOWORK="+workspace, "GOTOOLCHAIN=go1.27.0")
+		if data, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("generated %v error = %v\n%s", args, err, data)
+		}
+	}
+}
+
 func TestGenerateNeverOverwritesAndConcurrentPublicationHasOneWinner(t *testing.T) {
 	t.Run("existing", func(t *testing.T) {
 		output := filepath.Join(t.TempDir(), "plugin")
@@ -453,6 +517,46 @@ func TestValidateRejectsEveryCrossContractDrift(t *testing.T) {
 			value["actions"].([]any)[0].(map[string]any)["id"] = "changed"
 			writeJSONFile(t, path, value)
 		},
+		"action contexts": func(t *testing.T, root string) {
+			path := filepath.Join(root, "plugin-kit.json")
+			var value map[string]any
+			decodeJSONFile(t, path, &value)
+			value["actions"].([]any)[0].(map[string]any)["contexts"] = []string{"global"}
+			writeJSONFile(t, path, value)
+		},
+		"action command": func(t *testing.T, root string) {
+			path := filepath.Join(root, "plugin-kit.json")
+			var value map[string]any
+			decodeJSONFile(t, path, &value)
+			value["actions"].([]any)[0].(map[string]any)["command"] = []string{"./plugin", "action", "changed"}
+			writeJSONFile(t, path, value)
+		},
+		"unsupported startup hook": func(t *testing.T, root string) {
+			path := filepath.Join(root, "herdr-plugin.toml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = append(data, []byte("\n[[startup]]\ncommand = [\"./plugin\"]\n")...)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"platform-scoped action": func(t *testing.T, root string) {
+			path := filepath.Join(root, "herdr-plugin.toml")
+			mutateText(t, path, "contexts = ['global', 'workspace', 'tab', 'pane']", "contexts = ['global', 'workspace', 'tab', 'pane']\nplatforms = ['linux']")
+		},
+		"platform-scoped event": func(t *testing.T, root string) {
+			path := filepath.Join(root, "herdr-plugin.toml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = append(data, []byte("\n[[events]]\non = \"pane.focused\"\ncommand = [\"./plugin\"]\nplatforms = [\"linux\"]\n")...)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"manifest args": func(t *testing.T, root string) {
 			path := filepath.Join(root, "plugin-kit.json")
 			var value map[string]any
@@ -594,6 +698,8 @@ func TestContractValidatorRejectsEveryIndependentManifestDrift(t *testing.T) {
 		"Herdr action description": func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Description = "changed" },
 		"action contexts":          func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Contexts = []string{"global"} },
 		"action command":           func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[0].Command = []string{"other"} },
+		"kit action contexts":      func(k *manifest.Manifest, _ *herdrManifest) { k.Actions[0].Contexts = []string{"global"} },
+		"kit action command":       func(k *manifest.Manifest, _ *herdrManifest) { k.Actions[0].Command = []string{"other"} },
 		"interface count":          func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces = nil },
 		"extra interface":          func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces = append(k.Interfaces, k.Interfaces[0]) },
 		"interface contract":       func(k *manifest.Manifest, _ *herdrManifest) { k.Interfaces[0].Version = 2 },
@@ -611,6 +717,66 @@ func TestContractValidatorRejectsEveryIndependentManifestDrift(t *testing.T) {
 			mutate(&kit, &herdr)
 			if err := validateContracts(kit, herdr); err == nil {
 				t.Fatal("independent manifest drift passed validation")
+			}
+		})
+	}
+}
+
+func TestContractValidatorAcceptsAndExactlyMatchesGenericActionsAndEvents(t *testing.T) {
+	options := Options{ID: "example.valid", Name: "Valid", Description: "Description"}
+	kit := generatedManifest(options)
+	herdr := generatedHerdrManifest(options)
+	extra := manifest.Action{
+		ID: "open-launcher", Title: "Open launcher", Description: "Fixed global action",
+		Contexts: []string{"global"}, Command: []string{"./plugin", "action", "open-launcher", "literal $value"},
+	}
+	kit.Actions = append(kit.Actions, extra)
+	herdr.Actions = append(herdr.Actions, herdrAction{
+		ID: extra.ID, Title: extra.Title, Description: extra.Description,
+		Contexts: append([]string(nil), extra.Contexts...), Command: append([]string(nil), extra.Command...),
+	})
+	kit.Events = []manifest.EventHook{
+		{On: "pane.focused", Command: []string{"./plugin", "action", "observe"}},
+		{On: "pane.agent_status_changed", Command: []string{"./plugin", "action", "observe"}},
+	}
+	herdr.Events = []herdrEvent{
+		{On: "pane.focused", Command: []string{"./plugin", "action", "observe"}},
+		{On: "pane.agent_status_changed", Command: []string{"./plugin", "action", "observe"}},
+	}
+	if err := kit.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateContracts(kit, herdr); err != nil {
+		t.Fatalf("generic action/event contract rejected: %v", err)
+	}
+
+	mutations := map[string]func(*manifest.Manifest, *herdrManifest){
+		"extra metadata":     func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Description = "changed" },
+		"extra contexts":     func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Contexts = []string{"global", "pane"} },
+		"extra argv":         func(_ *manifest.Manifest, h *herdrManifest) { h.Actions[3].Command[3] = "changed" },
+		"extra missing argv": func(k *manifest.Manifest, h *herdrManifest) { k.Actions[3].Command, h.Actions[3].Command = nil, nil },
+		"event order":        func(_ *manifest.Manifest, h *herdrManifest) { h.Events[0], h.Events[1] = h.Events[1], h.Events[0] },
+		"event argv":         func(_ *manifest.Manifest, h *herdrManifest) { h.Events[0].Command[2] = "changed" },
+		"event count":        func(_ *manifest.Manifest, h *herdrManifest) { h.Events = h.Events[:1] },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changedKit := kit
+			changedKit.Actions = append([]manifest.Action(nil), kit.Actions...)
+			changedKit.Events = append([]manifest.EventHook(nil), kit.Events...)
+			changedHerdr := herdr
+			changedHerdr.Actions = append([]herdrAction(nil), herdr.Actions...)
+			changedHerdr.Events = append([]herdrEvent(nil), herdr.Events...)
+			for i := range changedHerdr.Actions {
+				changedHerdr.Actions[i].Contexts = append([]string(nil), herdr.Actions[i].Contexts...)
+				changedHerdr.Actions[i].Command = append([]string(nil), herdr.Actions[i].Command...)
+			}
+			for i := range changedHerdr.Events {
+				changedHerdr.Events[i].Command = append([]string(nil), herdr.Events[i].Command...)
+			}
+			mutate(&changedKit, &changedHerdr)
+			if err := validateContracts(changedKit, changedHerdr); err == nil {
+				t.Fatal("generic cross-manifest drift accepted")
 			}
 		})
 	}

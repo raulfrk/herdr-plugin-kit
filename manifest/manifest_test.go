@@ -58,6 +58,43 @@ func TestManifestRejectsDuplicateDeclarations(t *testing.T) {
 	if err := m.Validate(); err == nil {
 		t.Fatal("duplicate interface accepted")
 	}
+	m = validManifest()
+	m.Events = []EventHook{{On: "pane.focused", Command: []string{"plugin"}}, {On: "pane.focused", Command: []string{"plugin"}}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("duplicate event hook accepted")
+	}
+}
+
+func TestManifestAcceptsExactHerdrEventHookAllowlist(t *testing.T) {
+	names := []string{
+		"workspace.created", "workspace.updated", "workspace.closed", "workspace.renamed",
+		"workspace.moved", "workspace.reordered", "workspace.focused", "worktree.created",
+		"worktree.opened", "worktree.removed", "tab.created", "tab.closed", "tab.renamed",
+		"tab.moved", "tab.focused", "pane.created", "pane.closed", "pane.focused",
+		"pane.moved", "pane.exited", "pane.agent_detected", "pane.agent_status_changed",
+	}
+	if len(names) != 22 || len(eventHookNames) != len(names) {
+		t.Fatalf("event allowlist size = %d, want 22", len(eventHookNames))
+	}
+	m := validManifest()
+	for _, name := range names {
+		m.Events = append(m.Events, EventHook{On: name, Command: []string{"plugin", "event", name}})
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("exact Herdr event allowlist rejected: %v", err)
+	}
+	for _, name := range []string{
+		"workspace.metadata_updated", "pane.updated", "pane.output_changed",
+		"pane.scroll_changed", "layout.updated", "unknown.event",
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := validManifest()
+			m.Events = []EventHook{{On: name, Command: []string{"plugin"}}}
+			if err := m.Validate(); err == nil {
+				t.Fatalf("unsupported event %q accepted", name)
+			}
+		})
+	}
 }
 
 func TestManifestValidationBoundaries(t *testing.T) {
@@ -71,7 +108,16 @@ func TestManifestValidationBoundaries(t *testing.T) {
 		{"nul executable", func(m *Manifest) { m.Executable = "bad\x00path" }},
 		{"too many capabilities", func(m *Manifest) { m.Capabilities = numberedIDs("cap", MaxCapabilities+1) }},
 		{"too many actions", func(m *Manifest) { m.Actions = make([]Action, MaxActions+1) }},
+		{"too many events", func(m *Manifest) { m.Events = make([]EventHook, MaxEvents+1) }},
 		{"too many interfaces", func(m *Manifest) { m.Interfaces = make([]Interface, MaxInterfaces+1) }},
+		{"empty action contexts", func(m *Manifest) { m.Actions[0].Contexts = []string{} }},
+		{"duplicate action context", func(m *Manifest) { m.Actions[0].Contexts = []string{"global", "global"} }},
+		{"unsupported action context", func(m *Manifest) { m.Actions[0].Contexts = []string{"window"} }},
+		{"empty action command", func(m *Manifest) { m.Actions[0].Command = []string{} }},
+		{"empty action executable", func(m *Manifest) { m.Actions[0].Command = []string{""} }},
+		{"too many action args", func(m *Manifest) { m.Actions[0].Command = make([]string, MaxArgs+1) }},
+		{"empty event command", func(m *Manifest) { m.Events = []EventHook{{On: "pane.focused"}} }},
+		{"empty event executable", func(m *Manifest) { m.Events = []EventHook{{On: "pane.focused", Command: []string{""}}} }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,6 +160,18 @@ func TestManifestTextLengthBoundaries(t *testing.T) {
 		{"argument beyond limit", 4097, func(m *Manifest, value string) { m.Args = []string{value} }, false},
 		{"name at limit", 128, func(m *Manifest, value string) { m.Name = value }, true},
 		{"name beyond limit", 129, func(m *Manifest, value string) { m.Name = value }, false},
+		{"action title at limit", 128, func(m *Manifest, value string) { m.Actions[0].Title = value }, true},
+		{"action title beyond limit", 129, func(m *Manifest, value string) { m.Actions[0].Title = value }, false},
+		{"action description at limit", 1024, func(m *Manifest, value string) { m.Actions[0].Description = value }, true},
+		{"action description beyond limit", 1025, func(m *Manifest, value string) { m.Actions[0].Description = value }, false},
+		{"action command at limit", 4096, func(m *Manifest, value string) { m.Actions[0].Command = []string{value} }, true},
+		{"action command beyond limit", 4097, func(m *Manifest, value string) { m.Actions[0].Command = []string{value} }, false},
+		{"event command at limit", 4096, func(m *Manifest, value string) {
+			m.Events = []EventHook{{On: "pane.focused", Command: []string{value}}}
+		}, true},
+		{"event command beyond limit", 4097, func(m *Manifest, value string) {
+			m.Events = []EventHook{{On: "pane.focused", Command: []string{value}}}
+		}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,6 +16,7 @@ const (
 	MaxCapabilities  = 64
 	MaxInterfaces    = 64
 	MaxActions       = 128
+	MaxEvents        = 128
 )
 
 var stableID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -29,13 +30,32 @@ type Manifest struct {
 	Args         []string    `json:"args,omitempty"`
 	Capabilities []string    `json:"capabilities,omitempty"`
 	Actions      []Action    `json:"actions,omitempty"`
+	Events       []EventHook `json:"events,omitempty"`
 	Interfaces   []Interface `json:"interfaces,omitempty"`
 }
 
 type Action struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Contexts    []string `json:"contexts,omitempty"`
+	Command     []string `json:"command,omitempty"`
+}
+
+type EventHook struct {
+	On      string   `json:"on"`
+	Command []string `json:"command"`
+}
+
+var eventHookNames = map[string]struct{}{
+	"workspace.created": {}, "workspace.updated": {}, "workspace.closed": {},
+	"workspace.renamed": {}, "workspace.moved": {}, "workspace.reordered": {},
+	"workspace.focused": {}, "worktree.created": {}, "worktree.opened": {},
+	"worktree.removed": {}, "tab.created": {}, "tab.closed": {},
+	"tab.renamed": {}, "tab.moved": {}, "tab.focused": {},
+	"pane.created": {}, "pane.closed": {}, "pane.focused": {},
+	"pane.moved": {}, "pane.exited": {}, "pane.agent_detected": {},
+	"pane.agent_status_changed": {},
 }
 
 type InterfaceDirection string
@@ -122,6 +142,32 @@ func (m Manifest) Validate() error {
 		if err := display("action description", action.Description, 1024, false); err != nil {
 			return fmt.Errorf("actions[%d]: %w", i, err)
 		}
+		if action.Contexts != nil {
+			if err := validateContexts(action.Contexts); err != nil {
+				return fmt.Errorf("actions[%d]: %w", i, err)
+			}
+		}
+		if action.Command != nil {
+			if err := validateCommand("command", action.Command); err != nil {
+				return fmt.Errorf("actions[%d]: %w", i, err)
+			}
+		}
+	}
+	if len(m.Events) > MaxEvents {
+		return fmt.Errorf("events exceeds %d entries", MaxEvents)
+	}
+	seenEvents := map[string]bool{}
+	for i, event := range m.Events {
+		if _, ok := eventHookNames[event.On]; !ok {
+			return fmt.Errorf("events[%d]: unsupported Herdr event %q", i, event.On)
+		}
+		if seenEvents[event.On] {
+			return fmt.Errorf("duplicate event hook %q", event.On)
+		}
+		seenEvents[event.On] = true
+		if err := validateCommand("command", event.Command); err != nil {
+			return fmt.Errorf("events[%d]: %w", i, err)
+		}
 	}
 	if len(m.Interfaces) > MaxInterfaces {
 		return fmt.Errorf("interfaces exceeds %d entries", MaxInterfaces)
@@ -142,6 +188,42 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("duplicate interface declaration %q", key)
 		}
 		seenInterfaces[key] = true
+	}
+	return nil
+}
+
+func validateContexts(contexts []string) error {
+	if len(contexts) == 0 || len(contexts) > 4 {
+		return errors.New("contexts must contain between one and four entries")
+	}
+	allowed := map[string]bool{"global": true, "workspace": true, "tab": true, "pane": true}
+	seen := map[string]bool{}
+	for _, context := range contexts {
+		if !allowed[context] {
+			return fmt.Errorf("unsupported action context %q", context)
+		}
+		if seen[context] {
+			return fmt.Errorf("duplicate action context %q", context)
+		}
+		seen[context] = true
+	}
+	return nil
+}
+
+func validateCommand(field string, command []string) error {
+	if len(command) == 0 {
+		return fmt.Errorf("%s must not be empty", field)
+	}
+	if len(command) > MaxArgs {
+		return fmt.Errorf("%s exceeds %d entries", field, MaxArgs)
+	}
+	if command[0] == "" {
+		return fmt.Errorf("%s executable must not be empty", field)
+	}
+	for i, arg := range command {
+		if len(arg) > 4096 || strings.ContainsRune(arg, 0) {
+			return fmt.Errorf("%s[%d] is invalid", field, i)
+		}
 	}
 	return nil
 }
