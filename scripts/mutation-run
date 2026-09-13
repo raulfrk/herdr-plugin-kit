@@ -82,9 +82,11 @@ before_manifest="$run_root/source-before.sha256"
 after_manifest="$run_root/source-after.sha256"
 write_source_manifest() {
   git ls-files -z | LC_ALL=C sort -z | xargs -0 -r sh -c '
+    set -e
     for file do
       if [ -L "$file" ]; then
-        target=$(readlink -- "$file")
+        target=$(readlink -n -- "$file" && printf x)
+        target=${target%?}
         digest=$(printf %s "$target" | sha256sum)
         digest=${digest%% *}
         printf "%s  %s\n" "$digest" "$file"
