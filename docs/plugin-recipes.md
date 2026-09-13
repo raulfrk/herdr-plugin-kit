@@ -143,7 +143,7 @@ reconstruct a target from labels.
 
 For Codex, set `Host.CodexSocket` to an absolute local Unix App Server socket
 path. The normal Codex TUI and the probe must connect to the same server; the
-Herdr agent must expose its Codex session ID. For example, with Codex 0.153.4,
+Herdr agent must expose its Codex session ID. For example, with Codex 0.154.0,
 start a server manually in one terminal:
 
 ```sh
@@ -185,6 +185,80 @@ sources := agenthost.NativeSources{
 probe, err := agenthost.NewProbeWithNative(host, sources)
 assessment, err := probe.Assess(ctx, agents[0])
 ```
+
+### Literal launch and native fork
+
+`sessionhost.Host` represents the default Herdr session with `Session: ""` and
+a named session with its exact name. A target from one host must never be
+passed to another. New tabs use Herdr 0.8.2's `layout.apply` command array, so
+the configured argv is delivered directly without a shell or user-supplied
+environment map:
+
+```go
+topology := sessionhost.Host{Runner: runner, Herdr: "/opt/herdr", Session: "work"}
+created, err := topology.Launch(ctx, sessionhost.LaunchRequest{
+    Origin: sessionhost.Origin{
+        SessionName: "work", WorkspaceID: "workspace-id",
+        TabID: "tab-id", PaneID: "pane-id",
+    },
+    Argv: []string{"my-agent", "--model", "provider/model"},
+    Directory: "/absolute/project", Placement: sessionhost.NewTab,
+})
+```
+
+Herdr 0.8.2 cannot assign arbitrary argv to an already-created pane. For
+`sessionhost.NewPane`, the kit therefore splits the exact origin pane, requires
+Herdr's successful `pane_info`, and waits until `pane process-info` reports the
+shell PID as the sole foreground process in the requested CWD. Only `sh`,
+`bash`, `dash`, `zsh`, `ksh`, and `mksh` are supported for this mediated path.
+It then sends one kit-generated `exec` command.
+Every argv element is single-quoted as inert data; profiles never contain raw
+shell. An empty or option-like executable, NUL, invalid UTF-8, unsafe terminal controls, oversized input, and an
+unsupported shell/readiness state fail before command delivery. Newline is the
+only accepted terminal control and remains inside a quoted argument. Do not
+recreate this path with `layout.apply`: on 0.8.2 that operation replaces the
+existing layout instead of assigning a command to the split pane.
+
+Both placements start in the background. `Focus: true` first rechecks the
+exact session/workspace/tab/pane and accepts only a focused response with the
+same identities. That receipt correlates the observed focus with the issued
+intent; 0.8.2 cannot prove causation against an independently identical focus
+operation at the same instant. `Cleanup` verifies the recorded identity and
+closes only the task-created pane. Herdr removes an empty task-created tab;
+closing the pane instead of the whole tab preserves any unrelated pane added
+after creation.
+
+Use `agenthost.NewForker(host).Fork` for native conversation forks. The source
+must be the complete `Agent` returned by `Host.List`, including its immutable
+native session reference and clean absolute CWD. The adapter owns the native
+selector, source identity, and CWD:
+
+| Harness | Adapter-owned suffix/placement |
+|---|---|
+| Codex 0.154.0 | allowed options, `-C CWD fork THREAD_ID` |
+| OMP 18.1.18 | allowed options, `--cwd CWD --fork ABSOLUTE_JSONL` |
+| OpenCode 1.18.30 | `CWD`, allowed options, `--session SESSION_ID --fork` |
+
+Profiles may contain only the fixed option matrix enforced by
+`ForkProfile.Options`. Model, reasoning, sandbox/approval, and documented
+display/tool options are accepted where the installed harness supports them.
+Subcommands, positional messages, CWD/worktree/add-directory flags, remote
+endpoints, profile/session directories, resume/continue/fork selectors, source
+IDs, and prompt flags are rejected before creation. Codex `--config` accepts
+only `model`, `model_reasoning_effort`, and `service_tier`. Aliases share one
+duplicate key, so `-m one --model two` is rejected.
+
+OMP forks require a unique absolute `OMPStatusSocket`. It becomes the sole
+fixed process environment delta,
+`HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET=<path>`; there is no general environment
+map. The consuming plugin still owns the listener and reviewed extension.
+
+Fork completion means Herdr has reported a distinct same-harness session in
+the task-created pane, with the requested topology and exact source CWD, and a
+second source lookup proves the original identity remains. A temporary nil or
+source-valued child identity is pending, not success. Cross-harness, stale,
+ambiguous, timed-out, or cancelled states fail and clean only the recorded
+created pane. Requested focus occurs only after the distinct identity exists.
 
 Each Codex assessment creates and closes a fresh Unix WebSocket connection.
 It only sends `initialize`, `initialized`, and

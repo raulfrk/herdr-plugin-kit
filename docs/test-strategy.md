@@ -379,6 +379,55 @@ live Herdr resources.
 - Diagnostics: argv history, validated name/path, and bounded JSON error. No
   live session or workspace is created.
 
+## HYP-LAUNCH-01 — Literal launch preserves argv and exact topology
+
+- Claim: new-tab launch sends the configured UTF-8 argv unchanged through the
+  bounded Herdr socket API with no `env` field; same-tab launch creates one
+  background split and sends one strictly generated `exec` command whose
+  quoting round-trips every accepted argv element. The only environment delta
+  is the explicit OMP status socket for an OMP command.
+- Fault model: shell syntax from an argument becomes active, JSON encoding
+  changes an argument, default/named sessions cross, a split or layout response
+  names another target, focus occurs before validation, or cleanup closes the
+  origin/whole tab/unrelated pane.
+- Setup or generator: exact default/named runner traces, fake bounded socket
+  responses, Rapid argv quoting models, spaces/quotes/newlines/empty and shell
+  metacharacter cases, real installed-shell quoting checks, invalid
+  executable/UTF-8/NUL/control/boundary tables, pending and unsupported
+  `pane process-info` fixtures, stale responses, cancellation, and isolated
+  Herdr 0.8.2 live launches.
+- Independent oracle: captured layout request JSON, decoded child argv, exact
+  session/workspace/tab/pane tuple, source-pane snapshot, absence of a shell
+  expansion sentinel, and the single recorded created-pane cleanup target.
+- Falsified when: argv differs, a general environment entry appears, focus or
+  cleanup precedes identity validation, a cross-session command runs, the
+  source pane changes, or any non-created pane is closed.
+- Diagnostics: placement, sanitized argv lengths, exact opaque topology tuple,
+  response category, and cleanup target; argument content is omitted.
+
+## HYP-FORK-01 — Native forks preserve source and create distinct identity
+
+- Claim: Codex 0.154.0, OMP 18.1.18, and OpenCode 1.18.30 adapters exclusively
+  compose their native fork selector, exact source identity, and clean absolute
+  CWD. Completion requires a distinct same-harness session in the created pane
+  and an unchanged second source observation; focus is optional and last.
+- Fault model: profile options override lifecycle/identity/CWD, aliases bypass
+  duplicate checks, a transient source-valued child is accepted, a relative
+  OMP path is accepted, the original is replaced, cross-harness detection wins,
+  cancellation leaks a pane, or focus occurs while identity is pending.
+- Setup or generator: exact allowed/rejected option matrices, canonical argv
+  fixtures, pending/distinct/stale agent-list traces, timeout/cancellation and
+  cleanup models, plus one task-owned live fork per supported harness/version.
+- Independent oracle: source and child immutable Herdr tuples, native session
+  kinds/values, exact CWD, captured argv, source-before/source-after identity,
+  focus order, and task-created resource manifest. For OMP, compare source SHA
+  and metadata-only inherited record IDs/order.
+- Falsified when: the child identity is missing/equal/wrong-harness, source or
+  CWD changes, an owned selector comes from profile input, focus precedes child
+  readiness, or cleanup touches anything outside its manifest.
+- Diagnostics: harness/version, option category (not values), opaque source and
+  child IDs, CWD equality, state transition, and cleanup result.
+
 ## HYP-INTEROP-01 — Versioned envelopes are bounded and cancelable
 
 - Claim: requests explicitly identify target plugin/interface/version/method,

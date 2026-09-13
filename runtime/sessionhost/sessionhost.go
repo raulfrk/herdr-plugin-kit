@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/internal/herdrcmd"
@@ -19,6 +20,11 @@ const MaxJSONBytes = herdrcmd.MaxJSONBytes
 type Host struct {
 	Runner command.Runner
 	Herdr  string
+	// Session is empty for the default Herdr session and otherwise contains the
+	// exact named session. Operations never fall back across this boundary.
+	Session string
+	api     apiCaller
+	wait    func(context.Context, time.Duration) error
 }
 
 type Capabilities struct {
@@ -26,12 +32,15 @@ type Capabilities struct {
 	Stop            bool
 	Delete          bool
 	OpenAtDirectory bool
+	LiteralNewTab   bool
+	QuotedSameTab   bool
+	ExactFocus      bool
 	OneCommandCWD   bool
 	ShortcutBinding bool
 }
 
 func SupportedCapabilities() Capabilities {
-	return Capabilities{List: true, Stop: true, Delete: true, OpenAtDirectory: true}
+	return Capabilities{List: true, Stop: true, Delete: true, OpenAtDirectory: true, LiteralNewTab: true, QuotedSameTab: true, ExactFocus: true}
 }
 
 type Session struct {
