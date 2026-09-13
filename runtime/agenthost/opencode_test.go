@@ -81,16 +81,16 @@ func TestAssessOpenCodeUnknownAndDrift(t *testing.T) {
 	target := nativeTarget("opencode", "id", "session-1")
 	for _, tc := range []struct {
 		name    string
-		fixture openCodeFixture
+		fixture *openCodeFixture
 		want    Assessment
 		stale   bool
 	}{
-		{"unknown future", openCodeFixture{status: "paused"}, nativeUnknown(NativeUnsupported), false},
-		{"within observation disappearance", openCodeFixture{status: "idle", session404At: 2}, nativeUnknown(Unsettled), true},
-		{"cross observation disappearance", openCodeFixture{status: "idle", session404At: 3}, nativeUnknown(Unsettled), true},
-		{"directory contradiction", openCodeFixture{status: "idle", wrongDirectory: true}, nativeUnknown(Unsettled), true},
-		{"child session", openCodeFixture{status: "idle", sessionParent: "parent-1"}, nativeUnknown(Unsettled), true},
-		{"cross sample semantic drift", openCodeFixture{statusByCall: []string{"busy", "idle"}}, nativeUnknown(Unsettled), true},
+		{"unknown future", &openCodeFixture{status: "paused"}, nativeUnknown(NativeUnsupported), false},
+		{"within observation disappearance", &openCodeFixture{status: "idle", session404At: 2}, nativeUnknown(Unsettled), true},
+		{"cross observation disappearance", &openCodeFixture{status: "idle", session404At: 3}, nativeUnknown(Unsettled), true},
+		{"directory contradiction", &openCodeFixture{status: "idle", wrongDirectory: true}, nativeUnknown(Unsettled), true},
+		{"child session", &openCodeFixture{status: "idle", sessionParent: "parent-1"}, nativeUnknown(Unsettled), true},
+		{"cross sample semantic drift", &openCodeFixture{statusByCall: []string{"busy", "idle"}}, nativeUnknown(Unsettled), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := tc.fixture
