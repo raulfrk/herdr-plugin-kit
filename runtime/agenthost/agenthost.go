@@ -73,12 +73,14 @@ type Host struct {
 	Herdr, Session string
 }
 type Probe struct {
-	Host Host
-	wait func(context.Context, time.Duration) error
+	Host   Host
+	native NativeSources
+	wait   func(context.Context, time.Duration) error
 }
 
 // NewProbe creates a status probe. Codex uses one bounded App Server snapshot;
-// other agents use the production settle policy.
+// OMP and OpenCode require explicit native sources; other agents use the
+// production Herdr settle policy.
 func NewProbe(host Host) Probe { return Probe{Host: host, wait: wait} }
 
 func (h Host) List(ctx context.Context) ([]Agent, error) {
@@ -130,8 +132,13 @@ func (h Host) Focus(ctx context.Context, target Agent) (Agent, error) {
 	return a, nil
 }
 func (p Probe) Assess(ctx context.Context, target Agent) (Assessment, error) {
-	if strings.EqualFold(target.Kind, "codex") {
+	switch {
+	case strings.EqualFold(target.Kind, "codex"):
 		return p.assessCodex(ctx, target)
+	case strings.EqualFold(target.Kind, "omp"):
+		return p.assessOMP(ctx, target)
+	case strings.EqualFold(target.Kind, "opencode"):
+		return p.assessOpenCode(ctx, target)
 	}
 	if p.wait == nil {
 		return Assessment{}, errors.New("assess agent: probe must be created with NewProbe")

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -132,8 +135,54 @@ func testAttentionSwitcher(t *testing.T) {
 		t.Fatalf("focused = %+v, error = %v", focused, err)
 	}
 	assessment, err := agenthost.NewProbe(host).Assess(context.Background(), focused)
-	if !errors.Is(err, agenthost.ErrStaleReport) || assessment.Status != agenthost.Unknown || assessment.Reason != agenthost.Unsettled || assessment.Stable {
-		t.Fatalf("assessment = %+v, error = %v", assessment, err)
+	if !errors.Is(err, agenthost.ErrStaleReport) || assessment != (agenthost.Assessment{Status: agenthost.Unknown, Reason: agenthost.Unsettled}) {
+		t.Fatalf("generic stale assessment = %+v, error = %v", assessment, err)
+	}
+
+	omp := nativeAgentFixture("omp", "path", "/tmp/attention-omp.jsonl")
+	ompRunner := &queueRunner{outputs: [][]byte{
+		agentListJSON(t, omp), agentListJSON(t, omp), agentListJSON(t, omp),
+		agentListJSON(t, omp), agentListJSON(t, omp),
+	}}
+	ompHost := agenthost.Host{Runner: ompRunner, Herdr: "/opt/herdr", Session: "work"}
+	ompAgents, err := ompHost.List(context.Background())
+	if err != nil || len(ompAgents) != 1 {
+		t.Fatalf("OMP agents = %+v, error = %v", ompAgents, err)
+	}
+	ompSocket := serveOMPStatusFixture(t, ompAgents[0].Session.Value)
+	ompProbe, err := agenthost.NewProbeWithNative(ompHost, agenthost.NativeSources{
+		OMPSockets: map[string]string{ompAgents[0].PaneID: ompSocket},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, err = ompProbe.Assess(context.Background(), ompAgents[0])
+	if err != nil || assessment != (agenthost.Assessment{Status: agenthost.Idle, Reason: agenthost.OMPStatus, Stable: true}) {
+		t.Fatalf("OMP native assessment = %+v, error = %v", assessment, err)
+	}
+
+	openCode := nativeAgentFixture("opencode", "id", "session-42")
+	openCodeRunner := &queueRunner{outputs: [][]byte{
+		agentListJSON(t, openCode), agentListJSON(t, openCode), agentListJSON(t, openCode),
+		agentListJSON(t, openCode), agentListJSON(t, openCode),
+	}}
+	openCodeHost := agenthost.Host{Runner: openCodeRunner, Herdr: "/opt/herdr", Session: "work"}
+	openCodeAgents, err := openCodeHost.List(context.Background())
+	if err != nil || len(openCodeAgents) != 1 {
+		t.Fatalf("OpenCode agents = %+v, error = %v", openCodeAgents, err)
+	}
+	openCodeServer := serveOpenCodeQuestionFixture(t, openCodeAgents[0].Session.Value, "/tmp/plugin-kit")
+	openCodeProbe, err := agenthost.NewProbeWithNative(openCodeHost, agenthost.NativeSources{
+		OpenCodeServers: map[string]agenthost.OpenCodeServer{
+			openCodeAgents[0].PaneID: {URL: openCodeServer.URL, Directory: "/tmp/plugin-kit"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, err = openCodeProbe.Assess(context.Background(), openCodeAgents[0])
+	if err != nil || assessment != (agenthost.Assessment{Status: agenthost.Blocked, Reason: agenthost.OpenCodeQuestion, Stable: true}) {
+		t.Fatalf("OpenCode native assessment = %+v, error = %v", assessment, err)
 	}
 }
 
@@ -356,6 +405,59 @@ func (fixture *actionTransportFixture) Invoke(_ context.Context, _, _ string) (a
 
 func (fixture *actionTransportFixture) AwaitReceipt(context.Context, actionhost.Receipt, time.Duration) (actionhost.Receipt, error) {
 	return fixture.terminal, nil
+}
+
+func serveOMPStatusFixture(t *testing.T, session string) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "omp-status.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for range 2 {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = fmt.Fprintf(connection, `{"version":1,"harness":"omp","session_kind":"path","session_value":%q,"status":"idle","state_seq":7}`+"\n", session)
+			_ = connection.Close()
+		}
+	}()
+	return socket
+}
+
+func serveOpenCodeQuestionFixture(t *testing.T, session, directory string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("directory") != directory {
+			t.Errorf("OpenCode directory = %q", request.URL.Query().Get("directory"))
+		}
+		switch request.URL.Path {
+		case "/session/" + session:
+			_, _ = fmt.Fprintf(response, `{"id":%q,"directory":%q}`, session, directory)
+		case "/question":
+			_, _ = fmt.Fprintf(response, `[{"sessionID":%q,"questions":["not decoded"]}]`, session)
+		case "/permission":
+			_, _ = response.Write([]byte(`[]`))
+		case "/session/status":
+			_, _ = fmt.Fprintf(response, `{%q:{"type":"busy"}}`, session)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func nativeAgentFixture(kind, sessionKind, sessionValue string) map[string]any {
+	agent := agentFixture("unknown", 1)
+	agent["agent"] = kind
+	agent["agent_session"] = map[string]any{
+		"source": "herdr:" + kind, "agent": kind, "kind": sessionKind, "value": sessionValue,
+	}
+	return agent
 }
 
 func agentFixture(status string, sequence uint64) map[string]any {

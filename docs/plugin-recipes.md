@@ -171,8 +171,19 @@ host := agenthost.Host{
     CodexSocket: "/absolute/runtime/codex.sock",
 }
 agents, err := host.List(ctx)
-// Handle err and choose an Agent from agents without rebuilding its identity.
-assessment, err := agenthost.NewProbe(host).Assess(ctx, agents[0])
+// The launcher supplies exact pane mappings without rebuilding Agent identity.
+sources := agenthost.NativeSources{
+    OMPSockets: map[string]string{
+        "workspace:pane": "/absolute/private-runtime/omp-123.sock",
+    },
+    OpenCodeServers: map[string]agenthost.OpenCodeServer{
+        "workspace:other-pane": {
+            URL: "http://127.0.0.1:4096", Directory: "/absolute/project",
+        },
+    },
+}
+probe, err := agenthost.NewProbeWithNative(host, sources)
+assessment, err := probe.Assess(ctx, agents[0])
 ```
 
 Each Codex assessment creates and closes a fresh Unix WebSocket connection.
@@ -219,6 +230,52 @@ No raw server errors or transcript previews are returned. Other agent kinds
 retain their existing Herdr-based assessment behavior. Legacy terminal-text
 reason constants remain exported for source compatibility but are no longer
 emitted by Codex assessments.
+
+OMP and OpenCode assessments use only their native structured interfaces.
+Herdr locates the exact pane and carries its immutable `agent_session`
+reference; Herdr status, readiness, revision, titles, CWD, pane text, and
+screen detection are not native status evidence. Generic agent kinds retain
+the settled Herdr path, including its bounded detection read. Calling
+`NewProbe(host)`, or omitting an exact pane mapping from `NativeSources`, makes
+OMP and OpenCode return unstable `Unknown`, `NativeNotManaged`; they are never
+guessed from Herdr or terminal content.
+
+| Native evidence for the exact session | Assessment |
+|---|---|
+| OMP `working` | `Working`, `OMPStatus` |
+| OMP `blocked` | `Blocked`, `OMPStatus` |
+| OMP `idle` | `Idle`, `OMPStatus` |
+| OpenCode pending question and permission | `Blocked`, `OpenCodeQuestionAndPermission` |
+| OpenCode pending question only | `Blocked`, `OpenCodeQuestion` |
+| OpenCode pending permission only | `Blocked`, `OpenCodePermission` |
+| OpenCode `busy` or `retry`, with no pending input | `Working`, `OpenCodeStatus` |
+| OpenCode `idle` or absent from the status map, with no pending input | `Idle`, `OpenCodeStatus` |
+| Unknown future native status | unstable `Unknown`, `NativeUnsupported` |
+| Missing mapping or initial missing native session | unstable `Unknown`, `NativeNotManaged` |
+| Native transport or protocol failure | unstable `Unknown`, `NativeUnavailable` |
+| Native or Herdr identity/semantic drift | unstable `Unknown`, `Unsettled`, `ErrStaleReport` |
+
+Native OMP and OpenCode probes take two complete observations under one
+two-second deadline. They never emit `Done`; the consuming Attention plugin
+derives unseen completion from its own prior observation state.
+
+The Attention plugin owns installation of the exact bytes returned by
+`OMPStatusExtension()` into its private state directory. Its launcher allocates
+a unique Unix socket for every OMP process, injects
+`HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET`, and never reuses a stale socket path. It
+also owns the launcher-known OpenCode loopback URL and absolute directory
+mapping. Plugin Kit does not mutate global OMP/OpenCode configuration, discover
+server ports, parse transcripts, or run a status daemon.
+
+The live status contract was verified with Herdr 0.8.2, OMP 18.1.18, and
+OpenCode 1.18.30. OMP 18.1.18 `/branch` rewinds were observed to keep both
+`sessionManager.getSessionFile()` and Herdr's immutable session path unchanged.
+The extension sequence therefore rejects a branch that crosses the two-sample
+window, but a fresh stateless assessment after that rewind settles cannot
+distinguish the former target. Completed same-path branch invalidation requires
+a revised identity contract; it is not inferred from volatile Herdr fields.
+OpenCode endpoint shapes must be rechecked against the installed version;
+1.18.21 and 1.18.30 were observed during feasibility.
 
 ## Session Switcher
 
