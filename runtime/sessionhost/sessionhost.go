@@ -65,6 +65,12 @@ type Workspace struct {
 	Worktree    json.RawMessage   `json:"worktree,omitempty"`
 }
 
+// Socket returns the exact running Herdr session socket after applying the
+// same default/named-session boundary used by topology operations.
+func (h Host) Socket(ctx context.Context) (string, error) {
+	return h.sessionSocket(ctx)
+}
+
 func (h Host) List(ctx context.Context) ([]Session, error) {
 	var response struct {
 		Sessions []Session `json:"sessions"`

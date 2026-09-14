@@ -229,7 +229,10 @@ func TestCodexLifecycleLateLoadedStateCannotPass(t *testing.T) {
 				t.Errorf("read request=%s", data)
 				return
 			}
-			sendRPCResult(t, ctx, conn, read.ID, `{"thread":{"id":"thread-stale","cwd":"/tmp/project","modelProvider":"openai"}}`)
+			response := `{"id":` + jsonNumber(read.ID) + `,"result":{"thread":{"id":"thread-stale","cwd":"/tmp/project","modelProvider":"openai"}}}`
+			if err := conn.Write(ctx, websocket.MessageText, []byte(response)); err != nil {
+				return
+			}
 		}
 	})
 	verifier, err := newCodexLifecycle(context.Background(), socket)

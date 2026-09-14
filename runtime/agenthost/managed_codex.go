@@ -55,6 +55,7 @@ type ManagedCodexRequest struct {
 	SourceArgv   []string
 	Policy       ManagedCodexPolicy
 	ReadyTimeout time.Duration
+	Prompt       *Prompt
 }
 
 type ManagedCodex struct {
@@ -67,6 +68,7 @@ type ManagedCodex struct {
 	Policy         EffectiveCodexPolicy
 	Argv           []string
 	Service        CodexServiceSnapshot
+	Prompt         PromptResult
 	cleanup        *managedCleanup
 }
 
@@ -98,6 +100,7 @@ type ManagedCodexLauncher struct {
 	service   managedCodexService
 	verifiers managedVerifierFactory
 	discover  func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, string, error)
+	deliver   func(context.Context, Prompt, PromptTarget) (PromptResult, error)
 }
 
 func NewManagedCodexLauncher(host Host) ManagedCodexLauncher {
@@ -107,6 +110,9 @@ func NewManagedCodexLauncher(host Host) ManagedCodexLauncher {
 func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRequest) (*ManagedCodex, error) {
 	if ctx == nil {
 		panic("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := l.validate(request); err != nil {
 		return nil, fmt.Errorf("managed Codex: %w", err)
@@ -310,32 +316,73 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	if err != nil {
 		return fail(fmt.Errorf("managed Codex final target: %w", err), verifier)
 	}
+	managed := &ManagedCodex{
+		Operation: request.Operation, ThreadID: identity.ID, SourceThreadID: sourceID,
+		Agent: agent, Target: target, Process: process, Policy: effective,
+		Argv: append([]string(nil), argv...), Service: service, cleanup: cleanup,
+	}
+	if request.Prompt != nil {
+		var source *Agent
+		if request.Operation == ManagedFork {
+			sourceCopy := request.Source
+			source = &sourceCopy
+		}
+		deliver := l.deliver
+		if deliver == nil {
+			deliver = NewPromptHost(l.Host).Deliver
+		}
+		promptResult, promptErr := deliver(ctx, *request.Prompt, PromptTarget{
+			Created: target, Agent: agent, Directory: request.Directory,
+			Argv: argv, Source: source, CodexService: service,
+		})
+		managed.Prompt = promptResult
+		if promptErr != nil {
+			if promptResult.State == PromptNotAttempted {
+				return fail(fmt.Errorf("managed Codex prompt readiness: %w", promptErr), verifier)
+			}
+			_ = verifier.Close()
+			return managed, promptErr
+		}
+		agent, managed.Agent = promptResult.Agent, promptResult.Agent
+	}
 	if request.Focus {
 		if err := l.topologyHost().FocusPane(ctx, target.Origin); err != nil {
+			if request.Prompt != nil && managed.Prompt.State == PromptAcknowledged {
+				_ = verifier.Close()
+				return managed, fmt.Errorf("managed Codex focus: %w", err)
+			}
 			return fail(fmt.Errorf("managed Codex focus: %w", err), verifier)
 		}
 		focusedProcess, processErr := l.topologyHost().VerifyForegroundProcess(ctx, target.Origin, request.Directory, argv)
 		if processErr != nil || focusedProcess.PID != originalPID {
+			if request.Prompt != nil && managed.Prompt.State == PromptAcknowledged {
+				_ = verifier.Close()
+				return managed, fmt.Errorf("managed Codex focused process: %w", ErrManagedStale)
+			}
 			return fail(fmt.Errorf("managed Codex focused process: %w", ErrManagedStale), verifier)
 		}
 		agent, err = l.getStartedAgent(ctx, target.Origin, request.Directory, true, identity.ID)
 		if err != nil {
+			if request.Prompt != nil && managed.Prompt.State == PromptAcknowledged {
+				_ = verifier.Close()
+				return managed, fmt.Errorf("managed Codex focused target: %w", err)
+			}
 			return fail(fmt.Errorf("managed Codex focused target: %w", err), verifier)
 		}
 		recheckCtx, recheckCancel = context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
 		checked, err = verifier.RecheckIdentity(recheckCtx, identity.ID)
 		recheckCancel()
 		if err != nil || checked != identity {
+			if request.Prompt != nil && managed.Prompt.State == PromptAcknowledged {
+				_ = verifier.Close()
+				return managed, fmt.Errorf("managed Codex focused identity: %w", ErrManagedStale)
+			}
 			return fail(fmt.Errorf("managed Codex focused identity: %w", ErrManagedStale), verifier)
 		}
 	}
+	managed.Agent = agent
 	_ = verifier.Close()
-
-	return &ManagedCodex{
-		Operation: request.Operation, ThreadID: identity.ID, SourceThreadID: sourceID,
-		Agent: agent, Target: target, Process: process, Policy: effective,
-		Argv: append([]string(nil), argv...), Service: service, cleanup: cleanup,
-	}, nil
+	return managed, nil
 }
 
 func forkPolicyDrift(actual, expected EffectiveCodexPolicy, sourceArgv []string) string {
@@ -400,6 +447,14 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 	}
 	if request.ReadyTimeout < 0 || request.ReadyTimeout > MaxManagedReadyTimeout || request.ReadyTimeout > 0 && request.ReadyTimeout <= 3*time.Second {
 		return errors.New("managed Codex readiness timeout is out of range")
+	}
+	if request.Prompt != nil {
+		if err := validatePreparedPrompt(*request.Prompt); err != nil {
+			return err
+		}
+		if request.Operation == ManagedResume {
+			return errors.New("managed Resume does not accept a start prompt")
+		}
 	}
 	switch request.Operation {
 	case ManagedNew:

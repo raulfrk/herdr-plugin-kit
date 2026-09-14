@@ -53,6 +53,10 @@ type fakeManagedVerifier struct {
 	audit        EffectiveCodexPolicy
 	audits       []EffectiveCodexPolicy
 	auditErr     error
+	recheckErr   error
+	rechecks     []codexThreadIdentity
+	recheckErrs  []error
+	auditCalls   int
 	armed        int
 	closed       int
 	deleted      []string
@@ -78,9 +82,20 @@ func (f *fakeManagedVerifier) ReadThread(context.Context, string) (codexThreadId
 	return value, nil
 }
 func (f *fakeManagedVerifier) RecheckIdentity(context.Context, string) (codexThreadIdentity, error) {
-	return f.recheck, nil
+	if len(f.rechecks) != 0 {
+		value := f.rechecks[0]
+		f.rechecks = f.rechecks[1:]
+		var err error
+		if len(f.recheckErrs) != 0 {
+			err = f.recheckErrs[0]
+			f.recheckErrs = f.recheckErrs[1:]
+		}
+		return value, err
+	}
+	return f.recheck, f.recheckErr
 }
 func (f *fakeManagedVerifier) ReadEffective(context.Context, string) (EffectiveCodexPolicy, error) {
+	f.auditCalls++
 	if len(f.audits) != 0 {
 		value := f.audits[0]
 		f.audits = f.audits[1:]
@@ -122,6 +137,7 @@ type fakeManagedTopology struct {
 	inspectedSeq  []sessionhost.ForegroundProcess
 	inspectErr    error
 	inspectErrs   []error
+	focusErr      error
 }
 
 func (f *fakeManagedTopology) Launch(_ context.Context, request sessionhost.LaunchRequest) (sessionhost.CreatedTarget, error) {
@@ -199,7 +215,7 @@ func (f *fakeManagedTopology) StopForegroundProcess(_ context.Context, _ session
 }
 func (f *fakeManagedTopology) FocusPane(_ context.Context, target sessionhost.Origin) error {
 	f.focuses = append(f.focuses, target)
-	return nil
+	return f.focusErr
 }
 func (f *fakeManagedTopology) Cleanup(_ context.Context, target sessionhost.CreatedTarget) error {
 	f.cleanups = append(f.cleanups, target)

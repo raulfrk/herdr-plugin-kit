@@ -283,7 +283,7 @@ func TestSessionSocketSelectionAndInvalidPaths(t *testing.T) {
 		if name != "" {
 			want = "/tmp/named.sock"
 		}
-		got, err := (Host{Session: name, Runner: &scriptedRunner{outputs: []string{sessions}}}).sessionSocket(context.Background())
+		got, err := (Host{Session: name, Runner: &scriptedRunner{outputs: []string{sessions}}}).Socket(context.Background())
 		if err != nil || got != want {
 			t.Fatalf("%q: %q %v", name, got, err)
 		}

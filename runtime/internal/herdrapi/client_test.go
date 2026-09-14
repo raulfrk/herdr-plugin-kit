@@ -1,8 +1,11 @@
 package herdrapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"path/filepath"
 	"strings"
@@ -51,6 +54,67 @@ func TestClientRoundTrip(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientReceiptDistinguishesPreWriteAndWrittenWithoutAcknowledgement(t *testing.T) {
+	var result bool
+	receipt, err := (Client{}).CallWithReceipt(context.Background(), filepath.Join(t.TempDir(), "missing.sock"), "test", "method", struct{}{}, &result)
+	if err == nil || receipt.State != RequestNotWritten {
+		t.Fatalf("missing socket receipt=%+v error=%v", receipt, err)
+	}
+
+	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	received := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			received <- acceptErr
+			return
+		}
+		defer conn.Close()
+		line, readErr := bufio.NewReader(conn).ReadBytes('\n')
+		if readErr == nil && len(line) == 0 {
+			readErr = io.ErrUnexpectedEOF
+		}
+		received <- readErr
+	}()
+	receipt, err = (Client{}).CallWithReceipt(context.Background(), socket, "test", "method", struct{}{}, &result)
+	if err == nil || receipt.State != RequestWritten || !errors.Is(err, io.EOF) {
+		t.Fatalf("closed peer receipt=%+v error=%v", receipt, err)
+	}
+	if err := <-received; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientReceiptAcknowledgesValidResponse(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var request any
+		if json.NewDecoder(conn).Decode(&request) == nil {
+			_, _ = conn.Write([]byte(`{"id":"test","result":true}` + "\n"))
+		}
+	}()
+	var result bool
+	receipt, err := (Client{}).CallWithReceipt(context.Background(), socket, "test", "method", struct{}{}, &result)
+	if err != nil || receipt.State != RequestAcknowledged || !result {
+		t.Fatalf("receipt=%+v result=%t error=%v", receipt, result, err)
 	}
 }
 
