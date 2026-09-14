@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -21,6 +22,8 @@ const (
 	MaxCommandLen                   = 64 << 10
 	ShellReadyTimeout time.Duration = 5_000_000_000 // 5 seconds
 )
+
+type signalProcess func(int, syscall.Signal) error
 
 var (
 	ErrStaleTarget      = errors.New("Herdr target is stale")
@@ -57,6 +60,13 @@ type CreatedTarget struct {
 	Origin
 	CreatedTab bool
 	DirectArgv bool
+}
+
+type ForegroundProcess struct {
+	PID  int
+	Name string
+	CWD  string
+	Argv []string
 }
 
 type apiCaller interface {
@@ -108,6 +118,39 @@ func (h Host) Launch(ctx context.Context, request LaunchRequest) (CreatedTarget,
 	return created, nil
 }
 
+// RunInShell executes one validated literal argv in an existing, caller-proved
+// ready shell. Herdr 0.8.2 accepts terminal input here, so the Kit encodes only
+// its own validated argv and does not interpolate or inject environment data.
+func (h Host) RunInShell(ctx context.Context, target Origin, directory string, argv []string) (bool, error) {
+	if err := h.validateOrigin(target); err != nil {
+		return false, fmt.Errorf("run in shell: %w", err)
+	}
+	if _, err := validateDirectory(directory); err != nil {
+		return false, fmt.Errorf("run in shell: %w", err)
+	}
+	if err := validateArgv(argv, true); err != nil {
+		return false, fmt.Errorf("run in shell: %w", err)
+	}
+	if err := h.WaitForShell(ctx, target, directory); err != nil {
+		return false, fmt.Errorf("run in shell readiness: %w", err)
+	}
+	command, err := encodeCommand(argv)
+	if err != nil {
+		return false, fmt.Errorf("run in shell: %w", err)
+	}
+	args, err := h.sessionArgs([]string{"pane", "run", target.PaneID, command})
+	if err != nil {
+		return false, fmt.Errorf("run in shell: %w", err)
+	}
+	if err := h.runEmpty(ctx, args); err != nil {
+		return true, fmt.Errorf("run in shell command: %w", err)
+	}
+	if _, err := h.currentPane(ctx, target); err != nil {
+		return true, fmt.Errorf("run in shell target changed: %w", err)
+	}
+	return true, nil
+}
+
 func (h Host) launchTab(ctx context.Context, request LaunchRequest) (CreatedTarget, error) {
 	socket, err := h.sessionSocket(ctx)
 	if err != nil {
@@ -151,7 +194,7 @@ func (h Host) launchTab(ctx context.Context, request LaunchRequest) (CreatedTarg
 type layoutPane struct {
 	Type    string   `json:"type"`
 	CWD     string   `json:"cwd"`
-	Command []string `json:"command"`
+	Command []string `json:"command,omitempty"`
 }
 
 func (h Host) launchPane(ctx context.Context, request LaunchRequest) (CreatedTarget, error) {
@@ -194,11 +237,7 @@ func (h Host) launchPane(ctx context.Context, request LaunchRequest) (CreatedTar
 	if err != nil {
 		return CreatedTarget{}, errors.Join(err, h.cleanupAfterFailure(ctx, created))
 	}
-	var acknowledged bool
-	if err := h.runJSON(ctx, runArgs, &acknowledged); err != nil || !acknowledged {
-		if err == nil {
-			err = errors.New("Herdr did not acknowledge pane command")
-		}
+	if err := h.runEmpty(ctx, runArgs); err != nil {
 		return CreatedTarget{}, errors.Join(fmt.Errorf("launch pane command: %w", err), h.cleanupAfterFailure(ctx, created))
 	}
 	return created, nil
@@ -342,6 +381,145 @@ func (h Host) waitForShell(parent context.Context, target Origin, directory stri
 	}
 }
 
+// WaitForShell requires the exact target to contain one authoritative idle
+// interactive shell at the requested directory.
+func (h Host) WaitForShell(ctx context.Context, target Origin, directory string) error {
+	if err := h.validateOrigin(target); err != nil {
+		return err
+	}
+	if _, err := h.currentPane(ctx, target); err != nil {
+		return err
+	}
+	directory, err := validateDirectory(directory)
+	if err != nil {
+		return err
+	}
+	if err := h.waitForShell(ctx, target, directory); err != nil {
+		return err
+	}
+	_, err = h.currentPane(ctx, target)
+	return err
+}
+
+// InspectForegroundProcess returns the exact unique foreground process-group
+// leader for a stable pane. Callers compare this immutable snapshot before and
+// after operations that must preserve an existing process.
+func (h Host) InspectForegroundProcess(ctx context.Context, target Origin) (ForegroundProcess, error) {
+	if err := h.validateOrigin(target); err != nil {
+		return ForegroundProcess{}, err
+	}
+	if _, err := h.currentPane(ctx, target); err != nil {
+		return ForegroundProcess{}, err
+	}
+	args, err := h.sessionArgs([]string{"pane", "process-info", "--pane", target.PaneID})
+	if err != nil {
+		return ForegroundProcess{}, err
+	}
+	var response struct {
+		ID     string `json:"id"`
+		Result struct {
+			Type        string          `json:"type"`
+			ProcessInfo json.RawMessage `json:"process_info"`
+		} `json:"result"`
+	}
+	if err := h.runJSON(ctx, args, &response); err != nil {
+		return ForegroundProcess{}, err
+	}
+	var info struct {
+		PaneID                   string              `json:"pane_id"`
+		ForegroundProcessGroupID int                 `json:"foreground_process_group_id"`
+		ForegroundProcesses      []ForegroundProcess `json:"foreground_processes"`
+	}
+	if response.ID != "cli:pane:process_info" {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if response.Result.Type != "pane_process_info" {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if json.Unmarshal(response.Result.ProcessInfo, &info) != nil {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if info.PaneID != target.PaneID {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if info.ForegroundProcessGroupID <= 0 {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	var leaders []ForegroundProcess
+	for _, process := range info.ForegroundProcesses {
+		if process.PID == info.ForegroundProcessGroupID {
+			leaders = append(leaders, process)
+		}
+	}
+	if len(leaders) == 0 {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if len(leaders) != 1 {
+		return ForegroundProcess{}, ErrAmbiguousTarget
+	}
+	process := leaders[0]
+	// Selection above already proves the sole leader PID equals the positive
+	// foreground process-group ID; validate only the remaining fields here.
+	if process.Name == "" || len(process.Argv) == 0 || filepath.Base(process.Argv[0]) != process.Name {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if _, err := validateDirectory(process.CWD); err != nil {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	if _, err := h.currentPane(ctx, target); err != nil {
+		return ForegroundProcess{}, err
+	}
+	return process, nil
+}
+
+// VerifyForegroundProcess returns the unique foreground process whose argv and
+// CWD exactly match the caller-owned launch contract.
+func (h Host) VerifyForegroundProcess(ctx context.Context, target Origin, directory string, argv []string) (ForegroundProcess, error) {
+	directory, err := validateDirectory(directory)
+	if err != nil {
+		return ForegroundProcess{}, err
+	}
+	if err := validateArgv(argv, false); err != nil {
+		return ForegroundProcess{}, err
+	}
+	process, err := h.InspectForegroundProcess(ctx, target)
+	if err != nil {
+		return ForegroundProcess{}, err
+	}
+	if process.CWD != directory || process.Name != filepath.Base(argv[0]) || !equalStrings(process.Argv, argv) {
+		return ForegroundProcess{}, ErrStaleTarget
+	}
+	return process, nil
+}
+
+// StopForegroundProcess stops only the exact foreground process previously
+// launched by the caller and waits for the same pane to return to its shell.
+// The PID must also be the foreground process-group ID, so signalling it cannot
+// accidentally address a same-argv process elsewhere in the session.
+func (h Host) StopForegroundProcess(ctx context.Context, target Origin, directory string, argv []string, pid int) error {
+	if pid <= 0 {
+		return errors.New("expected process PID is invalid")
+	}
+	process, err := h.VerifyForegroundProcess(ctx, target, directory, argv)
+	if err != nil {
+		return err
+	}
+	if process.PID != pid {
+		return ErrStaleTarget
+	}
+	signal := h.signal
+	if signal == nil {
+		signal = syscall.Kill
+	}
+	if err := signal(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("stop foreground process: %w", err)
+	}
+	if err := h.WaitForShell(ctx, target, directory); err != nil {
+		return fmt.Errorf("wait for shell after foreground stop: %w", err)
+	}
+	return nil
+}
+
 func (h Host) waitInterval(ctx context.Context, duration time.Duration) error {
 	if h.wait != nil {
 		return h.wait(ctx, duration)
@@ -372,16 +550,8 @@ func (h Host) validateLaunch(request LaunchRequest) error {
 	if _, err := validateDirectory(request.Directory); err != nil {
 		return err
 	}
-	if len(request.Argv) == 0 || len(request.Argv) > MaxArgv {
-		return fmt.Errorf("argv must contain 1 to %d elements", MaxArgv)
-	}
-	for i, arg := range request.Argv {
-		if strings.ContainsRune(arg, 0) || !utf8.ValidString(arg) || len(arg) > MaxArgBytes {
-			return fmt.Errorf("argv[%d] must be valid UTF-8, NUL-free, and at most %d bytes", i, MaxArgBytes)
-		}
-	}
-	if request.Argv[0] == "" || strings.HasPrefix(request.Argv[0], "-") {
-		return errors.New("argv[0] must be nonempty and must not begin with a dash")
+	if err := validateArgv(request.Argv, request.Placement == NewPane); err != nil {
+		return err
 	}
 	if request.OMPStatusSocket != "" {
 		if filepath.Base(request.Argv[0]) != "omp" || !filepath.IsAbs(request.OMPStatusSocket) || filepath.Clean(request.OMPStatusSocket) != request.OMPStatusSocket || strings.ContainsRune(request.OMPStatusSocket, 0) {
@@ -403,17 +573,31 @@ func (h Host) validateLaunch(request LaunchRequest) error {
 	default:
 		return errors.New("unsupported launch placement")
 	}
-	if request.Placement == NewPane {
-		for i, arg := range request.Argv {
+	return nil
+}
+
+func validateArgv(argv []string, terminalDelivery bool) error {
+	if len(argv) == 0 || len(argv) > MaxArgv {
+		return fmt.Errorf("argv must contain 1 to %d elements", MaxArgv)
+	}
+	for i, arg := range argv {
+		if strings.ContainsRune(arg, 0) || !utf8.ValidString(arg) || len(arg) > MaxArgBytes {
+			return fmt.Errorf("argv[%d] must be valid UTF-8, NUL-free, and at most %d bytes", i, MaxArgBytes)
+		}
+		if terminalDelivery {
 			for _, r := range arg {
 				if unicode.IsControl(r) && r != '\n' {
 					return fmt.Errorf("argv[%d] contains a control character unsupported by terminal delivery", i)
 				}
 			}
 		}
-		if _, err := encodeExec(request.Argv); err != nil {
-			return err
-		}
+	}
+	if argv[0] == "" || strings.HasPrefix(argv[0], "-") {
+		return errors.New("argv[0] must be nonempty and must not begin with a dash")
+	}
+	if terminalDelivery {
+		_, err := encodeExec(argv)
+		return err
 	}
 	return nil
 }
@@ -485,6 +669,18 @@ func (h Host) caller() apiCaller {
 }
 
 func encodeExec(argv []string) (string, error) {
+	command, err := encodeCommand(argv)
+	if err != nil {
+		return "", err
+	}
+	command = "exec " + command
+	if len(command) > MaxCommandLen {
+		return "", errors.New("encoded command exceeds size limit")
+	}
+	return command, nil
+}
+
+func encodeCommand(argv []string) (string, error) {
 	parts := make([]string, len(argv))
 	for i, arg := range argv {
 		if strings.ContainsRune(arg, 0) {
@@ -492,7 +688,7 @@ func encodeExec(argv []string) (string, error) {
 		}
 		parts[i] = "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
 	}
-	command := "exec " + strings.Join(parts, " ")
+	command := strings.Join(parts, " ")
 	if len(command) > MaxCommandLen {
 		return "", errors.New("encoded command exceeds size limit")
 	}

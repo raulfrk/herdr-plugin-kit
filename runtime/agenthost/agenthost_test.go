@@ -17,6 +17,7 @@ import (
 type scriptedRunner struct {
 	mu      sync.Mutex
 	results []command.Result
+	errs    []error
 	calls   [][]string
 }
 
@@ -29,7 +30,12 @@ func (r *scriptedRunner) Run(_ context.Context, exe string, args []string) (comm
 	}
 	v := r.results[0]
 	r.results = r.results[1:]
-	return v, nil
+	if len(r.errs) == 0 {
+		return v, nil
+	}
+	err := r.errs[0]
+	r.errs = r.errs[1:]
+	return v, err
 }
 
 func fastProbe(host Host) Probe {

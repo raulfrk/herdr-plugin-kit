@@ -204,6 +204,7 @@ var errCodexProtocol = errors.New("invalid Codex protocol")
 type codexReader struct {
 	conn            *websocket.Conn
 	messages, bytes int
+	notify          func(string, json.RawMessage) error
 }
 
 func (c *codexReader) response(ctx context.Context, id string) (json.RawMessage, error) {
@@ -220,6 +221,7 @@ func (c *codexReader) response(ctx context.Context, id string) (json.RawMessage,
 		var message struct {
 			ID     json.RawMessage `json:"id"`
 			Method json.RawMessage `json:"method"`
+			Params json.RawMessage `json:"params"`
 			Result json.RawMessage `json:"result"`
 			Error  json.RawMessage `json:"error"`
 		}
@@ -228,12 +230,17 @@ func (c *codexReader) response(ctx context.Context, id string) (json.RawMessage,
 		}
 		if message.Method != nil {
 			var method string
-			if json.Unmarshal(message.Method, &method) != nil || method == "" || message.ID != nil || message.Result != nil || message.Error != nil {
+			if json.Unmarshal(message.Method, &method) != nil || method == "" || message.ID != nil || message.Result != nil || message.Error != nil || c.notify != nil && len(message.Params) == 0 {
 				return nil, errCodexProtocol
+			}
+			if c.notify != nil {
+				if err := c.notify(method, message.Params); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
-		if string(message.ID) != id || message.Error != nil || len(message.Result) == 0 || string(message.Result) == "null" {
+		if string(message.ID) != id || len(message.Params) != 0 || message.Error != nil || len(message.Result) == 0 || string(message.Result) == "null" {
 			return nil, errCodexProtocol
 		}
 		return message.Result, nil

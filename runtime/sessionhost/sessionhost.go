@@ -25,6 +25,7 @@ type Host struct {
 	Session string
 	api     apiCaller
 	wait    func(context.Context, time.Duration) error
+	signal  signalProcess
 }
 
 type Capabilities struct {
@@ -151,6 +152,17 @@ func (h Host) OpenAtDirectory(ctx context.Context, name, directory string) (Work
 func (h Host) run(ctx context.Context, args []string) error {
 	_, err := herdrcmd.Run(ctx, h.Runner, h.Herdr, args)
 	return err
+}
+
+func (h Host) runEmpty(ctx context.Context, args []string) error {
+	result, err := herdrcmd.Run(ctx, h.Runner, h.Herdr, args)
+	if err != nil {
+		return err
+	}
+	if len(result.Stdout) != 0 || len(result.Stderr) != 0 {
+		return ErrStaleTarget
+	}
+	return nil
 }
 
 func (h Host) runJSON(ctx context.Context, args []string, target any) error {
