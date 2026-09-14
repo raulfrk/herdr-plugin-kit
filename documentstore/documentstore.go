@@ -13,6 +13,7 @@ var (
 	ErrConflict    = errors.New("document revision conflict")
 	ErrInvalidPath = errors.New("invalid document path")
 	ErrNotRegular  = errors.New("document is not a regular file")
+	ErrTooLarge    = errors.New("document exceeds the configured read limit")
 	ErrUnsupported = errors.New("document store is unsupported on this platform")
 )
 

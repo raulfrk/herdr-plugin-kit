@@ -75,6 +75,16 @@ func (s *Store) Close() error {
 
 // Read returns a coherent snapshot and its content revision.
 func (s *Store) Read(ctx context.Context, name string) (Document, error) {
+	return s.read(ctx, name, -1)
+}
+
+// ReadBounded returns a coherent snapshot while reading at most maxBytes+1
+// bytes. A negative limit retains Read's unbounded compatibility behavior.
+func (s *Store) ReadBounded(ctx context.Context, name string, maxBytes int) (Document, error) {
+	return s.read(ctx, name, maxBytes)
+}
+
+func (s *Store) read(ctx context.Context, name string, maxBytes int) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
@@ -93,7 +103,7 @@ func (s *Store) Read(ctx context.Context, name string) (Document, error) {
 		return Document{}, err
 	}
 
-	data, _, err := readRegular(ctx, parent, base)
+	data, _, err := readRegular(ctx, parent, base, maxBytes)
 	if err != nil {
 		return Document{}, err
 	}
@@ -104,18 +114,27 @@ func (s *Store) Read(ctx context.Context, name string) (Document, error) {
 // A zero expected revision requires name not to exist. The returned revision
 // is non-zero after rename, including when the following directory fsync fails.
 func (s *Store) Write(ctx context.Context, name string, data []byte, expected Revision) (result Revision, resultErr error) {
-	return s.write(ctx, name, data, expected, false)
+	return s.write(ctx, name, data, expected, false, -1)
+}
+
+// WriteBounded has Write's checked-write semantics while refusing to read or
+// publish a document larger than maxBytes.
+func (s *Store) WriteBounded(ctx context.Context, name string, data []byte, expected Revision, maxBytes int) (result Revision, resultErr error) {
+	return s.write(ctx, name, data, expected, false, maxBytes)
 }
 
 // WritePrivate has the same checked-write semantics as Write and always
 // publishes the resulting document with owner-only permissions.
 func (s *Store) WritePrivate(ctx context.Context, name string, data []byte, expected Revision) (result Revision, resultErr error) {
-	return s.write(ctx, name, data, expected, true)
+	return s.write(ctx, name, data, expected, true, -1)
 }
 
-func (s *Store) write(ctx context.Context, name string, data []byte, expected Revision, private bool) (result Revision, resultErr error) {
+func (s *Store) write(ctx context.Context, name string, data []byte, expected Revision, private bool, maxBytes int) (result Revision, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return Revision{}, err
+	}
+	if maxBytes >= 0 && len(data) > maxBytes {
+		return Revision{}, ErrTooLarge
 	}
 	parent, base, release, err := s.openParent(name)
 	if err != nil {
@@ -132,7 +151,7 @@ func (s *Store) write(ctx context.Context, name string, data []byte, expected Re
 		return Revision{}, err
 	}
 
-	current, metadata, err := readRegular(ctx, parent, base)
+	current, metadata, err := readRegular(ctx, parent, base, maxBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		if expected != (Revision{}) {
 			return Revision{}, ErrConflict
@@ -305,7 +324,7 @@ func flockContext(ctx context.Context, fd, operation int) error {
 	}
 }
 
-func readRegular(ctx context.Context, parent int, base string) ([]byte, *unix.Stat_t, error) {
+func readRegular(ctx context.Context, parent int, base string, maxBytes int) ([]byte, *unix.Stat_t, error) {
 	fd, err := unix.Openat(parent, base, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
@@ -322,23 +341,30 @@ func readRegular(ctx context.Context, parent int, base string) ([]byte, *unix.St
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, nil, fmt.Errorf("read document: %w", ErrNotRegular)
 	}
-	data, err := readAllContext(ctx, file)
+	data, err := readAllContext(ctx, file, maxBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read document: %w", err)
 	}
 	return data, &stat, nil
 }
 
-func readAllContext(ctx context.Context, file *os.File) ([]byte, error) {
+func readAllContext(ctx context.Context, file *os.File, maxBytes int) ([]byte, error) {
 	const bufferSize = 32768
 	data := make([]byte, 0, bufferSize)
 	buffer := make([]byte, bufferSize)
+	var reader io.Reader = file
+	if maxBytes >= 0 && maxBytes != int(^uint(0)>>1) {
+		reader = io.LimitReader(file, int64(maxBytes)+1)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		n, err := file.Read(buffer)
+		n, err := reader.Read(buffer)
 		data = append(data, buffer[:n]...)
+		if maxBytes >= 0 && len(data) > maxBytes {
+			return nil, ErrTooLarge
+		}
 		if errors.Is(err, io.EOF) {
 			return data, nil
 		}

@@ -94,6 +94,59 @@ func TestCheckedCreateReadReplaceAndConflict(t *testing.T) {
 	}
 }
 
+func TestReadBoundedExactLimitAndOversize(t *testing.T) {
+	root := t.TempDir()
+	store := openTestStore(t, root)
+	exact := []byte("12345678")
+	if err := os.WriteFile(filepath.Join(root, "exact.toml"), exact, ownerOnly); err != nil {
+		t.Fatal(err)
+	}
+	document, err := store.ReadBounded(context.Background(), "exact.toml", len(exact))
+	if err != nil || !bytes.Equal(document.Bytes, exact) || document.Revision != expectedRevision(exact) {
+		t.Fatalf("exact bounded read = (%q, %s, %v)", document.Bytes, document.Revision, err)
+	}
+	if _, err := store.ReadBounded(context.Background(), "exact.toml", len(exact)-1); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversize bounded read error = %v", err)
+	}
+	if document, err := store.ReadBounded(context.Background(), "exact.toml", -1); err != nil || !bytes.Equal(document.Bytes, exact) {
+		t.Fatalf("unbounded compatibility read = (%q, %v)", document.Bytes, err)
+	}
+	if document, err := store.ReadBounded(context.Background(), "exact.toml", int(^uint(0)>>1)); err != nil || !bytes.Equal(document.Bytes, exact) {
+		t.Fatalf("maximum-int bounded read = (%q, %v)", document.Bytes, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "empty.toml"), nil, ownerOnly); err != nil {
+		t.Fatal(err)
+	}
+	if document, err := store.ReadBounded(context.Background(), "empty.toml", 0); err != nil || len(document.Bytes) != 0 {
+		t.Fatalf("zero limit empty read = (%q, %v)", document.Bytes, err)
+	}
+	if _, err := store.ReadBounded(context.Background(), "exact.toml", 0); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("zero limit nonempty read error = %v", err)
+	}
+}
+
+func TestWriteBoundedRejectsOversizedCurrentAndReplacement(t *testing.T) {
+	root := t.TempDir()
+	store := openTestStore(t, root)
+	path := filepath.Join(root, "config.toml")
+	oversized := []byte("123456789")
+	if err := os.WriteFile(path, oversized, ownerOnly); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteBounded(context.Background(), "config.toml", []byte("next"), Revision{1}, 8); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized current write error = %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, oversized) {
+		t.Fatalf("oversized current bytes = %q, %v", got, err)
+	}
+	if _, err := store.WriteBounded(context.Background(), "config.toml", oversized, expectedRevision(oversized), 8); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized replacement write error = %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, oversized) {
+		t.Fatalf("oversized replacement bytes = %q, %v", got, err)
+	}
+}
+
 func TestPathConfinementAndRegularFiles(t *testing.T) {
 	outer := t.TempDir()
 	root := filepath.Join(outer, "root")

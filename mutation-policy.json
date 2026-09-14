@@ -9,6 +9,7 @@
     "runtime/internal/herdrcmd/",
     "runtime/internal/herdrid/",
     "runtime/interop/",
+    "runtime/keybindinghost/",
     "runtime/sessionhost/",
     "internal/scaffold/",
     "ui/snapshot/"
