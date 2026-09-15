@@ -397,12 +397,26 @@ func TestCodexConversionShellObservationRejectsRevisionDriftWithoutAPIError(t *t
 	}
 }
 
-func TestCodexConverterFallbackIdentityTimeoutStopsAfterOnePoll(t *testing.T) {
+type cancelAfterRun struct {
+	command.Runner
+	cancel context.CancelFunc
+}
+
+func (r cancelAfterRun) Run(ctx context.Context, executable string, args []string) (command.Result, error) {
+	result, err := r.Runner.Run(ctx, executable, args)
+	r.cancel()
+	return result, err
+}
+
+func TestCodexConverterFallbackIdentityCancellationStopsAfterOnePoll(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.runner.results = nil
 	harness.runner.calls = nil
-	_, err := harness.converter.awaitFallbackIdentity(context.Background(), managedOrigin(), harness.source.CWD, managedSourceID, 99, 5*time.Millisecond)
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrManagedStale) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	harness.converter.launcher.Host.Runner = cancelAfterRun{Runner: harness.runner, cancel: cancel}
+	_, err := harness.converter.awaitFallbackIdentity(ctx, managedOrigin(), harness.source.CWD, managedSourceID, 99, time.Second)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrManagedStale) {
 		t.Fatalf("error=%v", err)
 	}
 	if len(harness.runner.calls) != 1 {
