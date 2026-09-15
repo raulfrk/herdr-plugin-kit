@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { deriveOMPStatusSocket } from "./omp-status-address";
+import addressExtension, { deriveOMPStatusSocket } from "./omp-status-address";
 
 describe("OMP status socket address", () => {
+  test("exports a valid OMP extension factory", () => {
+    expect(typeof addressExtension).toBe("function");
+    expect(addressExtension()).toBeUndefined();
+  });
+
   test("matches the supported Herdr named-session vector", () => {
     const herdr = "/home/raul/.config/herdr/sessions/hpk-api5-prompt-live/herdr.sock";
     const derived = deriveOMPStatusSocket(herdr, "w1:p3");

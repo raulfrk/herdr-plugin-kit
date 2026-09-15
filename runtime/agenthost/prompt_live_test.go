@@ -30,9 +30,42 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(version.Stdout)) != "1.18.30" {
 		t.Fatalf("HERDR_PLUGIN_KIT_OPENCODE_BIN must report 1.18.30: stdout=%q stderr=%q error=%v", version.Stdout, version.Stderr, err)
 	}
+	openCodeConfigDirectory := os.Getenv("OPENCODE_CONFIG_DIR")
+	if !filepath.IsAbs(openCodeConfigDirectory) || filepath.Clean(openCodeConfigDirectory) != openCodeConfigDirectory {
+		t.Fatal("OPENCODE_CONFIG_DIR must be the clean absolute task OpenCode configuration directory inherited by the task server and Herdr session")
+	}
+	openCodeDataHome := os.Getenv("XDG_DATA_HOME")
+	if !filepath.IsAbs(openCodeDataHome) || filepath.Clean(openCodeDataHome) != openCodeDataHome {
+		t.Fatal("XDG_DATA_HOME must be the clean absolute task OpenCode data root inherited by the task server and Herdr session")
+	}
+	if os.Getenv("OPENCODE_TUI_CONFIG") != filepath.Join(openCodeConfigDirectory, "tui.jsonc") {
+		t.Fatal("OPENCODE_TUI_CONFIG must name the task OpenCode TUI configuration inherited by the task Herdr session")
+	}
+	for _, relative := range []string{"herdr-tui-session.js", "tui.jsonc"} {
+		integration := filepath.Join(openCodeConfigDirectory, relative)
+		if info, statErr := os.Stat(integration); statErr != nil || !info.Mode().IsRegular() {
+			t.Fatalf("task OpenCode profile must contain the Herdr 0.8.2 identity integration at %s: %v", integration, statErr)
+		}
+	}
 	ompAgentDirectory := os.Getenv("HERDR_PLUGIN_KIT_OMP_AGENT_DIR")
 	if !filepath.IsAbs(ompAgentDirectory) || filepath.Clean(ompAgentDirectory) != ompAgentDirectory {
-		t.Fatal("HERDR_PLUGIN_KIT_OMP_AGENT_DIR must be the clean absolute task OMP agent directory inherited by the task Herdr session")
+		t.Fatal("HERDR_PLUGIN_KIT_OMP_AGENT_DIR must be the clean absolute task OMP agent directory")
+	}
+	if os.Getenv("PI_CODING_AGENT_DIR") != ompAgentDirectory {
+		t.Fatal("PI_CODING_AGENT_DIR must equal HERDR_PLUGIN_KIT_OMP_AGENT_DIR and be inherited by the task Herdr session")
+	}
+	herdrOMPExtension := filepath.Join(ompAgentDirectory, "extensions", "herdr-omp-agent-state.ts")
+	if info, statErr := os.Stat(herdrOMPExtension); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("task OMP profile must contain the Herdr 0.8.2 identity extension at %s: %v", herdrOMPExtension, statErr)
+	}
+	liveCodexPolicy := ManagedCodexPolicy{
+		Model:           os.Getenv("HERDR_PLUGIN_KIT_CODEX_MODEL"),
+		ReasoningEffort: os.Getenv("HERDR_PLUGIN_KIT_CODEX_REASONING_EFFORT"),
+		ApprovalPolicy:  os.Getenv("HERDR_PLUGIN_KIT_CODEX_APPROVAL_POLICY"),
+		SandboxMode:     os.Getenv("HERDR_PLUGIN_KIT_CODEX_SANDBOX_MODE"),
+	}
+	if err := validateManagedPolicy(liveCodexPolicy); err != nil {
+		t.Fatalf("explicit live Codex profile policy is invalid: %v", err)
 	}
 	ompExtension := filepath.Join(ompAgentDirectory, "extensions", "herdr-plugin-kit-status.ts")
 	ompAddressExtension := filepath.Join(ompAgentDirectory, "extensions", "herdr-plugin-kit-status-address.ts")
@@ -121,7 +154,7 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 	}{
 		{kind: "omp", argv: []string{"omp", "--model", "openai-codex/gpt-5.6-sol", "--no-skills", "--no-rules", "--no-tools"}, directory: directory},
 		{kind: "opencode", argv: []string{openCodeBinary}, directory: directory, openCode: server},
-		{kind: "codex", argv: []string{"codex"}, directory: repositoryDirectory, codexPolicy: managedPolicy()},
+		{kind: "codex", argv: []string{"codex"}, directory: repositoryDirectory, codexPolicy: liveCodexPolicy},
 	}
 	for _, test := range tests {
 		t.Run(test.kind, func(t *testing.T) {

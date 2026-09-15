@@ -545,11 +545,12 @@ func TestNativeEmptyComposerParsersUseSupportedVersionShapes(t *testing.T) {
 	}
 	blank := "\x1b[38;2;255;255;255;48;2;30;30;30m        \x1b[0m"
 	empty := openCodeEmptyComposerANSI("sidebar")
+	freeModel := strings.Replace(empty, "Build · GPT-5.6 Sol OpenAI · medium", "Build · Big Pickle OpenCode Zen", 1)
 	draft := strings.Replace(empty, blank, "\x1b[38;2;255;255;255;48;2;30;30;30m draft  \x1b[0m", 1)
 	wrongStatus := strings.Replace(empty, "Build · GPT-5.6 Sol OpenAI · medium", "user draft", 1)
 	alternateTheme := strings.ReplaceAll(empty, "48;2;30;30;30", "48;2;1;2;3")
 	indexedTheme := strings.ReplaceAll(empty, "48;2;30;30;30", "48;5;236")
-	if !emptyOpenCodeComposer(empty) || !emptyOpenCodeComposer(alternateTheme) || !emptyOpenCodeComposer(indexedTheme) || emptyOpenCodeComposer(draft) || emptyOpenCodeComposer(wrongStatus) || emptyOpenCodeComposer("header") {
+	if !emptyOpenCodeComposer(empty) || !emptyOpenCodeComposer(freeModel) || !emptyOpenCodeComposer(alternateTheme) || !emptyOpenCodeComposer(indexedTheme) || emptyOpenCodeComposer(draft) || emptyOpenCodeComposer(wrongStatus) || emptyOpenCodeComposer("header") {
 		t.Fatal("OpenCode composer shape misclassified")
 	}
 }

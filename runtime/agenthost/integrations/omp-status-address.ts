@@ -17,3 +17,7 @@ export function deriveOMPStatusSocket(herdrSocket: string, paneID: string): stri
 
 const derived = deriveOMPStatusSocket(process.env.HERDR_SOCKET_PATH ?? "", process.env.HERDR_PANE_ID ?? "");
 if (derived) process.env.HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET = derived;
+
+// OMP requires an extension factory even though this companion's work must
+// happen during module loading, before the status extension factory runs.
+export default function () {}

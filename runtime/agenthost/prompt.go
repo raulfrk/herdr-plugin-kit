@@ -324,7 +324,7 @@ func emptyOpenCodeComposer(text string) bool {
 		if status >= 0 {
 			statusLine = strings.TrimSpace(managedANSI.ReplaceAllString(lines[status], ""))
 		}
-		if !strings.HasPrefix(statusLine, "┃  ") || strings.Count(statusLine, "·") < 2 {
+		if !strings.HasPrefix(statusLine, "┃  ") || strings.Count(statusLine, "·") < 1 {
 			return false
 		}
 		background, ok := openCodeComposerBackground(lines[status])
