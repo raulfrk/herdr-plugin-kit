@@ -573,6 +573,16 @@ func TestCommandEncodingRoundTripsAndLeavesShellAlive(t *testing.T) {
 	}
 }
 
+func TestEncodeCommandExactSizeLimit(t *testing.T) {
+	exact, err := encodeCommand([]string{strings.Repeat("x", MaxCommandLen-2)})
+	if err != nil || len(exact) != MaxCommandLen {
+		t.Fatalf("exact-limit command length = %d, error = %v", len(exact), err)
+	}
+	if _, err := encodeCommand([]string{strings.Repeat("x", MaxCommandLen-1)}); err == nil {
+		t.Fatal("oversized encoded command succeeded")
+	}
+}
+
 func TestLaunchCleansPlausibleCreatedTargetOnResponseDrift(t *testing.T) {
 	t.Run("new tab", func(t *testing.T) {
 		argv := []string{"agent"}

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -144,6 +145,48 @@ func TestWriteBoundedRejectsOversizedCurrentAndReplacement(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, oversized) {
 		t.Fatalf("oversized replacement bytes = %q, %v", got, err)
+	}
+}
+
+func TestWriteBoundedReplacementLimitBoundaries(t *testing.T) {
+	root := t.TempDir()
+	store := openTestStore(t, root)
+
+	if _, err := store.WriteBounded(context.Background(), "zero.toml", []byte("x"), Revision{}, 0); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("zero-limit nonempty write error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "zero.toml")); !os.IsNotExist(err) {
+		t.Fatalf("zero-limit target exists: %v", err)
+	}
+
+	exact := []byte("12345678")
+	revision, err := store.WriteBounded(context.Background(), "exact.toml", exact, Revision{}, len(exact))
+	if err != nil || revision != expectedRevision(exact) {
+		t.Fatalf("exact-limit write = (%s, %v)", revision, err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, "exact.toml"))
+	if err != nil || !bytes.Equal(written, exact) {
+		t.Fatalf("exact-limit bytes = (%q, %v)", written, err)
+	}
+}
+
+func TestReadAllContextZeroLimitConsumesOnlySentinelByte(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "document")
+	if err := os.WriteFile(path, []byte("12345678"), ownerOnly); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	if _, err := readAllContext(context.Background(), file, 0); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("zero-limit read error = %v", err)
+	}
+	offset, err := file.Seek(0, io.SeekCurrent)
+	if err != nil || offset != 1 {
+		t.Fatalf("zero-limit read offset = (%d, %v), want 1", offset, err)
 	}
 }
 
