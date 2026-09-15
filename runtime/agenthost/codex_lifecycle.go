@@ -2,6 +2,7 @@ package agenthost
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,8 +21,14 @@ type EffectiveCodexPolicy struct {
 	Model, ReasoningEffort, ApprovalPolicy, ApprovalsReviewer  string
 	SandboxMode, PermissionProfile, ModelProvider, ServiceTier string
 	PermissionProfileExtends                                   string
+	MultiAgentMode                                             string
 	CWD                                                        string
+	SandboxNetworkAccess                                       bool
+	SandboxExcludeSlashTmp                                     bool
+	SandboxExcludeTmpdirEnvVar                                 bool
+	SandboxWritableRoots                                       []string
 	RuntimeWorkspaceRoots                                      []string
+	InstructionSources                                         []string
 }
 
 type codexPreflight struct {
@@ -30,16 +37,24 @@ type codexPreflight struct {
 }
 
 type codexThreadIdentity struct {
-	ID, CWD, ForkedFromID, ModelProvider string
+	ID, CWD, ForkedFromID, ModelProvider, Model, ReasoningEffort string
+}
+
+type codexConstraintSnapshot struct {
+	Config       map[string]json.RawMessage
+	Requirements map[string]json.RawMessage
 }
 
 type managedVerifier interface {
 	Preflight(context.Context, string, ManagedCodexPolicy) (codexPreflight, error)
+	ReadConstraints(context.Context, string) (codexConstraintSnapshot, error)
 	Arm() error
 	ConfirmIdentity(context.Context, ManagedOperation, string, string) (codexThreadIdentity, error)
 	ReadThread(context.Context, string) (codexThreadIdentity, error)
 	RecheckIdentity(context.Context, string) (codexThreadIdentity, error)
 	ReadEffective(context.Context, string) (EffectiveCodexPolicy, error)
+	ReconcileEffective(context.Context, string, EffectiveCodexPolicy) (EffectiveCodexPolicy, error)
+	ReadStableHistory(context.Context, string) ([32]byte, error)
 	DeleteThread(context.Context, string) error
 	Close() error
 }
@@ -162,6 +177,14 @@ func (c *codexLifecycle) observe(method string, params json.RawMessage) error {
 }
 
 func (c *codexLifecycle) Preflight(ctx context.Context, cwd string, requested ManagedCodexPolicy) (codexPreflight, error) {
+	snapshot, err := c.ReadConstraints(ctx, cwd)
+	if err != nil {
+		return codexPreflight{}, err
+	}
+	return snapshot.validate(cwd, requested)
+}
+
+func (c *codexLifecycle) ReadConstraints(ctx context.Context, cwd string) (codexConstraintSnapshot, error) {
 	var configResponse struct {
 		Config map[string]json.RawMessage `json:"config"`
 	}
@@ -169,20 +192,63 @@ func (c *codexLifecycle) Preflight(ctx context.Context, cwd string, requested Ma
 		CWD           string `json:"cwd"`
 		IncludeLayers bool   `json:"includeLayers"`
 	}{cwd, false}, &configResponse); err != nil {
-		return codexPreflight{}, err
-	}
-	preflight, err := parseCodexConfig(configResponse.Config, cwd, requested)
-	if err != nil {
-		return codexPreflight{}, err
+		return codexConstraintSnapshot{}, err
 	}
 	var requirementsResponse map[string]json.RawMessage
 	if err := c.call(ctx, "configRequirements/read", struct{}{}, &requirementsResponse); err != nil {
+		return codexConstraintSnapshot{}, err
+	}
+	if configResponse.Config == nil || requirementsResponse == nil {
+		return codexConstraintSnapshot{}, errCodexProtocol
+	}
+	return codexConstraintSnapshot{Config: configResponse.Config, Requirements: requirementsResponse}, nil
+}
+
+func (s codexConstraintSnapshot) validate(cwd string, requested ManagedCodexPolicy) (codexPreflight, error) {
+	preflight, err := parseCodexConfig(s.Config, cwd, requested)
+	if err != nil {
 		return codexPreflight{}, err
 	}
-	if err := validateRequirementsResponse(requirementsResponse, requested, preflight); err != nil {
+	if err := validateRequirementsResponse(s.Requirements, requested, preflight); err != nil {
 		return codexPreflight{}, err
 	}
 	return preflight, nil
+}
+
+func (s codexConstraintSnapshot) equal(other codexConstraintSnapshot) bool {
+	return len(s.driftFields(other)) == 0
+}
+
+func (s codexConstraintSnapshot) driftFields(other codexConstraintSnapshot) []string {
+	var fields []string
+	collect := func(prefix string, left, right map[string]json.RawMessage) {
+		seen := make(map[string]struct{}, len(left)+len(right))
+		for name := range left {
+			seen[name] = struct{}{}
+		}
+		for name := range right {
+			seen[name] = struct{}{}
+		}
+		for name := range seen {
+			if !sameJSONValue(left[name], right[name]) {
+				fields = append(fields, prefix+name)
+			}
+		}
+	}
+	collect("config.", s.Config, other.Config)
+	collect("requirements.", s.Requirements, other.Requirements)
+	slices.Sort(fields)
+	return fields
+}
+
+func sameJSONValue(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	leftCanonical, leftErr := json.Marshal(leftValue)
+	rightCanonical, rightErr := json.Marshal(rightValue)
+	return leftErr == nil && rightErr == nil && string(leftCanonical) == string(rightCanonical)
 }
 
 func (c *codexLifecycle) Arm() error {
@@ -286,6 +352,89 @@ func (c *codexLifecycle) ReadEffective(ctx context.Context, threadID string) (Ef
 	return effective, nil
 }
 
+func (c *codexLifecycle) ReconcileEffective(ctx context.Context, threadID string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
+	params := map[string]any{
+		"threadId":       threadID,
+		"model":          desired.Model,
+		"effort":         desired.ReasoningEffort,
+		"approvalPolicy": desired.ApprovalPolicy,
+	}
+	if desired.PermissionProfile != "" {
+		params["permissions"] = desired.PermissionProfile
+	} else {
+		typeName, ok := sandboxAppServerType(desired.SandboxMode)
+		if !ok {
+			return EffectiveCodexPolicy{}, ErrManagedUnsupported
+		}
+		sandbox := map[string]any{"type": typeName}
+		switch desired.SandboxMode {
+		case "read-only":
+			sandbox["networkAccess"] = desired.SandboxNetworkAccess
+		case "workspace-write":
+			sandbox["networkAccess"] = desired.SandboxNetworkAccess
+			sandbox["writableRoots"] = append([]string{}, desired.SandboxWritableRoots...)
+			sandbox["excludeSlashTmp"] = desired.SandboxExcludeSlashTmp
+			sandbox["excludeTmpdirEnvVar"] = desired.SandboxExcludeTmpdirEnvVar
+		}
+		params["sandboxPolicy"] = sandbox
+	}
+	var response json.RawMessage
+	if err := c.call(ctx, "thread/settings/update", params, &response); err != nil {
+		return EffectiveCodexPolicy{}, errors.Join(ErrManagedSettingsUnknown, err)
+	}
+	if string(response) != "{}" {
+		return EffectiveCodexPolicy{}, errors.Join(ErrManagedSettingsUnknown, errCodexProtocol)
+	}
+	effective, err := c.ReadEffective(ctx, threadID)
+	if err != nil {
+		return EffectiveCodexPolicy{}, errors.Join(ErrManagedSettingsUnknown, err)
+	}
+	if drift := requiredPolicyDrift(effective, desired); drift != "" {
+		return effective, fmt.Errorf("reconciled Codex policy drift (%s): %w", drift, ErrManagedPolicyDrift)
+	}
+	return effective, nil
+}
+
+func (c *codexLifecycle) ReadStableHistory(ctx context.Context, threadID string) ([32]byte, error) {
+	var response struct {
+		Thread struct {
+			ID    string `json:"id"`
+			Turns []struct {
+				ID    string          `json:"id"`
+				Items json.RawMessage `json:"items"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := c.call(ctx, "thread/read", struct {
+		ThreadID     string `json:"threadId"`
+		IncludeTurns bool   `json:"includeTurns"`
+	}{threadID, true}, &response); err != nil {
+		return [32]byte{}, err
+	}
+	if response.Thread.ID != threadID || len(response.Thread.Turns) == 0 {
+		return [32]byte{}, errCodexProtocol
+	}
+	for index, turn := range response.Thread.Turns {
+		if turn.ID == "" || len(turn.Items) == 0 || !json.Valid(turn.Items) {
+			return [32]byte{}, errCodexProtocol
+		}
+		var items any
+		if json.Unmarshal(turn.Items, &items) != nil {
+			return [32]byte{}, errCodexProtocol
+		}
+		canonical, err := json.Marshal(items)
+		if err != nil {
+			return [32]byte{}, errCodexProtocol
+		}
+		response.Thread.Turns[index].Items = canonical
+	}
+	raw, err := json.Marshal(response.Thread.Turns)
+	if err != nil {
+		return [32]byte{}, errCodexProtocol
+	}
+	return sha256.Sum256(raw), nil
+}
+
 func (c *codexLifecycle) DeleteThread(ctx context.Context, threadID string) error {
 	if !validCodexThreadID(threadID) {
 		return errCodexProtocol
@@ -297,10 +446,12 @@ func (c *codexLifecycle) DeleteThread(ctx context.Context, threadID string) erro
 }
 
 type codexThread struct {
-	ID            string  `json:"id"`
-	CWD           string  `json:"cwd"`
-	ForkedFromID  *string `json:"forkedFromId"`
-	ModelProvider string  `json:"modelProvider"`
+	ID              string  `json:"id"`
+	CWD             string  `json:"cwd"`
+	ForkedFromID    *string `json:"forkedFromId"`
+	ModelProvider   string  `json:"modelProvider"`
+	Model           *string `json:"model"`
+	ReasoningEffort *string `json:"reasoningEffort"`
 }
 
 func (t codexThread) identity() (codexThreadIdentity, error) {
@@ -308,6 +459,12 @@ func (t codexThread) identity() (codexThreadIdentity, error) {
 		return codexThreadIdentity{}, errCodexProtocol
 	}
 	identity := codexThreadIdentity{ID: t.ID, CWD: t.CWD, ModelProvider: t.ModelProvider}
+	if t.Model != nil {
+		identity.Model = *t.Model
+	}
+	if t.ReasoningEffort != nil {
+		identity.ReasoningEffort = *t.ReasoningEffort
+	}
 	if t.ForkedFromID != nil {
 		if !validCodexThreadID(*t.ForkedFromID) {
 			return codexThreadIdentity{}, errCodexProtocol
@@ -326,7 +483,11 @@ type codexEffectiveResponse struct {
 	ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
 	ApprovalsReviewer string          `json:"approvalsReviewer"`
 	Sandbox           struct {
-		Type string `json:"type"`
+		Type                string   `json:"type"`
+		NetworkAccess       bool     `json:"networkAccess"`
+		WritableRoots       []string `json:"writableRoots"`
+		ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
+		ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
 	} `json:"sandbox"`
 	ActivePermissionProfile *struct {
 		ID      string  `json:"id"`
@@ -334,6 +495,8 @@ type codexEffectiveResponse struct {
 	} `json:"activePermissionProfile"`
 	ReasoningEffort       *string  `json:"reasoningEffort"`
 	RuntimeWorkspaceRoots []string `json:"runtimeWorkspaceRoots"`
+	InstructionSources    []string `json:"instructionSources"`
+	MultiAgentMode        string   `json:"multiAgentMode"`
 }
 
 func (r codexEffectiveResponse) effective(threadID string) (EffectiveCodexPolicy, error) {
@@ -349,7 +512,27 @@ func (r codexEffectiveResponse) effective(threadID string) (EffectiveCodexPolicy
 	if !ok {
 		return EffectiveCodexPolicy{}, errCodexProtocol
 	}
-	effective := EffectiveCodexPolicy{Model: r.Model, ReasoningEffort: *r.ReasoningEffort, ApprovalPolicy: approval, ApprovalsReviewer: r.ApprovalsReviewer, SandboxMode: sandbox, ModelProvider: r.ModelProvider, CWD: r.CWD}
+	for _, root := range r.Sandbox.WritableRoots {
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			return EffectiveCodexPolicy{}, errCodexProtocol
+		}
+	}
+	if sandbox != "workspace-write" && (len(r.Sandbox.WritableRoots) != 0 || r.Sandbox.ExcludeSlashTmp || r.Sandbox.ExcludeTmpdirEnvVar) {
+		return EffectiveCodexPolicy{}, errCodexProtocol
+	}
+	if sandbox == "danger-full-access" && r.Sandbox.NetworkAccess {
+		return EffectiveCodexPolicy{}, errCodexProtocol
+	}
+	if r.MultiAgentMode == "" {
+		return EffectiveCodexPolicy{}, errCodexProtocol
+	}
+	effective := EffectiveCodexPolicy{
+		Model: r.Model, ReasoningEffort: *r.ReasoningEffort, ApprovalPolicy: approval,
+		ApprovalsReviewer: r.ApprovalsReviewer, SandboxMode: sandbox, ModelProvider: r.ModelProvider,
+		MultiAgentMode: r.MultiAgentMode, CWD: r.CWD, SandboxNetworkAccess: r.Sandbox.NetworkAccess,
+		SandboxExcludeSlashTmp: r.Sandbox.ExcludeSlashTmp, SandboxExcludeTmpdirEnvVar: r.Sandbox.ExcludeTmpdirEnvVar,
+		SandboxWritableRoots: append([]string(nil), r.Sandbox.WritableRoots...),
+	}
 	if r.ServiceTier != nil {
 		effective.ServiceTier = *r.ServiceTier
 	}
@@ -371,6 +554,12 @@ func (r codexEffectiveResponse) effective(threadID string) (EffectiveCodexPolicy
 		}
 	}
 	effective.RuntimeWorkspaceRoots = append([]string(nil), r.RuntimeWorkspaceRoots...)
+	for _, source := range r.InstructionSources {
+		if validateBounded("instruction source", source, maxPathBytes, false) != nil || strings.ContainsRune(source, 0) {
+			return EffectiveCodexPolicy{}, errCodexProtocol
+		}
+	}
+	effective.InstructionSources = append([]string(nil), r.InstructionSources...)
 	return effective, nil
 }
 
@@ -556,6 +745,19 @@ func sandboxCLIValue(protocol string) (string, bool) {
 	}
 }
 
+func sandboxAppServerType(value string) (string, bool) {
+	switch value {
+	case "read-only":
+		return "readOnly", true
+	case "workspace-write":
+		return "workspaceWrite", true
+	case "danger-full-access":
+		return "dangerFullAccess", true
+	default:
+		return "", false
+	}
+}
+
 func sameRequiredPolicy(actual, expected EffectiveCodexPolicy) bool {
 	return requiredPolicyDrift(actual, expected) == ""
 }
@@ -567,12 +769,22 @@ func requiredPolicyDrift(actual, expected EffectiveCodexPolicy) string {
 		"approval": actual.ApprovalPolicy != expected.ApprovalPolicy, "reviewer": actual.ApprovalsReviewer != expected.ApprovalsReviewer,
 		"sandbox": actual.SandboxMode != expected.SandboxMode, "permission_profile": actual.PermissionProfile != expected.PermissionProfile,
 		"permission_profile_extends": actual.PermissionProfileExtends != expected.PermissionProfileExtends,
+		"sandbox_network_access":     actual.SandboxNetworkAccess != expected.SandboxNetworkAccess,
+		"sandbox_exclude_slash_tmp":  actual.SandboxExcludeSlashTmp != expected.SandboxExcludeSlashTmp,
+		"sandbox_exclude_tmpdir_env": actual.SandboxExcludeTmpdirEnvVar != expected.SandboxExcludeTmpdirEnvVar,
 		"model_provider":             actual.ModelProvider != expected.ModelProvider, "service_tier": actual.ServiceTier != expected.ServiceTier,
-		"cwd": actual.CWD != expected.CWD,
+		"multi_agent_mode": actual.MultiAgentMode != expected.MultiAgentMode,
+		"cwd":              actual.CWD != expected.CWD,
 	} {
 		if different {
 			fields = append(fields, name)
 		}
+	}
+	if !slices.Equal(actual.InstructionSources, expected.InstructionSources) {
+		fields = append(fields, "instruction_sources")
+	}
+	if !slices.Equal(actual.SandboxWritableRoots, expected.SandboxWritableRoots) {
+		fields = append(fields, "sandbox_writable_roots")
 	}
 	if len(actual.RuntimeWorkspaceRoots) != len(expected.RuntimeWorkspaceRoots) {
 		fields = append(fields, "runtime_workspace_roots")

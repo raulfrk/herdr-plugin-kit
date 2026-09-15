@@ -46,6 +46,9 @@ func (f *fakeManagedService) callCount() int {
 type fakeManagedVerifier struct {
 	preflight    codexPreflight
 	preflightErr error
+	constraints  codexConstraintSnapshot
+	history      [32]byte
+	historyErr   error
 	confirm      codexThreadIdentity
 	confirmErr   error
 	read         []codexThreadIdentity
@@ -53,6 +56,9 @@ type fakeManagedVerifier struct {
 	audit        EffectiveCodexPolicy
 	audits       []EffectiveCodexPolicy
 	auditErr     error
+	reconcile    EffectiveCodexPolicy
+	reconcileErr error
+	reconciles   []EffectiveCodexPolicy
 	recheckErr   error
 	rechecks     []codexThreadIdentity
 	recheckErrs  []error
@@ -67,6 +73,9 @@ type fakeManagedVerifier struct {
 
 func (f *fakeManagedVerifier) Preflight(context.Context, string, ManagedCodexPolicy) (codexPreflight, error) {
 	return f.preflight, f.preflightErr
+}
+func (f *fakeManagedVerifier) ReadConstraints(context.Context, string) (codexConstraintSnapshot, error) {
+	return f.constraints, f.preflightErr
 }
 func (f *fakeManagedVerifier) Arm() error { f.armed++; return nil }
 func (f *fakeManagedVerifier) ConfirmIdentity(_ context.Context, operation ManagedOperation, source, id string) (codexThreadIdentity, error) {
@@ -102,6 +111,16 @@ func (f *fakeManagedVerifier) ReadEffective(context.Context, string) (EffectiveC
 		return value, f.auditErr
 	}
 	return f.audit, f.auditErr
+}
+func (f *fakeManagedVerifier) ReconcileEffective(_ context.Context, _ string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
+	f.reconciles = append(f.reconciles, desired)
+	if reflect.DeepEqual(f.reconcile, EffectiveCodexPolicy{}) {
+		return desired, f.reconcileErr
+	}
+	return f.reconcile, f.reconcileErr
+}
+func (f *fakeManagedVerifier) ReadStableHistory(context.Context, string) ([32]byte, error) {
+	return f.history, f.historyErr
 }
 func (f *fakeManagedVerifier) DeleteThread(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
@@ -336,6 +355,23 @@ func TestManagedCodexResumePrelaunchFailureNeverAdoptsExistingProcess(t *testing
 	}
 }
 
+func TestManagedCodexResumeShellGuardFailureSendsNoInput(t *testing.T) {
+	launcher, _, topology, verifier, _, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	request.ThreadID, request.Placement = managedOriginalID, ""
+	verifier.read = []codexThreadIdentity{{ID: managedOriginalID, CWD: request.Directory, ModelProvider: "openai"}}
+	guardCalls := 0
+	request.resumeShellGuard = func(context.Context) error {
+		guardCalls++
+		return ErrManagedPaneBusy
+	}
+	if _, err := launcher.Launch(context.Background(), request); !errors.Is(err, ErrManagedPaneBusy) {
+		t.Fatalf("error=%v", err)
+	}
+	if guardCalls != 1 || len(topology.runs) != 0 || len(topology.stops) != 0 || len(topology.cleanups) != 0 {
+		t.Fatalf("guard=%d runs=%v stops=%v cleanups=%v", guardCalls, topology.runs, topology.stops, topology.cleanups)
+	}
+}
+
 func TestManagedCleanupNeverSubstitutesCapturedPID(t *testing.T) {
 	topology := &fakeManagedTopology{stopErr: errors.New("captured process changed"), pid: 202}
 	cleanup := &managedCleanup{
@@ -533,6 +569,61 @@ func TestManagedCodexResumeRunsExactIDInCallerProvedShell(t *testing.T) {
 	}
 	if err := managed.Cleanup(context.Background()); err != nil || len(topology.stops) != 1 || len(topology.cleanups) != 0 {
 		t.Fatalf("cleanup=%v stops=%v panes=%v", err, topology.stops, topology.cleanups)
+	}
+}
+
+func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *testing.T) {
+	launcher, service, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	request.ThreadID, request.Placement = managedOriginalID, ""
+	source := managedPreflight(request.Directory).EffectiveCodexPolicy
+	source.ModelProvider = "openai"
+	source.MultiAgentMode = "explicitRequestOnly"
+	target := source
+	target.SandboxMode = "read-only"
+	target.ReasoningEffort = "high"
+	request.Policy = ManagedCodexPolicy{Model: target.Model, ReasoningEffort: target.ReasoningEffort, ApprovalPolicy: target.ApprovalPolicy, SandboxMode: target.SandboxMode}
+	request.resumeSourcePolicy, request.resumeTargetPolicy = &source, &target
+	var discoveryPolicy ManagedCodexPolicy
+	launcher.discover = func(_ context.Context, got sessionhost.Origin, cwd string, _ []string, _ CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
+		discoveryPolicy = policy
+		agent := managedAgent(got, cwd, managedOriginalID, false)
+		agent.Session = nil
+		return agent, managedOriginalID, nil
+	}
+	verifier.read = []codexThreadIdentity{{ID: managedOriginalID, CWD: request.Directory, ModelProvider: "openai"}}
+	drifted := target
+	drifted.SandboxMode = "danger-full-access"
+	verifier.audits = []EffectiveCodexPolicy{source, drifted}
+	verifier.reconcile = target
+	verifier.recheck.Model, verifier.recheck.ReasoningEffort = target.Model, target.ReasoningEffort
+	runner.results = []command.Result{{}, managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false)), managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false)), managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false))}
+	managed, err := launcher.Launch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"codex", "resume", "--remote", "unix://" + service.snapshot.SocketPath, "--cd", request.Directory, managedOriginalID}
+	wantDiscovery := ManagedCodexPolicy{Model: source.Model, ReasoningEffort: source.ReasoningEffort, ApprovalPolicy: source.ApprovalPolicy, SandboxMode: source.SandboxMode}
+	if !reflect.DeepEqual(discoveryPolicy, wantDiscovery) || !reflect.DeepEqual(managed.Argv, want) || len(topology.runs) != 1 || !reflect.DeepEqual(topology.runs[0], want) || len(verifier.reconciles) != 1 || requiredPolicyDrift(verifier.reconciles[0], target) != "" || requiredPolicyDrift(managed.Policy, target) != "" {
+		t.Fatalf("managed=%+v discovery=%+v runs=%q reconciles=%+v", managed, discoveryPolicy, topology.runs, verifier.reconciles)
+	}
+}
+
+func TestManagedCodexConversionResumeUnknownSettingsOutcomeCleansExactAttempt(t *testing.T) {
+	launcher, _, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	request.ThreadID, request.Placement = managedOriginalID, ""
+	source := managedPreflight(request.Directory).EffectiveCodexPolicy
+	source.ModelProvider = "openai"
+	target := source
+	target.SandboxMode = "read-only"
+	request.Policy = ManagedCodexPolicy{Model: target.Model, ReasoningEffort: target.ReasoningEffort, ApprovalPolicy: target.ApprovalPolicy, SandboxMode: target.SandboxMode}
+	request.resumeSourcePolicy, request.resumeTargetPolicy = &source, &target
+	verifier.read = []codexThreadIdentity{{ID: managedOriginalID, CWD: request.Directory, ModelProvider: "openai"}}
+	verifier.audits = []EffectiveCodexPolicy{source, source}
+	verifier.reconcileErr = ErrManagedSettingsUnknown
+	runner.results = []command.Result{{}, managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false)), managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false))}
+	managed, err := launcher.Launch(context.Background(), request)
+	if !errors.Is(err, ErrManagedSettingsUnknown) || managed != nil || len(verifier.reconciles) != 1 || len(topology.stops) != 1 || topology.stops[0].PID != 99 || len(topology.cleanups) != 0 {
+		t.Fatalf("managed=%+v error=%v reconciles=%d stops=%+v cleanups=%+v", managed, err, len(verifier.reconciles), topology.stops, topology.cleanups)
 	}
 }
 

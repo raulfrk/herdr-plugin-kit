@@ -31,11 +31,12 @@ const (
 )
 
 var (
-	ErrManagedUnsupported = errors.New("managed Codex operation is unsupported")
-	ErrManagedPolicyDrift = errors.New("managed Codex policy drift")
-	ErrManagedStale       = errors.New("managed Codex state is stale")
-	ErrManagedAmbiguous   = errors.New("managed Codex state is ambiguous")
-	ErrManagedCleanup     = errors.New("managed Codex cleanup is incomplete")
+	ErrManagedUnsupported     = errors.New("managed Codex operation is unsupported")
+	ErrManagedPolicyDrift     = errors.New("managed Codex policy drift")
+	ErrManagedStale           = errors.New("managed Codex state is stale")
+	ErrManagedAmbiguous       = errors.New("managed Codex state is ambiguous")
+	ErrManagedCleanup         = errors.New("managed Codex cleanup is incomplete")
+	ErrManagedSettingsUnknown = errors.New("managed Codex settings update outcome is unknown")
 )
 
 type ManagedCodexPolicy struct {
@@ -43,19 +44,22 @@ type ManagedCodexPolicy struct {
 }
 
 type ManagedCodexRequest struct {
-	Operation    ManagedOperation
-	Origin       sessionhost.Origin
-	Directory    string
-	Placement    sessionhost.Placement
-	Direction    string
-	TabLabel     string
-	Focus        bool
-	Source       Agent
-	ThreadID     string
-	SourceArgv   []string
-	Policy       ManagedCodexPolicy
-	ReadyTimeout time.Duration
-	Prompt       *Prompt
+	Operation          ManagedOperation
+	Origin             sessionhost.Origin
+	Directory          string
+	Placement          sessionhost.Placement
+	Direction          string
+	TabLabel           string
+	Focus              bool
+	Source             Agent
+	ThreadID           string
+	SourceArgv         []string
+	Policy             ManagedCodexPolicy
+	ReadyTimeout       time.Duration
+	Prompt             *Prompt
+	resumeSourcePolicy *EffectiveCodexPolicy
+	resumeTargetPolicy *EffectiveCodexPolicy
+	resumeShellGuard   func(context.Context) error
 }
 
 type ManagedCodex struct {
@@ -195,7 +199,11 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 		if err != nil {
 			return fail(fmt.Errorf("managed Codex resume policy: %w", errors.Join(ErrManagedPolicyDrift, err)), verifier)
 		}
-		if sourceEffective.CWD != request.Directory || !matchesRequestedPolicy(sourceEffective, request.Policy) {
+		policyDrift := !matchesRequestedPolicy(sourceEffective, request.Policy)
+		if request.resumeSourcePolicy != nil {
+			policyDrift = requiredPolicyDrift(sourceEffective, *request.resumeSourcePolicy) != ""
+		}
+		if sourceEffective.CWD != request.Directory || policyDrift {
 			return fail(fmt.Errorf("managed Codex resume policy: %w", ErrManagedPolicyDrift), verifier)
 		}
 	}
@@ -209,6 +217,11 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	if request.Operation == ManagedResume {
 		target = sessionhost.CreatedTarget{Origin: request.Origin}
 		cleanup.target, cleanup.resume = target, true
+		if request.resumeShellGuard != nil {
+			if guardErr := request.resumeShellGuard(ctx); guardErr != nil {
+				return fail(fmt.Errorf("managed Codex resume shell guard: %w", guardErr), verifier)
+			}
+		}
 		attempted, runErr := l.topologyHost().RunInShell(ctx, request.Origin, request.Directory, argv)
 		// Ownership begins only after RunInShell passes every readiness check
 		// and attempts pane input. Pre-submission failure owns nothing.
@@ -239,7 +252,14 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	if discover == nil {
 		discover = l.discoverManagedIdentity
 	}
-	agent, threadID, err := discover(identityCtx, target.Origin, request.Directory, argv, service, request.Policy)
+	discoveryPolicy := request.Policy
+	if request.resumeSourcePolicy != nil {
+		discoveryPolicy = ManagedCodexPolicy{
+			Model: request.resumeSourcePolicy.Model, ReasoningEffort: request.resumeSourcePolicy.ReasoningEffort,
+			ApprovalPolicy: request.resumeSourcePolicy.ApprovalPolicy, SandboxMode: request.resumeSourcePolicy.SandboxMode,
+		}
+	}
+	agent, threadID, err := discover(identityCtx, target.Origin, request.Directory, argv, service, discoveryPolicy)
 	if err != nil {
 		return fail(fmt.Errorf("managed Codex pane identity: %w", err), verifier)
 	}
@@ -298,8 +318,22 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 		if err != nil {
 			return fail(fmt.Errorf("managed Codex resume policy audit: %w", errors.Join(ErrManagedPolicyDrift, err)), verifier)
 		}
-		if drift := forkPolicyDrift(effective, sourceEffective, request.SourceArgv); drift != "" {
-			return fail(fmt.Errorf("managed Codex resume changed policy (%s): %w", drift, ErrManagedPolicyDrift), verifier)
+		expected := sourceEffective
+		if request.resumeTargetPolicy != nil {
+			expected = *request.resumeTargetPolicy
+		}
+		if drift := forkPolicyDrift(effective, expected, request.SourceArgv); drift != "" {
+			if request.resumeTargetPolicy == nil {
+				return fail(fmt.Errorf("managed Codex resume changed policy (%s): %w", drift, ErrManagedPolicyDrift), verifier)
+			}
+			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
+			effective, err = verifier.ReconcileEffective(reconcileCtx, identity.ID, expected)
+			reconcileCancel()
+			if err != nil {
+				return fail(fmt.Errorf("managed Codex resume policy reconciliation: %w", err), verifier)
+			}
+			identity.Model = effective.Model
+			identity.ReasoningEffort = effective.ReasoningEffort
 		}
 	}
 	process, err = l.topologyHost().VerifyForegroundProcess(ctx, target.Origin, request.Directory, argv)
@@ -444,6 +478,15 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 	}
 	if err := validateManagedPolicy(request.Policy); err != nil {
 		return err
+	}
+	if (request.resumeSourcePolicy == nil) != (request.resumeTargetPolicy == nil) {
+		return errors.New("managed Resume reconciliation policies must be paired")
+	}
+	if request.resumeShellGuard != nil && request.Operation != ManagedResume {
+		return errors.New("managed Resume shell guard is invalid")
+	}
+	if request.resumeSourcePolicy != nil && (request.Operation != ManagedResume || request.resumeSourcePolicy.CWD != request.Directory || request.resumeTargetPolicy.CWD != request.Directory || !matchesRequestedPolicy(*request.resumeTargetPolicy, request.Policy)) {
+		return errors.New("managed Resume reconciliation policy is invalid")
 	}
 	if request.ReadyTimeout < 0 || request.ReadyTimeout > MaxManagedReadyTimeout || request.ReadyTimeout > 0 && request.ReadyTimeout <= 3*time.Second {
 		return errors.New("managed Codex readiness timeout is out of range")

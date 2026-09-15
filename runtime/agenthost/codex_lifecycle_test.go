@@ -105,7 +105,7 @@ func TestCodexEffectiveResponsePreservesPermissionProfileProvenance(t *testing.T
 		Thread: codexThread{ID: managedOriginalID, CWD: "/tmp/project", ModelProvider: "openai"},
 		Model:  "gpt-5.6-sol", ModelProvider: "openai", ServiceTier: &serviceTier, CWD: "/tmp/project",
 		ApprovalPolicy: json.RawMessage(`"never"`), ApprovalsReviewer: "user", ReasoningEffort: &reasoning,
-		RuntimeWorkspaceRoots: []string{"/tmp/project"},
+		RuntimeWorkspaceRoots: []string{"/tmp/project"}, InstructionSources: []string{"/tmp/AGENTS.md"}, MultiAgentMode: "explicitRequestOnly",
 	}
 	response.Sandbox.Type = "dangerFullAccess"
 	response.ActivePermissionProfile = &struct {
@@ -119,6 +119,139 @@ func TestCodexEffectiveResponsePreservesPermissionProfileProvenance(t *testing.T
 	response.RuntimeWorkspaceRoots = []string{"relative"}
 	if _, err := response.effective(managedOriginalID); err == nil {
 		t.Fatal("relative runtime root accepted")
+	}
+}
+
+func TestCodexEffectiveResponseRejectsInvalidDetailedSandboxPolicy(t *testing.T) {
+	reasoning := "medium"
+	base := codexEffectiveResponse{
+		Thread: codexThread{ID: managedOriginalID, CWD: "/tmp/project", ModelProvider: "openai"},
+		Model:  "gpt-5.6-sol", ModelProvider: "openai", CWD: "/tmp/project",
+		ApprovalPolicy: json.RawMessage(`"never"`), ApprovalsReviewer: "user", ReasoningEffort: &reasoning,
+		MultiAgentMode: "explicitRequestOnly",
+	}
+	for name, mutate := range map[string]func(*codexEffectiveResponse){
+		"relative workspace root": func(response *codexEffectiveResponse) {
+			response.Sandbox.Type = "workspaceWrite"
+			response.Sandbox.WritableRoots = []string{"relative"}
+		},
+		"read-only workspace field": func(response *codexEffectiveResponse) {
+			response.Sandbox.Type = "readOnly"
+			response.Sandbox.ExcludeSlashTmp = true
+		},
+		"danger network field": func(response *codexEffectiveResponse) {
+			response.Sandbox.Type = "dangerFullAccess"
+			response.Sandbox.NetworkAccess = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := base
+			mutate(&response)
+			if _, err := response.effective(managedOriginalID); err == nil {
+				t.Fatal("invalid detailed sandbox accepted")
+			}
+		})
+	}
+}
+
+func TestCodexThreadIdentityIncludesModelAndReasoning(t *testing.T) {
+	model, reasoning := "gpt-5.6-sol", "medium"
+	identity, err := (codexThread{ID: managedOriginalID, CWD: "/tmp/project", ModelProvider: "openai", Model: &model, ReasoningEffort: &reasoning}).identity()
+	if err != nil || identity.Model != model || identity.ReasoningEffort != reasoning {
+		t.Fatalf("identity=%+v error=%v", identity, err)
+	}
+}
+
+func TestCodexLifecycleReadConstraintsPreservesExactValidatedResponses(t *testing.T) {
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		lifecycleInitialize(t, ctx, conn)
+		config := readRPCRequest(t, ctx, conn, "config/read")
+		if len(config.Params) != 2 || string(config.Params["cwd"]) != `"/tmp/project"` || string(config.Params["includeLayers"]) != "false" {
+			t.Fatalf("config params=%s", mustJSON(config.Params))
+		}
+		sendRPCResult(t, ctx, conn, config.ID, lifecycleConfig())
+		requirements := readRPCRequest(t, ctx, conn, "configRequirements/read")
+		if len(requirements.Params) != 0 {
+			t.Fatalf("requirements params=%s", mustJSON(requirements.Params))
+		}
+		sendRPCResult(t, ctx, conn, requirements.ID, `{"requirements":null}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	snapshot, err := verifier.ReadConstraints(context.Background(), "/tmp/project")
+	if err != nil || string(snapshot.Config["model"]) != `"gpt-5.6-sol"` || string(snapshot.Requirements["requirements"]) != "null" {
+		t.Fatalf("snapshot=%+v error=%v", snapshot, err)
+	}
+	if _, err := snapshot.validate("/tmp/project", managedPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	identical := snapshot
+	if !snapshot.equal(identical) {
+		t.Fatal("identical constraint snapshots differ")
+	}
+	reordered := codexConstraintSnapshot{Config: mapsCloneRaw(snapshot.Config), Requirements: mapsCloneRaw(snapshot.Requirements)}
+	snapshot.Config["projects"] = json.RawMessage(`{"/tmp/b":{"trusted":false,"label":"b"},"/tmp/a":{"label":"a","trusted":true}}`)
+	reordered.Config["projects"] = json.RawMessage(`{"/tmp/a":{"trusted":true,"label":"a"},"/tmp/b":{"label":"b","trusted":false}}`)
+	if !snapshot.equal(reordered) || len(snapshot.driftFields(reordered)) != 0 {
+		t.Fatal("JSON object member order changed constraint identity")
+	}
+	drifted := codexConstraintSnapshot{Config: mapsCloneRaw(snapshot.Config), Requirements: mapsCloneRaw(snapshot.Requirements)}
+	drifted.Config["approval_policy"] = json.RawMessage(`"on-request"`)
+	if snapshot.equal(drifted) {
+		t.Fatal("constraint drift was not detected")
+	}
+}
+
+func TestCodexLifecycleStableHistoryIgnoresVolatileTurnFieldsAndCanonicalizesItems(t *testing.T) {
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		lifecycleInitialize(t, ctx, conn)
+		first := readRPCRequest(t, ctx, conn, "thread/read")
+		if string(first.Params["threadId"]) != `"thread-original"` || string(first.Params["includeTurns"]) != "true" {
+			t.Fatalf("first params=%s", mustJSON(first.Params))
+		}
+		sendRPCResult(t, ctx, conn, first.ID, `{"thread":{"id":"thread-original","turns":[{"id":"turn-1","status":"interrupted","items":[{"type":"message","content":{"b":2,"a":1}}]}]}}`)
+		second := readRPCRequest(t, ctx, conn, "thread/read")
+		sendRPCResult(t, ctx, conn, second.ID, `{"thread":{"id":"thread-original","turns":[{"id":"turn-1","status":"completed","completedAt":999,"items":[{"content":{"a":1,"b":2},"type":"message"}]}]}}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	before, err := verifier.ReadStableHistory(context.Background(), "thread-original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := verifier.ReadStableHistory(context.Background(), "thread-original")
+	if err != nil || before != after {
+		t.Fatalf("before=%x after=%x error=%v", before, after, err)
+	}
+}
+
+func TestCodexLifecycleStableHistoryRejectsMissingStableIdentity(t *testing.T) {
+	for _, response := range []string{
+		`{"thread":{"id":"thread-other","turns":[{"id":"turn-1","items":[]}]}}`,
+		`{"thread":{"id":"thread-original","turns":[]}}`,
+		`{"thread":{"id":"thread-original","turns":[{"id":"","items":[]}]}}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+				lifecycleInitialize(t, ctx, conn)
+				read := readRPCRequest(t, ctx, conn, "thread/read")
+				sendRPCResult(t, ctx, conn, read.ID, response)
+			})
+			verifier, err := newCodexLifecycle(context.Background(), socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verifier.Close()
+			if _, err := verifier.ReadStableHistory(context.Background(), "thread-original"); !errors.Is(err, errCodexProtocol) {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 
@@ -364,7 +497,7 @@ func TestCodexLifecycleEffectiveReadSendsNoOverridesAndUnsubscribes(t *testing.T
 		if len(resume.Params) != 2 || string(resume.Params["threadId"]) != `"thread-original"` || string(resume.Params["excludeTurns"]) != "true" {
 			t.Fatalf("resume params=%s", mustJSON(resume.Params))
 		}
-		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"dangerFullAccess"},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":["/tmp/project"]}`
+		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"workspaceWrite","networkAccess":true,"writableRoots":["/tmp/write"],"excludeSlashTmp":true,"excludeTmpdirEnvVar":false},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":["/tmp/project"],"instructionSources":["/tmp/AGENTS.md"],"multiAgentMode":"explicitRequestOnly"}`
 		sendRPCResult(t, ctx, conn, resume.ID, response)
 		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
 		if len(unsubscribe.Params) != 1 || string(unsubscribe.Params["threadId"]) != `"thread-original"` {
@@ -378,7 +511,7 @@ func TestCodexLifecycleEffectiveReadSendsNoOverridesAndUnsubscribes(t *testing.T
 	}
 	defer verifier.Close()
 	effective, err := verifier.ReadEffective(context.Background(), "thread-original")
-	if err != nil || effective.ModelProvider != "openai" || !reflect.DeepEqual(effective.RuntimeWorkspaceRoots, []string{"/tmp/project"}) {
+	if err != nil || effective.ModelProvider != "openai" || effective.MultiAgentMode != "explicitRequestOnly" || effective.SandboxMode != "workspace-write" || !effective.SandboxNetworkAccess || !effective.SandboxExcludeSlashTmp || effective.SandboxExcludeTmpdirEnvVar || !reflect.DeepEqual(effective.SandboxWritableRoots, []string{"/tmp/write"}) || !reflect.DeepEqual(effective.RuntimeWorkspaceRoots, []string{"/tmp/project"}) || !reflect.DeepEqual(effective.InstructionSources, []string{"/tmp/AGENTS.md"}) {
 		t.Fatalf("effective=%+v error=%v", effective, err)
 	}
 }
@@ -393,7 +526,7 @@ func TestCodexLifecycleEffectiveReadRejectsWrongUnsubscribeStatus(t *testing.T) 
 			return
 		}
 		resume := readRPCRequest(t, ctx, conn, "thread/resume")
-		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"dangerFullAccess"},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":["/tmp/project"]}`
+		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"dangerFullAccess"},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":["/tmp/project"],"instructionSources":[],"multiAgentMode":"explicitRequestOnly"}`
 		sendRPCResult(t, ctx, conn, resume.ID, response)
 		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
 		sendRPCResult(t, ctx, conn, unsubscribe.ID, `{"status":"still-subscribed"}`)
@@ -408,9 +541,101 @@ func TestCodexLifecycleEffectiveReadRejectsWrongUnsubscribeStatus(t *testing.T) 
 	}
 }
 
+func TestCodexLifecycleReconcilesActiveManagedThreadWithExactSettingsAndReadback(t *testing.T) {
+	var connections atomic.Int32
+	desired := managedPreflight("/tmp/project").EffectiveCodexPolicy
+	desired.ModelProvider = "openai"
+	desired.RuntimeWorkspaceRoots = []string{"/tmp/project"}
+	desired.InstructionSources = []string{"/tmp/AGENTS.md"}
+	desired.MultiAgentMode = "explicitRequestOnly"
+	desired.SandboxMode = "workspace-write"
+	desired.SandboxNetworkAccess = true
+	desired.SandboxWritableRoots = []string{"/tmp/write"}
+	desired.SandboxExcludeSlashTmp = true
+	desired.SandboxExcludeTmpdirEnvVar = true
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		index := connections.Add(1)
+		lifecycleInitialize(t, ctx, conn)
+		if index == 1 {
+			update := readRPCRequest(t, ctx, conn, "thread/settings/update")
+			var sandbox map[string]any
+			if json.Unmarshal(update.Params["sandboxPolicy"], &sandbox) != nil || len(update.Params) != 5 || string(update.Params["threadId"]) != `"thread-original"` || string(update.Params["model"]) != `"gpt-5.6-sol"` || string(update.Params["effort"]) != `"medium"` || string(update.Params["approvalPolicy"]) != `"never"` || !reflect.DeepEqual(sandbox, map[string]any{"type": "workspaceWrite", "networkAccess": true, "writableRoots": []any{"/tmp/write"}, "excludeSlashTmp": true, "excludeTmpdirEnvVar": true}) {
+				t.Fatalf("update params=%s", mustJSON(update.Params))
+			}
+			sendRPCResult(t, ctx, conn, update.ID, `{}`)
+			return
+		}
+		resume := readRPCRequest(t, ctx, conn, "thread/resume")
+		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"workspaceWrite","networkAccess":true,"writableRoots":["/tmp/write"],"excludeSlashTmp":true,"excludeTmpdirEnvVar":true},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":["/tmp/project"],"instructionSources":["/tmp/AGENTS.md"],"multiAgentMode":"explicitRequestOnly"}`
+		sendRPCResult(t, ctx, conn, resume.ID, response)
+		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
+		sendRPCResult(t, ctx, conn, unsubscribe.ID, `{"status":"unsubscribed"}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	effective, err := verifier.ReconcileEffective(context.Background(), "thread-original", desired)
+	if err != nil || requiredPolicyDrift(effective, desired) != "" {
+		t.Fatalf("effective=%+v error=%v", effective, err)
+	}
+}
+
+func TestCodexLifecycleReconcileWorkspaceWriteSerializesEmptyRootsAsArray(t *testing.T) {
+	var connections atomic.Int32
+	desired := managedPreflight("/tmp/project").EffectiveCodexPolicy
+	desired.ModelProvider = "openai"
+	desired.MultiAgentMode = "explicitRequestOnly"
+	desired.SandboxMode = "workspace-write"
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		index := connections.Add(1)
+		lifecycleInitialize(t, ctx, conn)
+		if index == 1 {
+			update := readRPCRequest(t, ctx, conn, "thread/settings/update")
+			if string(update.Params["sandboxPolicy"]) != `{"excludeSlashTmp":false,"excludeTmpdirEnvVar":false,"networkAccess":false,"type":"workspaceWrite","writableRoots":[]}` {
+				t.Fatalf("sandbox policy=%s", update.Params["sandboxPolicy"])
+			}
+			sendRPCResult(t, ctx, conn, update.ID, `{}`)
+			return
+		}
+		resume := readRPCRequest(t, ctx, conn, "thread/resume")
+		response := `{"thread":{"id":"` + managedOriginalID + `","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"cwd":"/tmp/project","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"workspaceWrite","networkAccess":false,"writableRoots":[],"excludeSlashTmp":false,"excludeTmpdirEnvVar":false},"activePermissionProfile":null,"reasoningEffort":"medium","runtimeWorkspaceRoots":[],"instructionSources":[],"multiAgentMode":"explicitRequestOnly"}`
+		sendRPCResult(t, ctx, conn, resume.ID, response)
+		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
+		sendRPCResult(t, ctx, conn, unsubscribe.ID, `{"status":"unsubscribed"}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	if _, err := verifier.ReconcileEffective(context.Background(), managedOriginalID, desired); err != nil {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCodexLifecycleTreatsSettingsUpdateFailureAsOutcomeUnknown(t *testing.T) {
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		lifecycleInitialize(t, ctx, conn)
+		update := readRPCRequest(t, ctx, conn, "thread/settings/update")
+		send(t, ctx, conn, `{"id":`+jsonNumber(update.ID)+`,"error":{"code":-32600,"message":"rejected"}}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	if _, err := verifier.ReconcileEffective(context.Background(), "thread-original", managedPreflight("/tmp/project").EffectiveCodexPolicy); !errors.Is(err, ErrManagedSettingsUnknown) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestRequiredPolicyComparisonCoversEqualAndRootDrift(t *testing.T) {
 	policy := managedPreflight("/tmp/project").EffectiveCodexPolicy
 	policy.RuntimeWorkspaceRoots = []string{"/tmp/project"}
+	policy.InstructionSources = []string{"/tmp/AGENTS.md"}
+	policy.MultiAgentMode = "explicitRequestOnly"
 	if !sameRequiredPolicy(policy, policy) {
 		t.Fatal("identical policy rejected")
 	}
@@ -419,6 +644,34 @@ func TestRequiredPolicyComparisonCoversEqualAndRootDrift(t *testing.T) {
 	if drift := requiredPolicyDrift(drifted, policy); drift != "runtime_workspace_roots" {
 		t.Fatalf("drift=%q", drift)
 	}
+	drifted = policy
+	drifted.InstructionSources = []string{"/tmp/other.md"}
+	drifted.MultiAgentMode = "proactive"
+	if drift := requiredPolicyDrift(drifted, policy); drift != "instruction_sources,multi_agent_mode" {
+		t.Fatalf("drift=%q", drift)
+	}
+	for name, mutate := range map[string]func(*EffectiveCodexPolicy){
+		"sandbox_exclude_slash_tmp":  func(value *EffectiveCodexPolicy) { value.SandboxExcludeSlashTmp = true },
+		"sandbox_exclude_tmpdir_env": func(value *EffectiveCodexPolicy) { value.SandboxExcludeTmpdirEnvVar = true },
+		"sandbox_network_access":     func(value *EffectiveCodexPolicy) { value.SandboxNetworkAccess = true },
+		"sandbox_writable_roots":     func(value *EffectiveCodexPolicy) { value.SandboxWritableRoots = []string{"/tmp/write"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			drifted := policy
+			mutate(&drifted)
+			if drift := requiredPolicyDrift(drifted, policy); drift != name {
+				t.Fatalf("drift=%q", drift)
+			}
+		})
+	}
+}
+
+func mapsCloneRaw(source map[string]json.RawMessage) map[string]json.RawMessage {
+	clone := make(map[string]json.RawMessage, len(source))
+	for key, value := range source {
+		clone[key] = append(json.RawMessage(nil), value...)
+	}
+	return clone
 }
 
 func mustJSON(value any) string {
