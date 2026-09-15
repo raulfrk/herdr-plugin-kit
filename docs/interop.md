@@ -36,3 +36,14 @@ The separate transport-neutral request/response contract retains its 1 MiB
 payload and 16 KiB metadata allowance. Failed actions, missing stdout,
 malformed or trailing JSON, identity changes, oversized envelopes, and invalid
 typed errors fail closed.
+
+## Typed action routes
+
+Herdr's action invocation still has no caller-controlled input channel. Plugins
+that explicitly provide `action-route` version 1 can instead use the bounded
+direct-exec protocol described in [Action-route v1](action-route.md). Herdr is
+used only to discover the enabled provider root, manifest path, and fixed
+`route` action argv. The kit cross-validates those observations against
+`plugin-kit.json`, then executes that argv literally in the provider root with
+one request on stdin and one response on stdout. Existing health actions and
+`ActionClient` behavior are unchanged.

@@ -783,6 +783,43 @@ func TestContractValidatorAcceptsAndExactlyMatchesGenericActionsAndEvents(t *tes
 	}
 }
 
+func TestContractValidatorAcceptsFixedActionRouteAdvertisementTogether(t *testing.T) {
+	options := Options{ID: "example.route", Name: "Route"}
+	kit := generatedManifest(options)
+	herdr := generatedHerdrManifest(options)
+	action := manifest.Action{ID: "route", Title: "Route plugin actions", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "route"}}
+	kit.Actions = append(kit.Actions, action)
+	kit.Interfaces = append(kit.Interfaces, manifest.Interface{ID: "action-route", Version: 1, Direction: manifest.InterfaceProvides})
+	herdr.Actions = append(herdr.Actions, herdrAction{ID: action.ID, Title: action.Title, Contexts: append([]string(nil), action.Contexts...), Command: append([]string(nil), action.Command...)})
+	if err := validateContracts(kit, herdr); err != nil {
+		t.Fatalf("action-route extension rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*manifest.Manifest, *herdrManifest){
+		"missing interface": func(value *manifest.Manifest, _ *herdrManifest) { value.Interfaces = value.Interfaces[:1] },
+		"missing action": func(value *manifest.Manifest, herdrValue *herdrManifest) {
+			value.Actions = value.Actions[:3]
+			herdrValue.Actions = herdrValue.Actions[:3]
+		},
+		"wrong title": func(value *manifest.Manifest, herdrValue *herdrManifest) {
+			value.Actions[3].Title = "Other"
+			herdrValue.Actions[3].Title = "Other"
+		},
+		"wrong version": func(value *manifest.Manifest, _ *herdrManifest) { value.Interfaces[1].Version = 2 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedKit := kit
+			changedKit.Actions = append([]manifest.Action(nil), kit.Actions...)
+			changedKit.Interfaces = append([]manifest.Interface(nil), kit.Interfaces...)
+			changedHerdr := herdr
+			changedHerdr.Actions = append([]herdrAction(nil), herdr.Actions...)
+			mutate(&changedKit, &changedHerdr)
+			if err := validateContracts(changedKit, changedHerdr); err == nil {
+				t.Fatal("action-route drift accepted")
+			}
+		})
+	}
+}
+
 func TestSourceValidatorRejectsEveryHealthShapeDrift(t *testing.T) {
 	validFields := `Version: interop.Version, Interface: "health", InterfaceVersion: 1, Method: "check", Payload: json.RawMessage("{\"ok\":true}")`
 	valid := "return interop.ActionResponse{" + validFields + "}"

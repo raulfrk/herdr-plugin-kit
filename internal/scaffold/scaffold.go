@@ -814,6 +814,7 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 	if len(herdr.Actions) != len(kit.Actions) {
 		return errors.New("Herdr and plugin-kit action counts differ")
 	}
+	routeAction := false
 	for index := range kit.Actions {
 		if index >= len(wantActions) {
 			if !slices.Equal(kit.Actions[index].Contexts, []string{"global"}) {
@@ -828,6 +829,12 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 				!slices.Equal(kit.Actions[index].Contexts, herdr.Actions[index].Contexts) ||
 				!slices.Equal(kit.Actions[index].Command, herdr.Actions[index].Command) {
 				return fmt.Errorf("extra action %q differs between manifests", kit.Actions[index].ID)
+			}
+			if kit.Actions[index].ID == "route" {
+				if routeAction || kit.Actions[index].Title != "Route plugin actions" || kit.Actions[index].Description != "" {
+					return errors.New("action-route must use the fixed route action metadata")
+				}
+				routeAction = true
 			}
 			continue
 		}
@@ -874,11 +881,22 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 			return fmt.Errorf("event hook %q differs between manifests", kit.Events[index].On)
 		}
 	}
-	if len(kit.Interfaces) != 1 {
-		return errors.New("generated plugin must provide one interface")
+	if len(kit.Interfaces) == 0 {
+		return errors.New("generated plugin must provide the health interface")
 	}
 	if kit.Interfaces[0] != (manifest.Interface{ID: "health", Version: 1, Direction: manifest.InterfaceProvides}) {
 		return errors.New("generated health interface contract differs")
+	}
+	routeInterfaces := 0
+	for _, contract := range kit.Interfaces[1:] {
+		if contract == (manifest.Interface{ID: "action-route", Version: 1, Direction: manifest.InterfaceProvides}) {
+			routeInterfaces++
+			continue
+		}
+		return fmt.Errorf("unsupported generated interface contract %q/%d/%s", contract.ID, contract.Version, contract.Direction)
+	}
+	if routeInterfaces > 1 || routeAction != (routeInterfaces == 1) {
+		return errors.New("fixed route action and action-route v1 advertisement must appear together")
 	}
 	if len(herdr.Panes) != 1 {
 		return errors.New("Herdr manifest must declare one routed main pane")

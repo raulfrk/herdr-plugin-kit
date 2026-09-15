@@ -2,6 +2,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +30,19 @@ type Result struct {
 
 type Runner interface {
 	Run(context.Context, string, []string) (Result, error)
+}
+
+// Spec is a literal process invocation with optional working directory and
+// standard input. It deliberately has no shell or environment override.
+type Spec struct {
+	Executable string
+	Args       []string
+	Dir        string
+	Stdin      []byte
+}
+
+type SpecRunner interface {
+	RunSpec(context.Context, Spec) (Result, error)
 }
 
 type ExecRunner struct {
@@ -62,18 +76,26 @@ func (e *RunError) Error() string {
 func (e *RunError) Unwrap() error { return e.Cause }
 
 func (r ExecRunner) Run(ctx context.Context, executable string, args []string) (Result, error) {
+	return r.RunSpec(ctx, Spec{Executable: executable, Args: args})
+}
+
+func (r ExecRunner) RunSpec(ctx context.Context, spec Spec) (Result, error) {
 	if ctx == nil {
 		panic("nil context")
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{ExitCode: -1, Canceled: true}, &RunError{Kind: ErrorCanceled, Cause: err}
 	}
-	if executable == "" {
+	if spec.Executable == "" {
 		return Result{ExitCode: -1}, &RunError{Kind: ErrorStart, Cause: errors.New("empty executable")}
 	}
 	out := newCapBuffer(limit(r.StdoutLimit))
 	errOut := newCapBuffer(limit(r.StderrLimit))
-	cmd := exec.Command(executable, args...)
+	cmd := exec.Command(spec.Executable, spec.Args...)
+	cmd.Dir = spec.Dir
+	if spec.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(append([]byte(nil), spec.Stdin...))
+	}
 	configureProcessGroup(cmd)
 	cmd.Stdout, cmd.Stderr = out, errOut
 	result := Result{ExitCode: -1}

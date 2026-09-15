@@ -122,6 +122,18 @@ func TestRunnerReturnsDeterministicExit(t *testing.T) {
 	}
 }
 
+func TestRunnerSpecUsesLiteralCWDAndStdin(t *testing.T) {
+	root := t.TempDir()
+	result, err := (ExecRunner{}).RunSpec(context.Background(), Spec{Executable: "/usr/bin/pwd", Dir: root})
+	if err != nil || strings.TrimSpace(string(result.Stdout)) != root {
+		t.Fatalf("pwd result=%+v error=%v", result, err)
+	}
+	result, err = (ExecRunner{}).RunSpec(context.Background(), Spec{Executable: "/usr/bin/wc", Args: []string{"-c"}, Stdin: []byte("literal input")})
+	if err != nil || strings.TrimSpace(string(result.Stdout)) != "13" {
+		t.Fatalf("wc result=%+v error=%v", result, err)
+	}
+}
+
 func TestPropertyBoundedBuffer(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		limit := rapid.IntRange(1, 256).Draw(t, "limit")
