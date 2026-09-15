@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
@@ -77,7 +78,7 @@ func TestCodexConverterStopsCapturesAndResumesSameThread(t *testing.T) {
 		harness.launches = append(harness.launches, request)
 		return managed, nil
 	}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestCodexConverterRetriesOneEligibleManagedFailureByteIdentically(t *testin
 		}
 		return managed, nil
 	}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if err != nil || result.ManagedAttempts != 2 || len(harness.launches) != 2 || !sameManagedRequest(harness.launches[0], harness.launches[1]) {
 		t.Fatalf("result=%+v error=%v launches=%+v", result, err, harness.launches)
 	}
@@ -125,7 +126,7 @@ func TestCodexConverterFallsBackOnceAfterTwoEligibleManagedFailures(t *testing.T
 		harness.launches = append(harness.launches, request)
 		return nil, errors.New("temporary launch failure")
 	}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, ErrCodexConversionFallback) || result.Outcome != CodexConversionFallback || !result.FallbackUsed || result.ManagedAttempts != 2 {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
@@ -142,7 +143,7 @@ func TestCodexConverterCaptureFailureRestoresOrdinarySameThread(t *testing.T) {
 	harness.verifier.histories = [][32]byte{harness.history, harness.history, harness.history, harness.history}
 	fallbackAgent := harness.source
 	harness.runner.results = append(harness.runner.results, managedAgentResult(t, fallbackAgent), managedAgentResult(t, fallbackAgent))
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, ErrCodexConversionFallback) || !errors.Is(err, ErrCodexConversionCapture) || result.Outcome != CodexConversionFallback || !result.FallbackUsed || result.ManagedAttempts != 0 {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
@@ -160,7 +161,7 @@ func TestCodexConverterConstraintDriftAfterStopRestoresOrdinarySameThread(t *tes
 	harness.verifier.identities = []codexThreadIdentity{harness.identity, harness.identity, harness.identity, harness.identity}
 	harness.verifier.histories = [][32]byte{harness.history, harness.history, harness.history, harness.history}
 	harness.runner.results = append(harness.runner.results, managedAgentResult(t, harness.source), managedAgentResult(t, harness.source))
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, ErrCodexConversionFallback) || !errors.Is(err, ErrManagedPolicyDrift) || !result.FallbackUsed || len(harness.launches) != 0 || len(harness.topology.runs) != 1 {
 		t.Fatalf("result=%+v error=%v launches=%d runs=%d", result, err, len(harness.launches), len(harness.topology.runs))
 	}
@@ -169,7 +170,7 @@ func TestCodexConverterConstraintDriftAfterStopRestoresOrdinarySameThread(t *tes
 func TestCodexConverterPreStopCaptureFailureSendsNoInput(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.verifier.constraintErrs = []error{errors.New("config unavailable")}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, ErrCodexConversionCapture) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d runs=%d calls=%d", result, err, len(harness.topology.stops), len(harness.topology.runs), len(harness.runner.calls))
 	}
@@ -181,7 +182,7 @@ func TestCodexConverterFallbackFailureIsReportedWithoutAReplacementAttempt(t *te
 	harness.verifier.identities = []codexThreadIdentity{harness.identity, harness.identity, harness.identity}
 	harness.verifier.histories = [][32]byte{harness.history, harness.history, harness.history}
 	harness.topology.runErr = errors.New("ordinary resume rejected")
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, harness.topology.runErr) || result.FallbackUsed || result.Outcome != "" || len(harness.topology.runs) != 1 {
 		t.Fatalf("result=%+v error=%v runs=%d", result, err, len(harness.topology.runs))
 	}
@@ -198,7 +199,7 @@ func TestCodexConverterSupportsDefaultHerdrSession(t *testing.T) {
 		harness.launches = append(harness.launches, request)
 		return managed, nil
 	}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if err != nil || result.Outcome != CodexConversionManaged || len(harness.launches) != 1 || harness.launches[0].Origin.SessionName != "" {
 		t.Fatalf("result=%+v error=%v launches=%+v", result, err, harness.launches)
 	}
@@ -246,13 +247,15 @@ func TestCodexConverterCustomConfirmationReconcilesExactTargetPolicy(t *testing.
 		return managed, nil
 	}
 	customization := &CodexConversionCustomization{Desired: desired, ConfirmationToken: conversionConfirmationToken(harness.source, harness.identity, desired)}
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source, Customization: customization})
+	request := harness.request()
+	request.Customization = customization
+	result, err := harness.converter.Convert(context.Background(), request)
 	if err != nil || result.Outcome != CodexConversionManaged || requiredPolicyDrift(result.Policy, target) != "" || len(harness.launches) != 1 {
 		t.Fatalf("result=%+v error=%v launches=%+v", result, err, harness.launches)
 	}
-	request := harness.launches[0]
-	if request.Policy != desired || request.resumeSourcePolicy == nil || request.resumeTargetPolicy == nil || requiredPolicyDrift(*request.resumeSourcePolicy, harness.policy) != "" || requiredPolicyDrift(*request.resumeTargetPolicy, target) != "" {
-		t.Fatalf("request=%+v", request)
+	launchRequest := harness.launches[0]
+	if launchRequest.Policy != desired || launchRequest.resumeSourcePolicy == nil || launchRequest.resumeTargetPolicy == nil || requiredPolicyDrift(*launchRequest.resumeSourcePolicy, harness.policy) != "" || requiredPolicyDrift(*launchRequest.resumeTargetPolicy, target) != "" {
+		t.Fatalf("request=%+v", launchRequest)
 	}
 }
 
@@ -260,7 +263,9 @@ func TestCodexConverterRejectsUnconfirmedCustomizationBeforeStoppingSource(t *te
 	harness := newConversionHarness(t)
 	desired := managedPolicy()
 	desired.ReasoningEffort = "high"
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source, Customization: &CodexConversionCustomization{Desired: desired, ConfirmationToken: "wrong"}})
+	request := harness.request()
+	request.Customization = &CodexConversionCustomization{Desired: desired, ConfirmationToken: "wrong"}
+	result, err := harness.converter.Convert(context.Background(), request)
 	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d runs=%d calls=%d", result, err, len(harness.topology.stops), len(harness.topology.runs), len(harness.runner.calls))
 	}
@@ -274,7 +279,7 @@ func TestCodexConverterDoesNotRetryUnsafeManagedFailure(t *testing.T) {
 				harness.launches = append(harness.launches, request)
 				return nil, failure
 			}
-			result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+			result, err := harness.converter.Convert(context.Background(), harness.request())
 			if !errors.Is(err, failure) || result.ManagedAttempts != 1 || len(harness.launches) != 1 || len(harness.topology.runs) != 0 {
 				t.Fatalf("result=%+v error=%v launches=%d runs=%d", result, err, len(harness.launches), len(harness.topology.runs))
 			}
@@ -286,7 +291,9 @@ func TestCodexConverterRejectsInvalidSourceBeforeServiceOrInput(t *testing.T) {
 	harness := newConversionHarness(t)
 	invalid := harness.source
 	invalid.SessionName = "other"
-	result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: invalid})
+	request := harness.request()
+	request.Source = invalid
+	result, err := harness.converter.Convert(context.Background(), request)
 	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(result, CodexConversionResult{}) || harness.service.callCount() != 0 || len(harness.runner.calls) != 0 {
 		t.Fatalf("result=%+v error=%v service=%d calls=%v", result, err, harness.service.callCount(), harness.runner.calls)
 	}
@@ -326,7 +333,7 @@ func TestCodexConverterShellDriftPreventsNextSubmissionAtEveryRecoveryStage(t *t
 					return nil, errors.New("temporary launch failure")
 				}
 
-				result, err := harness.converter.Convert(context.Background(), CodexConversionRequest{Source: harness.source})
+				result, err := harness.converter.Convert(context.Background(), harness.request())
 				if !errors.Is(err, drift.err) || result.FallbackUsed || len(harness.topology.runs) != 0 {
 					t.Fatalf("result=%+v error=%v runs=%v", result, err, harness.topology.runs)
 				}
@@ -345,7 +352,9 @@ func TestCodexConversionShellCaptureRejectsFocusedPane(t *testing.T) {
 	origin := managedOrigin()
 	harness.runner.results = []command.Result{conversionPaneResult(t, origin, harness.source.CWD, true, 17)}
 	converter := CodexConverter{launcher: harness.converter.launcher}
-	if _, err := converter.captureConversionShell(context.Background(), origin, harness.source.CWD, nil); !errors.Is(err, ErrManagedPaneBusy) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if _, err := converter.captureConversionShell(ctx, origin, harness.source.CWD, nil); !errors.Is(err, ErrManagedPaneBusy) {
 		t.Fatalf("error=%v", err)
 	}
 	if hasPaneInput(harness.runner.calls) {
@@ -362,10 +371,41 @@ func TestCodexConversionShellCaptureRejectsChangedVisibleDraft(t *testing.T) {
 	}
 	converter := CodexConverter{launcher: harness.converter.launcher}
 	expected := conversionShellLease{Process: harness.topology.inspected, Revision: 17, Visible: "prompt"}
-	if err := converter.verifyConversionShell(context.Background(), origin, harness.source.CWD, expected); !errors.Is(err, ErrManagedPaneBusy) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if err := converter.verifyConversionShell(ctx, origin, harness.source.CWD, expected); !errors.Is(err, ErrManagedPaneBusy) {
 		t.Fatalf("error=%v", err)
 	}
 	if hasPaneInput(harness.runner.calls) {
+		t.Fatalf("calls=%v", harness.runner.calls)
+	}
+}
+
+func TestCodexConversionShellObservationRejectsRevisionDriftWithoutAPIError(t *testing.T) {
+	harness := newConversionHarness(t)
+	origin := managedOrigin()
+	harness.runner.results = []command.Result{
+		conversionPaneResult(t, origin, harness.source.CWD, false, 17),
+		{Stdout: []byte("prompt")},
+		conversionPaneResult(t, origin, harness.source.CWD, false, 18),
+	}
+	converter := CodexConverter{launcher: harness.converter.launcher}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if _, err := converter.observeConversionShell(ctx, origin, harness.source.CWD); !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCodexConverterFallbackIdentityTimeoutStopsAfterOnePoll(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.runner.results = nil
+	harness.runner.calls = nil
+	_, err := harness.converter.awaitFallbackIdentity(context.Background(), managedOrigin(), harness.source.CWD, managedSourceID, 99, 5*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(harness.runner.calls) != 1 {
 		t.Fatalf("calls=%v", harness.runner.calls)
 	}
 }
@@ -463,6 +503,10 @@ func (h *conversionHarness) managedResult() *ManagedCodex {
 		Process: sessionhost.ForegroundProcess{PID: 99, Name: "codex", CWD: h.source.CWD, Argv: argv},
 		Policy:  h.policy, Argv: argv, Service: h.service.snapshot,
 	}
+}
+
+func (h *conversionHarness) request() CodexConversionRequest {
+	return CodexConversionRequest{Source: h.source, ReadyTimeout: 4 * time.Second}
 }
 
 func conversionConstraints() codexConstraintSnapshot {

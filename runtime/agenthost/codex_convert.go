@@ -309,7 +309,9 @@ func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConv
 		base.ManagedAttempts = attempt
 		attemptLease := shellLease
 		launchRequest.resumeShellGuard = func(guardCtx context.Context) error {
-			return c.verifyConversionShell(guardCtx, target, before.CWD, attemptLease)
+			verifyCtx, verifyCancel := context.WithTimeout(guardCtx, ready)
+			defer verifyCancel()
+			return c.verifyConversionShell(verifyCtx, target, before.CWD, attemptLease)
 		}
 		managed, launchErr = launch(ctx, launchRequest)
 		if launchErr == nil {
@@ -367,7 +369,7 @@ func (c CodexConverter) captureConversionShell(ctx context.Context, target sessi
 		return c.captureShell(ctx, target, cwd, expected)
 	}
 	var prior conversionShellLease
-	for {
+	for ctx.Err() == nil {
 		current, err := c.observeConversionShell(ctx, target, cwd)
 		if err != nil {
 			return conversionShellLease{}, err
@@ -379,10 +381,9 @@ func (c CodexConverter) captureConversionShell(ctx context.Context, target sessi
 			return current, nil
 		}
 		prior = current
-		if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-			return conversionShellLease{}, errors.Join(ErrManagedPaneBusy, err)
-		}
+		_ = waitManaged(ctx, 25*time.Millisecond)
 	}
+	return conversionShellLease{}, errors.Join(ErrManagedPaneBusy, ctx.Err())
 }
 
 func (c CodexConverter) verifyConversionShell(ctx context.Context, target sessionhost.Origin, cwd string, expected conversionShellLease) error {
@@ -479,8 +480,11 @@ func (c CodexConverter) fallback(ctx context.Context, ready time.Duration, servi
 			return result, errors.Join(cause, ErrManagedStale)
 		}
 	}
-	if err := c.verifyConversionShell(ctx, target, identity.CWD, current); err != nil {
-		return result, errors.Join(cause, err)
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, ready)
+	verifyErr := c.verifyConversionShell(verifyCtx, target, identity.CWD, current)
+	verifyCancel()
+	if verifyErr != nil {
+		return result, errors.Join(cause, verifyErr)
 	}
 	argv := []string{"codex", "resume", "--cd", identity.CWD, identity.ID}
 	attempted, err := c.launcher.topologyHost().RunInShell(ctx, target, identity.CWD, argv)
@@ -529,7 +533,7 @@ func (c CodexConverter) awaitFallbackIdentity(ctx context.Context, target sessio
 	waitCtx, cancel := context.WithTimeout(ctx, ready)
 	defer cancel()
 	var prior Agent
-	for {
+	for waitCtx.Err() == nil {
 		agent, err := c.launcher.getStartedAgent(waitCtx, target, cwd, false, threadID)
 		if err == nil {
 			if process, processErr := c.launcher.topologyHost().VerifyForegroundProcess(waitCtx, target, cwd, []string{"codex", "resume", "--cd", cwd, threadID}); processErr == nil && process.PID == pid {
@@ -541,10 +545,9 @@ func (c CodexConverter) awaitFallbackIdentity(ctx context.Context, target sessio
 			}
 		}
 		prior = Agent{}
-		if err := waitManaged(waitCtx, 25*time.Millisecond); err != nil {
-			return Agent{}, errors.Join(ErrManagedStale, err)
-		}
+		_ = waitManaged(waitCtx, 25*time.Millisecond)
 	}
+	return Agent{}, errors.Join(ErrManagedStale, waitCtx.Err())
 }
 
 func (c CodexConverter) validate(request CodexConversionRequest) error {
