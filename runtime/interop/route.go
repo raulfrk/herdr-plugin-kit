@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,11 +225,7 @@ func (c RouteClient) request(target, method string, deadline time.Time, payload 
 }
 
 func newRouteCorrelation() (string, error) {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(value[:]), nil
+	return rand.Text(), nil
 }
 
 func DispatchRoute(ctx context.Context, request Request, now time.Time, provider RouteProvider) Response {
@@ -349,10 +344,14 @@ func ServeRoute(ctx context.Context, reader io.Reader, writer io.Writer, now tim
 			return err
 		}
 	}
+	return writeRouteEnvelope(writer, encoded)
+}
+
+func writeRouteEnvelope(writer io.Writer, encoded []byte) error {
 	if len(encoded)+1 > MaxRouteEnvelopeBytes {
 		return errors.New("action-route response exceeds its bound")
 	}
-	_, err = io.Copy(writer, bytes.NewReader(append(encoded, '\n')))
+	_, err := io.Copy(writer, bytes.NewReader(append(encoded, '\n')))
 	return err
 }
 
@@ -363,8 +362,8 @@ func validateRouteRequest(ctx context.Context, request Request, now time.Time) e
 	if request.Interface != ActionRouteInterface || request.InterfaceVersion != ActionRouteInterfaceVersion {
 		return errors.New("unsupported action-route interface")
 	}
-	if len(request.Payload) == 0 || len(request.Payload) > MaxRouteEnvelopeBytes {
-		return errors.New("action-route payload is missing or oversized")
+	if len(request.Payload) == 0 {
+		return errors.New("action-route payload is missing")
 	}
 	switch request.Method {
 	case RouteMethodCatalog:
@@ -441,7 +440,7 @@ func ValidateRouteCatalog(catalog RouteCatalog) error {
 			return fmt.Errorf("actions[%d]: %w", index, err)
 		}
 		if len(action.SuggestedPath) == 0 || len(action.SuggestedPath) >= MaxRouteKeys {
-			return fmt.Errorf("actions[%d]: suggested_path must contain 1-%d participant-relative keys", index, MaxRouteKeys-1)
+			return fmt.Errorf("actions[%d]: suggested_path must contain 1-7 participant-relative keys", index)
 		}
 		for keyIndex, key := range action.SuggestedPath {
 			if !validRouteKey(key) {

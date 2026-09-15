@@ -17,6 +17,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/raulfrk/herdr-plugin-kit/manifest"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/internal/herdrcmd"
 	"pgregory.net/rapid"
 )
 
@@ -126,10 +127,25 @@ func TestRouteProcessClientCatalogAndInvokeEndToEnd(t *testing.T) {
 
 func TestRouteProcessDiscoveryRejectsMissingDisabledAndDriftedProviders(t *testing.T) {
 	tests := map[string]func(*routePluginListEnvelope, string){
-		"missing":  func(envelope *routePluginListEnvelope, _ string) { envelope.Result.Plugins[0].PluginID = "proof.other" },
-		"disabled": func(envelope *routePluginListEnvelope, _ string) { envelope.Result.Plugins[0].Enabled = false },
+		"missing":     func(envelope *routePluginListEnvelope, _ string) { envelope.Result.Plugins[0].PluginID = "proof.other" },
+		"disabled":    func(envelope *routePluginListEnvelope, _ string) { envelope.Result.Plugins[0].Enabled = false },
+		"envelope id": func(envelope *routePluginListEnvelope, _ string) { envelope.ID = "other" },
+		"result type": func(envelope *routePluginListEnvelope, _ string) { envelope.Result.Type = "other" },
+		"unclean root": func(envelope *routePluginListEnvelope, root string) {
+			envelope.Result.Plugins[0].PluginRoot = root + "/."
+		},
 		"manifest path": func(envelope *routePluginListEnvelope, root string) {
 			envelope.Result.Plugins[0].ManifestPath = filepath.Join(root, "other.toml")
+		},
+		"title drift": func(envelope *routePluginListEnvelope, _ string) {
+			envelope.Result.Plugins[0].Actions[0].Title = "Changed"
+		},
+		"description drift": func(envelope *routePluginListEnvelope, _ string) {
+			value := "changed"
+			envelope.Result.Plugins[0].Actions[0].Description = &value
+		},
+		"contexts drift": func(envelope *routePluginListEnvelope, _ string) {
+			envelope.Result.Plugins[0].Actions[0].Contexts = []string{"pane"}
 		},
 		"argv drift": func(envelope *routePluginListEnvelope, _ string) {
 			envelope.Result.Plugins[0].Actions[0].Command = []string{"/bin/false"}
@@ -162,6 +178,32 @@ func TestRouteProcessDiscoveryRejectsMissingDisabledAndDriftedProviders(t *testi
 			}
 		})
 	}
+	t.Run("relative root", func(t *testing.T) {
+		root := t.TempDir()
+		data := writeRouteFixture(t, root, []string{"./provider", "route"})
+		var envelope routePluginListEnvelope
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative, err := filepath.Rel(cwd, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.IsAbs(relative) {
+			t.Fatalf("relative fixture path is absolute: %q", relative)
+		}
+		envelope.Result.Plugins[0].PluginRoot = relative
+		envelope.Result.Plugins[0].ManifestPath = filepath.Join(relative, "herdr-plugin.toml")
+		data, err = json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRouteDiscoveryRejected(t, root, data)
+	})
 	t.Run("interface drift", func(t *testing.T) {
 		root := t.TempDir()
 		data := writeRouteFixture(t, root, []string{"./provider", "route"})
@@ -221,6 +263,88 @@ func TestRouteProcessDiscoveryRejectsMissingDisabledAndDriftedProviders(t *testi
 			t.Fatal("Herdr manifest drift accepted")
 		}
 	})
+	for name, mutate := range map[string]func(*manifest.Manifest){
+		"interface id":        func(value *manifest.Manifest) { value.Interfaces[0].ID = "other-route" },
+		"interface version":   func(value *manifest.Manifest) { value.Interfaces[0].Version++ },
+		"interface direction": func(value *manifest.Manifest) { value.Interfaces[0].Direction = manifest.InterfaceRequires },
+	} {
+		t.Run("plugin-kit "+name+" drift", func(t *testing.T) {
+			root := t.TempDir()
+			data := writeRouteFixture(t, root, []string{"./provider", "route"})
+			rewriteRouteKitFixture(t, root, mutate)
+			assertRouteDiscoveryRejected(t, root, data)
+		})
+	}
+	for name, mutate := range map[string]func(*routeDiskManifest){
+		"identity":       func(value *routeDiskManifest) { value.ID = "proof.other" },
+		"missing action": func(value *routeDiskManifest) { value.Actions = nil },
+		"title":          func(value *routeDiskManifest) { value.Actions[0].Title = "Changed" },
+		"description":    func(value *routeDiskManifest) { value.Actions[0].Description = "changed" },
+		"contexts":       func(value *routeDiskManifest) { value.Actions[0].Contexts = []string{"pane"} },
+	} {
+		t.Run("Herdr "+name+" drift", func(t *testing.T) {
+			root := t.TempDir()
+			data := writeRouteFixture(t, root, []string{"./provider", "route"})
+			rewriteRouteHerdrFixture(t, root, mutate)
+			assertRouteDiscoveryRejected(t, root, data)
+		})
+	}
+}
+
+func assertRouteDiscoveryRejected(t *testing.T, root string, data []byte) {
+	t.Helper()
+	caller := RouteProcessCaller{HerdrRunner: routeCommandRunnerFunc(func(context.Context, string, []string) (command.Result, error) {
+		return command.Result{Stdout: data}, nil
+	}), ProviderRunner: routeSpecRunnerFunc(func(context.Context, command.Spec) (command.Result, error) {
+		t.Fatal("provider executed")
+		return command.Result{}, nil
+	})}
+	if _, _, err := caller.discover(context.Background(), "proof.provider"); err == nil {
+		t.Fatalf("invalid provider accepted from %s", root)
+	}
+}
+
+func rewriteRouteKitFixture(t *testing.T, root string, mutate func(*manifest.Manifest)) {
+	t.Helper()
+	path := filepath.Join(root, "plugin-kit.json")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := manifest.Parse(file)
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&value)
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewriteRouteHerdrFixture(t *testing.T, root string, mutate func(*routeDiskManifest)) {
+	t.Helper()
+	path := filepath.Join(root, "herdr-plugin.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value routeDiskManifest
+	if err := toml.Unmarshal(data, &value); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&value)
+	data, err = toml.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRouteProcessCallerRejectsCrossSessionOriginsBeforeCommands(t *testing.T) {
@@ -255,6 +379,33 @@ func TestRouteProcessCallerRejectsCrossSessionOriginsBeforeCommands(t *testing.T
 				t.Fatal("cross-session origin accepted")
 			}
 		})
+	}
+}
+
+func TestRouteProcessCallerRejectsEachMissingRunnerAndInvalidSession(t *testing.T) {
+	request := validRouteRequest(t, RouteMethodCatalog)
+	validHerdr := routeCommandRunnerFunc(func(context.Context, string, []string) (command.Result, error) {
+		t.Fatal("Herdr executed")
+		return command.Result{}, nil
+	})
+	validProvider := routeSpecRunnerFunc(func(context.Context, command.Spec) (command.Result, error) {
+		t.Fatal("provider executed")
+		return command.Result{}, nil
+	})
+	for name, caller := range map[string]RouteProcessCaller{
+		"Herdr runner":    {ProviderRunner: validProvider},
+		"provider runner": {HerdrRunner: validHerdr},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := caller.Call(context.Background(), request); err == nil {
+				t.Fatal("invalid caller accepted")
+			}
+		})
+	}
+	request.Payload, _ = json.Marshal(routeCatalogPayload{Origin: RouteOrigin{Session: "bad session", Workspace: "w1", Tab: "w1:t1", Pane: "w1:p1"}})
+	caller := RouteProcessCaller{HerdrRunner: validHerdr, ProviderRunner: validProvider, Session: "bad session"}
+	if _, err := caller.Call(context.Background(), request); err == nil {
+		t.Fatal("invalid session accepted")
 	}
 }
 
@@ -378,6 +529,42 @@ func TestRouteProcessCallerConcurrentCorrelations(t *testing.T) {
 	}
 }
 
+func TestRouteProcessInputFileAndObservationBounds(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "bounded")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), manifest.MaxManifestBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	data, err := readRouteProviderFile(directory, "bounded")
+	if err != nil || len(data) != manifest.MaxManifestBytes {
+		t.Fatalf("exact manifest bound: length=%d error=%v", len(data), err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), manifest.MaxManifestBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRouteProviderFile(directory, "bounded"); err == nil {
+		t.Fatal("oversized provider file accepted")
+	}
+
+	observation := []byte(`{"id":"cli:plugin","result":{"type":"plugin_list","plugins":[]}}`)
+	observation = append(observation, bytes.Repeat([]byte(" "), herdrcmd.MaxJSONBytes-len(observation))...)
+	var envelope routePluginListEnvelope
+	if err := decodeHerdrObservation(observation, &envelope); err != nil {
+		t.Fatalf("exact Herdr observation bound: %v", err)
+	}
+	if err := decodeHerdrObservation(append(observation, ' '), &envelope); err == nil {
+		t.Fatal("oversized Herdr observation accepted")
+	}
+	if err := decodeHerdrObservation([]byte("[]"), &envelope); err == nil {
+		t.Fatal("malformed Herdr observation accepted")
+	}
+}
+
 func writeRouteFixture(t *testing.T, root string, argv []string) []byte {
 	t.Helper()
 	herdrData, err := toml.Marshal(routeDiskManifest{ID: "proof.provider", Actions: []routeDiskAction{{ID: ActionRouteActionID, Title: "Route plugin actions", Contexts: []string{"global"}, Command: argv}}})
@@ -451,6 +638,54 @@ func TestServeRouteRejectsNonExactJSON(t *testing.T) {
 	}
 }
 
+func TestRouteJSONDecoderBoundariesAndNestedTypes(t *testing.T) {
+	exactEnvelope := append([]byte(`{}`), bytes.Repeat([]byte(" "), MaxRouteEnvelopeBytes-2)...)
+	if data, err := readRouteEnvelope(bytes.NewReader(exactEnvelope)); err != nil || len(data) != MaxRouteEnvelopeBytes {
+		t.Fatalf("exact envelope bound: length=%d error=%v", len(data), err)
+	}
+	if _, err := readRouteEnvelope(bytes.NewReader(append(exactEnvelope, ' '))); err == nil {
+		t.Fatal("oversized envelope accepted")
+	}
+
+	type exactValue struct {
+		Value int `json:"value"`
+	}
+	exactJSON := []byte(`{"value":1}`)
+	exactJSON = append(exactJSON, bytes.Repeat([]byte(" "), MaxRouteEnvelopeBytes-len(exactJSON))...)
+	var value exactValue
+	if err := decodeExactJSON(exactJSON, []string{"value"}, &value); err != nil || value.Value != 1 {
+		t.Fatalf("exact JSON bound: value=%+v error=%v", value, err)
+	}
+	if err := decodeExactJSON(append(exactJSON, ' '), []string{"value"}, &value); err == nil {
+		t.Fatal("oversized exact JSON accepted")
+	}
+	for name, data := range map[string][]byte{
+		"non-object":         []byte(`[]`),
+		"malformed trailing": []byte(`{"value":1}]`),
+		"wrong value type":   []byte(`{"value":"one"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := decodeExactJSON(data, []string{"value"}, &value); err == nil {
+				t.Fatal("malformed exact JSON accepted")
+			}
+		})
+	}
+
+	duplicateError := []byte(`{"version":1,"correlation_id":"correlation","payload":null,"error":{"category":"internal","category":"internal","message":"failed"}}`)
+	var response Response
+	if err := decodeRouteEnvelopeResponse(duplicateError, &response); err == nil {
+		t.Fatal("duplicate nested error field accepted")
+	}
+	var catalogPayload routeCatalogPayload
+	if err := decodeRouteCatalogPayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1}}`), &catalogPayload); err == nil {
+		t.Fatal("wrong catalog origin type accepted")
+	}
+	var invokePayload routeInvokePayload
+	if err := decodeRouteInvokePayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1},"route_revision":"revision","action_id":"new","keys":["n"]}`), &invokePayload); err == nil {
+		t.Fatal("wrong invoke origin type accepted")
+	}
+}
+
 func TestServeRouteBoundsMaximumFieldCatalogueBeforeWriting(t *testing.T) {
 	actions := make([]RouteAction, MaxRouteActions)
 	for index := range actions {
@@ -482,6 +717,82 @@ func TestServeRouteBoundsMaximumFieldCatalogueBeforeWriting(t *testing.T) {
 	if response.Error == nil || response.Error.Category != PayloadTooLarge || len(response.Payload) != 0 {
 		t.Fatalf("response = %+v", response)
 	}
+}
+
+func TestServeRouteAndWriterExactResponseBounds(t *testing.T) {
+	request := validRouteRequest(t, RouteMethodCatalog)
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, encodedSize := range map[string]int{"exact": MaxRouteEnvelopeBytes - 1, "one byte over": MaxRouteEnvelopeBytes} {
+		t.Run(name, func(t *testing.T) {
+			catalog := routeCatalogForEncodedResponseSize(t, request, encodedSize)
+			var output bytes.Buffer
+			if err := ServeRoute(context.Background(), bytes.NewReader(data), &output, time.Now(), fixedCatalogProvider{catalog: catalog}); err != nil {
+				t.Fatal(err)
+			}
+			if output.Len() > MaxRouteEnvelopeBytes {
+				t.Fatalf("response length = %d", output.Len())
+			}
+			var response Response
+			if err := decodeRouteEnvelopeResponse(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if encodedSize == MaxRouteEnvelopeBytes-1 {
+				if output.Len() != MaxRouteEnvelopeBytes || response.Error != nil {
+					t.Fatalf("exact response: length=%d response=%+v", output.Len(), response)
+				}
+			} else if response.Error == nil || response.Error.Category != PayloadTooLarge {
+				t.Fatalf("oversized response = %+v", response)
+			}
+		})
+	}
+
+	var output bytes.Buffer
+	if err := writeRouteEnvelope(&output, make([]byte, MaxRouteEnvelopeBytes-1)); err != nil || output.Len() != MaxRouteEnvelopeBytes {
+		t.Fatalf("exact writer bound: length=%d error=%v", output.Len(), err)
+	}
+	output.Reset()
+	if err := writeRouteEnvelope(&output, make([]byte, MaxRouteEnvelopeBytes)); err == nil || output.Len() != 0 {
+		t.Fatalf("oversized writer: length=%d error=%v", output.Len(), err)
+	}
+}
+
+func routeCatalogForEncodedResponseSize(t *testing.T, request Request, want int) RouteCatalog {
+	t.Helper()
+	actions := make([]RouteAction, MaxRouteActions)
+	for index := range actions {
+		actions[index] = RouteAction{ActionID: fmt.Sprintf("action-%d", index), Label: "l", SuggestedPath: routePath(index), Available: false, Reason: "r"}
+	}
+	catalog := RouteCatalog{RouteRevision: "revision", Actions: actions}
+	encodedSize := func() int {
+		response := DispatchRoute(context.Background(), request, time.Now(), fixedCatalogProvider{catalog: catalog})
+		data, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data)
+	}
+	remaining := want - encodedSize()
+	for index := range catalog.Actions {
+		labelBytes := min(remaining, maxRouteLabelBytes-len(catalog.Actions[index].Label))
+		catalog.Actions[index].Label += strings.Repeat("l", labelBytes)
+		remaining -= labelBytes
+		reasonBytes := min(remaining, maxRouteReasonBytes-len(catalog.Actions[index].Reason))
+		catalog.Actions[index].Reason += strings.Repeat("r", reasonBytes)
+		remaining -= reasonBytes
+	}
+	if remaining != 0 {
+		t.Fatalf("cannot construct %d-byte response; %d bytes remain", want, remaining)
+	}
+	if err := ValidateRouteCatalog(catalog); err != nil {
+		t.Fatal(err)
+	}
+	if got := encodedSize(); got != want {
+		t.Fatalf("encoded response length = %d, want %d", got, want)
+	}
+	return catalog
 }
 
 func TestServeRouteRejectsEscapeAmplifyingCorrelationWithoutOutput(t *testing.T) {
@@ -528,10 +839,69 @@ func TestRouteClientRejectsResponseIdentityAndSchemaDrift(t *testing.T) {
 	}
 }
 
+func TestRouteClientInvokeRejectsEachResponseIdentityDrift(t *testing.T) {
+	call := RouteInvokeCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "new", Keys: []string{"p", "n", "a"}, Deadline: time.Now().Add(time.Second)}
+	for name, mutate := range map[string]func(*RouteInvokeResult){
+		"target":   func(result *RouteInvokeResult) { result.TargetPlugin = "proof.other" },
+		"revision": func(result *RouteInvokeResult) { result.RouteRevision = "other" },
+		"action":   func(result *RouteInvokeResult) { result.ActionID = "fork" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := RouteInvokeResult{TargetPlugin: call.TargetPlugin, RouteRevision: call.RouteRevision, ActionID: call.ActionID, Outcome: RouteCompleted, Focus: RouteFocusPreserved}
+			mutate(&result)
+			payload, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := RouteClient{
+				Caller: callerFunc(func(_ context.Context, request Request) (Response, error) {
+					return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: payload}, nil
+				}),
+				NewCorrelation: func() (string, error) { return "correlation", nil },
+			}
+			if _, err := client.Invoke(context.Background(), call); err == nil {
+				t.Fatal("invoke identity drift accepted")
+			}
+		})
+	}
+}
+
+func TestRouteClientDefaultCorrelationIsValid(t *testing.T) {
+	client := RouteClient{Caller: callerFunc(func(_ context.Context, request Request) (Response, error) {
+		if err := validateCorrelation(request.CorrelationID); err != nil {
+			t.Fatalf("default correlation %q: %v", request.CorrelationID, err)
+		}
+		payload, err := json.Marshal(RouteCatalogResult{TargetPlugin: request.TargetPlugin, RouteRevision: "revision", Actions: []RouteAction{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: payload}, nil
+	})}
+	if _, err := client.Catalog(context.Background(), RouteCatalogCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), Deadline: time.Now().Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type callerFunc func(context.Context, Request) (Response, error)
 
 func (f callerFunc) Call(ctx context.Context, request Request) (Response, error) {
 	return f(ctx, request)
+}
+
+func TestValidateRouteRequestRejectsEachInterfaceFieldAndMissingPayload(t *testing.T) {
+	for name, mutate := range map[string]func(*Request){
+		"interface id":      func(request *Request) { request.Interface = "other-route" },
+		"interface version": func(request *Request) { request.InterfaceVersion++ },
+		"missing payload":   func(request *Request) { request.Payload = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := validRouteRequest(t, RouteMethodCatalog)
+			mutate(&request)
+			if err := validateRouteRequest(context.Background(), request, time.Now()); err == nil {
+				t.Fatal("invalid route request accepted")
+			}
+		})
+	}
 }
 
 func TestRouteValidationBoundsAndEnums(t *testing.T) {
@@ -726,6 +1096,12 @@ func TestRouteDispatchRejectsStaleMissingAndUnavailableBeforeEffects(t *testing.
 				t.Fatalf("response=%+v invocations=%d", response, provider.invocations)
 			}
 		})
+	}
+	request := validRouteRequest(t, RouteMethodInvoke)
+	request.Payload, _ = json.Marshal(routeInvokePayload{Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "fork", Keys: []string{"p", "f"}})
+	response := DispatchRoute(context.Background(), request, time.Now(), &countingRouteProvider{})
+	if response.Error == nil || response.Error.Message != "action-route action is unavailable: source is busy" {
+		t.Fatalf("unavailable response = %+v", response)
 	}
 }
 

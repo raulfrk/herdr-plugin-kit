@@ -63,9 +63,6 @@ func (c RouteProcessCaller) Call(ctx context.Context, request Request) (Response
 	if err != nil {
 		return Response{}, err
 	}
-	if len(encoded) > MaxRouteEnvelopeBytes {
-		return Response{}, fmt.Errorf("action-route request exceeds %d bytes", MaxRouteEnvelopeBytes)
-	}
 	result, err := c.ProviderRunner.RunSpec(callCtx, command.Spec{Executable: argv[0], Args: append([]string(nil), argv[1:]...), Dir: root, Stdin: encoded})
 	if err != nil {
 		return Response{}, err
