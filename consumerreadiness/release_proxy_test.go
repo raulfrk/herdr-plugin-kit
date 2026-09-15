@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,9 @@ func TestUnpublishedV030ProxyConsumers(t *testing.T) {
 			verifyProxyConsumer(t, proxy, consumer.pluginID, consumer.attention)
 		})
 	}
+	if t.Failed() {
+		return
+	}
 	t.Logf("verified unpublished %s at candidate SHA %s", releaseCandidateVersion, sha)
 }
 
@@ -74,31 +78,79 @@ func seedDependencyProxy(t *testing.T, root, proxy string) {
 	}
 
 	moduleCache := releaseCommand(t, root, nil, "go", "env", "GOMODCACHE")
+	queue := make([]module.Version, 0, len(parsed.Require))
+	selected := make(map[module.Version]bool, len(parsed.Require))
 	for _, requirement := range parsed.Require {
-		dependency := requirement.Mod
-		escapedPath, err := module.EscapePath(dependency.Path)
-		if err != nil {
-			t.Fatalf("escape module path %q: %v", dependency.Path, err)
-		}
-		escapedVersion, err := module.EscapeVersion(dependency.Version)
-		if err != nil {
-			t.Fatalf("escape module version %q: %v", dependency.Version, err)
-		}
-		source := filepath.Join(moduleCache, "cache", "download", escapedPath, "@v")
-		destination := filepath.Join(proxy, escapedPath, "@v")
-		for _, suffix := range []string{".info", ".mod", ".zip", ".ziphash"} {
-			name := escapedVersion + suffix
-			data, readErr := os.ReadFile(filepath.Join(source, name))
-			if os.IsNotExist(readErr) {
-				t.Fatalf("cached dependency %s@%s lacks %s; populate the Go cache before running the offline release gate", dependency.Path, dependency.Version, name)
-			}
-			if readErr != nil {
-				t.Fatalf("read cached dependency %s@%s: %v", dependency.Path, dependency.Version, readErr)
-			}
-			writeReleaseFile(t, filepath.Join(destination, name), data)
-		}
-		writeReleaseFile(t, filepath.Join(destination, "list"), []byte(dependency.Version+"\n"))
+		queue = append(queue, requirement.Mod)
+		selected[requirement.Mod] = true
 	}
+	visited := make(map[module.Version]bool)
+	versions := make(map[string]map[string]bool)
+	for len(queue) > 0 {
+		dependency := queue[0]
+		queue = queue[1:]
+		if visited[dependency] {
+			continue
+		}
+		visited[dependency] = true
+		if versions[dependency.Path] == nil {
+			versions[dependency.Path] = make(map[string]bool)
+		}
+		versions[dependency.Path][dependency.Version] = true
+		dependencyMod := copyDependencyToProxy(t, moduleCache, proxy, dependency, selected[dependency])
+		dependencyFile, parseErr := modfile.Parse(dependency.Path+"@"+dependency.Version+".mod", dependencyMod, nil)
+		if parseErr != nil {
+			t.Fatalf("parse cached dependency %s@%s: %v", dependency.Path, dependency.Version, parseErr)
+		}
+		for _, requirement := range dependencyFile.Require {
+			queue = append(queue, requirement.Mod)
+		}
+	}
+	for path, found := range versions {
+		list := make([]string, 0, len(found))
+		for version := range found {
+			list = append(list, version)
+		}
+		sort.Strings(list)
+		escapedPath, err := module.EscapePath(path)
+		if err != nil {
+			t.Fatalf("escape module path %q: %v", path, err)
+		}
+		writeReleaseFile(t, filepath.Join(proxy, escapedPath, "@v", "list"), []byte(strings.Join(list, "\n")+"\n"))
+	}
+}
+
+func copyDependencyToProxy(t *testing.T, moduleCache, proxy string, dependency module.Version, selected bool) []byte {
+	t.Helper()
+	escapedPath, err := module.EscapePath(dependency.Path)
+	if err != nil {
+		t.Fatalf("escape module path %q: %v", dependency.Path, err)
+	}
+	escapedVersion, err := module.EscapeVersion(dependency.Version)
+	if err != nil {
+		t.Fatalf("escape module version %q: %v", dependency.Version, err)
+	}
+	source := filepath.Join(moduleCache, "cache", "download", escapedPath, "@v")
+	destination := filepath.Join(proxy, escapedPath, "@v")
+	var goMod []byte
+	for _, suffix := range []string{".info", ".mod", ".zip", ".ziphash"} {
+		name := escapedVersion + suffix
+		data, readErr := os.ReadFile(filepath.Join(source, name))
+		if os.IsNotExist(readErr) && !selected && suffix != ".mod" {
+			continue
+		}
+		if os.IsNotExist(readErr) {
+			t.Fatalf("cached dependency %s@%s lacks %s; populate the Go cache before running the offline release gate", dependency.Path, dependency.Version, name)
+		}
+		if readErr != nil {
+			t.Fatalf("read cached dependency %s@%s: %v", dependency.Path, dependency.Version, readErr)
+		}
+		writeReleaseFile(t, filepath.Join(destination, name), data)
+		if suffix == ".mod" {
+			goMod = data
+		}
+	}
+	return goMod
 }
 
 func publishCandidateToProxy(t *testing.T, root, proxy string) {
@@ -146,6 +198,7 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
 	consumer := filepath.Join(root, pluginID)
 	moduleCache := filepath.Join(root, "modcache")
 	buildCache := filepath.Join(root, "buildcache")
+	t.Cleanup(func() { makeReleaseCacheRemovable(t, moduleCache) })
 	proxyURL := (&url.URL{Scheme: "file", Path: proxy}).String()
 	environment := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -183,6 +236,22 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
 	}
 	if bytes.Contains(goMod, []byte("replace ")) || bytes.Contains(goMod, []byte("replace\n")) {
 		t.Fatalf("generated consumer contains a replace directive:\n%s", goMod)
+	}
+}
+
+func makeReleaseCacheRemovable(t *testing.T, moduleCache string) {
+	t.Helper()
+	err := filepath.WalkDir(moduleCache, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Errorf("make task-owned module cache removable: %v", err)
 	}
 }
 
