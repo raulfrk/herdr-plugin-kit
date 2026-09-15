@@ -56,6 +56,29 @@ only the actionable denominator and never rewrite raw Gremlins counts.
 
 ## Reproducibility and isolation
 
+The unpublished release-candidate gate runs only from a clean committed tree:
+
+```sh
+python -m pip install --requirement testtools/requirements-pane-capture.txt
+make test-release-candidate
+```
+
+It constructs a local Go module proxy for that exact `HEAD`, serves the module
+as `v0.3.0`, and gives the default and Attention-shaped generated consumers
+separate empty module and build caches. The local proxy is their only module
+source and is seeded with the candidate's already-resolved dependencies, never
+with a cached Plugin Kit candidate. Both consumers must validate, tidy, test,
+race-test, and build while `go list -m` reports exactly `v0.3.0` with no
+`replace`. The Attention-shaped compile fixture exercises generic New, Fork,
+Resume, same-pane conversion, prompt, keybinding, and UI-authored action-route
+contracts; it does not implement Attention runtime policy.
+
+`testtools/pane_capture.py` separately converts the supported Herdr visible
+ANSI and text reads into deterministic PNG plus cell-level JSON evidence. The
+release reviewer must inspect the PNG itself; byte hashes alone are not a
+visual-fidelity verdict. Product mockup screenshots remain acceptance evidence
+in the product repositories, not in the Plugin Kit release gate.
+
 Mutation tests run in a clean dedicated Git worktree at a committed candidate.
 The initial baseline is the repository's empty root commit, whose tree must be
 4b825dc642cb6eb9a060e54bf8d69288fbee4904. Gremlins cannot accept that tree
@@ -121,7 +144,7 @@ all shell correctness and concurrency tests.
 ## HYP-SCAFFOLD-02 — Both manifests describe one runnable private plugin
 
 - Claim: generated Herdr TOML and `plugin-kit.json` retain identical identity
-  and static actions, use argv-only build/action/pane commands, pin kit v0.2.0
+  and static actions, use argv-only build/action/pane commands, pin kit v0.3.0
   without `replace`, expose responsive main and Debug UI surfaces, and keep
   config/state under Herdr-provided directories.
 - Fault model: schema drift, shell command insertion, non-overlay panes,

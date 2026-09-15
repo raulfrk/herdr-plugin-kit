@@ -1,0 +1,278 @@
+package consumerreadiness_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
+)
+
+const (
+	releaseCandidateEnvironment = "HERDR_PLUGIN_KIT_RELEASE_CANDIDATE"
+	releaseCandidateModule      = "github.com/raulfrk/herdr-plugin-kit"
+	releaseCandidateVersion     = "v0.3.0"
+)
+
+func TestUnpublishedV030ProxyConsumers(t *testing.T) {
+	if os.Getenv(releaseCandidateEnvironment) != "1" {
+		t.Skip("set HERDR_PLUGIN_KIT_RELEASE_CANDIDATE=1 to verify a clean committed v0.3.0 candidate")
+	}
+	root := releaseRepositoryRoot(t)
+	if status := releaseCommand(t, root, nil, "git", "status", "--porcelain"); status != "" {
+		t.Fatalf("release candidate worktree is not clean:\n%s", status)
+	}
+	sha := releaseCommand(t, root, nil, "git", "rev-parse", "HEAD")
+	proxy := filepath.Join(t.TempDir(), "proxy")
+	seedDependencyProxy(t, root, proxy)
+	publishCandidateToProxy(t, root, proxy)
+
+	for _, consumer := range []struct {
+		name      string
+		pluginID  string
+		attention bool
+	}{
+		{name: "default", pluginID: "release-default"},
+		{name: "attention-shaped", pluginID: "attention-shaped", attention: true},
+	} {
+		consumer := consumer
+		t.Run(consumer.name, func(t *testing.T) {
+			verifyProxyConsumer(t, proxy, consumer.pluginID, consumer.attention)
+		})
+	}
+	t.Logf("verified unpublished %s at candidate SHA %s", releaseCandidateVersion, sha)
+}
+
+func releaseRepositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate release proxy test source")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(source), ".."))
+}
+
+func seedDependencyProxy(t *testing.T, root, proxy string) {
+	t.Helper()
+	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read candidate dependencies: %v", err)
+	}
+	parsed, err := modfile.Parse("go.mod", goMod, nil)
+	if err != nil {
+		t.Fatalf("parse candidate dependencies: %v", err)
+	}
+
+	moduleCache := releaseCommand(t, root, nil, "go", "env", "GOMODCACHE")
+	for _, requirement := range parsed.Require {
+		dependency := requirement.Mod
+		escapedPath, err := module.EscapePath(dependency.Path)
+		if err != nil {
+			t.Fatalf("escape module path %q: %v", dependency.Path, err)
+		}
+		escapedVersion, err := module.EscapeVersion(dependency.Version)
+		if err != nil {
+			t.Fatalf("escape module version %q: %v", dependency.Version, err)
+		}
+		source := filepath.Join(moduleCache, "cache", "download", escapedPath, "@v")
+		destination := filepath.Join(proxy, escapedPath, "@v")
+		for _, suffix := range []string{".info", ".mod", ".zip", ".ziphash"} {
+			name := escapedVersion + suffix
+			data, readErr := os.ReadFile(filepath.Join(source, name))
+			if os.IsNotExist(readErr) {
+				t.Fatalf("cached dependency %s@%s lacks %s; populate the Go cache before running the offline release gate", dependency.Path, dependency.Version, name)
+			}
+			if readErr != nil {
+				t.Fatalf("read cached dependency %s@%s: %v", dependency.Path, dependency.Version, readErr)
+			}
+			writeReleaseFile(t, filepath.Join(destination, name), data)
+		}
+		writeReleaseFile(t, filepath.Join(destination, "list"), []byte(dependency.Version+"\n"))
+	}
+}
+
+func publishCandidateToProxy(t *testing.T, root, proxy string) {
+	t.Helper()
+	escapedPath, err := module.EscapePath(releaseCandidateModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escapedVersion, err := module.EscapeVersion(releaseCandidateVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(proxy, escapedPath, "@v")
+	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read candidate go.mod: %v", err)
+	}
+	writeReleaseFile(t, filepath.Join(destination, escapedVersion+".mod"), goMod)
+	writeReleaseFile(t, filepath.Join(destination, "list"), []byte(releaseCandidateVersion+"\n"))
+
+	commitTime := releaseCommand(t, root, nil, "git", "show", "-s", "--format=%cI", "HEAD")
+	parsedTime, err := time.Parse(time.RFC3339, commitTime)
+	if err != nil {
+		t.Fatalf("parse candidate commit time %q: %v", commitTime, err)
+	}
+	info, err := json.Marshal(struct {
+		Version string
+		Time    time.Time
+	}{Version: releaseCandidateVersion, Time: parsedTime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseFile(t, filepath.Join(destination, escapedVersion+".info"), append(info, '\n'))
+
+	zipPath := filepath.Join(destination, escapedVersion+".zip")
+	if err := os.MkdirAll(filepath.Dir(zipPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	releaseCommand(t, root, nil, "git", "archive", "--format=zip", "--prefix="+releaseCandidateModule+"@"+releaseCandidateVersion+"/", "--output="+zipPath, "HEAD")
+}
+
+func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
+	t.Helper()
+	root := t.TempDir()
+	consumer := filepath.Join(root, pluginID)
+	moduleCache := filepath.Join(root, "modcache")
+	buildCache := filepath.Join(root, "buildcache")
+	proxyURL := (&url.URL{Scheme: "file", Path: proxy}).String()
+	environment := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + filepath.Join(root, "home"),
+		"GOCACHE=" + buildCache,
+		"GOMODCACHE=" + moduleCache,
+		"GOPROXY=" + proxyURL,
+		"GONOSUMDB=*",
+		"GOSUMDB=off",
+		"GOTOOLCHAIN=go1.27.0",
+		"GOWORK=off",
+	}
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	releaseCommand(t, root, environment, "go", "run", releaseCandidateModule+"/cmd/herdr-plugin-kit@"+releaseCandidateVersion,
+		"new", "--id", pluginID, "--name", pluginID, "--output", consumer)
+	if attention {
+		writeReleaseFile(t, filepath.Join(consumer, "attention_contract_test.go"), []byte(attentionConsumerContract))
+	}
+	releaseCommand(t, root, environment, "go", "run", releaseCandidateModule+"/cmd/herdr-plugin-kit@"+releaseCandidateVersion,
+		"validate", consumer)
+	releaseCommand(t, consumer, environment, "go", "mod", "tidy")
+	moduleLine := releaseCommand(t, consumer, environment, "go", "list", "-m", "-f", "{{.Path}} {{.Version}} {{if .Replace}}{{.Replace.Path}}@{{.Replace.Version}}{{else}}<nil>{{end}}", releaseCandidateModule)
+	wantModuleLine := releaseCandidateModule + " " + releaseCandidateVersion + " <nil>"
+	if moduleLine != wantModuleLine {
+		t.Fatalf("candidate module = %q, want %q", moduleLine, wantModuleLine)
+	}
+	releaseCommand(t, consumer, environment, "go", "test", "./...")
+	releaseCommand(t, consumer, environment, "go", "test", "-race", "./...")
+	releaseCommand(t, consumer, environment, "go", "build", "./...")
+	goMod, err := os.ReadFile(filepath.Join(consumer, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(goMod, []byte("replace ")) || bytes.Contains(goMod, []byte("replace\n")) {
+		t.Fatalf("generated consumer contains a replace directive:\n%s", goMod)
+	}
+}
+
+func writeReleaseFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func releaseCommand(t *testing.T, directory string, environment []string, name string, arguments ...string) string {
+	t.Helper()
+	return strings.TrimSpace(string(releaseCommandBytes(t, directory, environment, name, arguments...)))
+}
+
+func releaseCommandBytes(t *testing.T, directory string, environment []string, name string, arguments ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, name, arguments...)
+	command.Dir = directory
+	if environment != nil {
+		command.Env = environment
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("%s %s exceeded 60 seconds\n%s", name, strings.Join(arguments, " "), output)
+		}
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(arguments, " "), err, output)
+	}
+	return output
+}
+
+const attentionConsumerContract = `package attention_contract
+
+import (
+	"testing"
+
+	"github.com/raulfrk/herdr-plugin-kit/runtime/agenthost"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/keybindinghost"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
+)
+
+func TestAttentionShapedConsumerCompilesSupportedGenericRequests(t *testing.T) {
+	origin := sessionhost.Origin{SessionName: "work", WorkspaceID: "workspace", TabID: "tab", PaneID: "pane"}
+	prompt, err := agenthost.PreparePrompt("Review the active task without changing its identity.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := agenthost.ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium", ApprovalPolicy: "never", SandboxMode: "danger-full-access"}
+	threadID := "01a09f5c-37cc-77f1-9409-e9aa070ad8d0"
+	source := agenthost.Agent{SessionName: "work", Kind: "codex", Status: "idle", CWD: "/tmp/attention", WorkspaceID: "workspace", TabID: "tab", PaneID: "pane", Session: &agenthost.SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: threadID}}
+	managed := []agenthost.ManagedCodexRequest{
+		{Operation: agenthost.ManagedNew, Origin: origin, Directory: source.CWD, Placement: sessionhost.NewPane, Direction: "right", Policy: policy, Prompt: &prompt},
+		{Operation: agenthost.ManagedFork, Origin: origin, Directory: source.CWD, Placement: sessionhost.NewTab, Source: source, Policy: policy, Prompt: &prompt},
+		{Operation: agenthost.ManagedResume, Origin: origin, Directory: source.CWD, ThreadID: threadID, SourceArgv: []string{"codex"}, Policy: policy},
+	}
+	if managed[0].Placement != sessionhost.NewPane || managed[1].Placement != sessionhost.NewTab || managed[1].Source.Session.Value != threadID || managed[2].Placement != "" || managed[2].ThreadID != threadID {
+		t.Fatalf("managed profile topology changed: %+v", managed)
+	}
+	ordinary := agenthost.PromptStartRequest{Origin: origin, Argv: []string{"custom-agent", "--profile", "review"}, Directory: source.CWD, Placement: sessionhost.NewPane, Direction: "down"}
+	if ordinary.Argv[0] != "custom-agent" || ordinary.Placement != sessionhost.NewPane {
+		t.Fatalf("ordinary prompt profile changed: %+v", ordinary)
+	}
+	conversion := agenthost.CodexConversionRequest{Source: source}
+	if conversion.Source.PaneID != origin.PaneID {
+		t.Fatalf("same-pane conversion source changed: %+v", conversion)
+	}
+	bindings := keybindinghost.Request{Owner: "attention-shaped", Bindings: []keybindinghost.Binding{
+		{Key: "n", Action: "open-new", Description: "Open New profiles"},
+		{Key: "f", Action: "open-fork", Description: "Open Fork profiles"},
+	}}
+	if len(bindings.Bindings) != 2 {
+		t.Fatalf("profile bindings changed: %+v", bindings)
+	}
+	action, contract, err := interop.ActionRouteDeclaration([]string{"./plugin", "action", "route"})
+	if err != nil || action.ID != interop.ActionRouteActionID || contract.ID != interop.ActionRouteInterface {
+		t.Fatalf("route declaration = %+v, %+v, %v", action, contract, err)
+	}
+	catalog := interop.RouteCatalog{RouteRevision: "settings-revision", Actions: []interop.RouteAction{
+		{ActionID: "new-review", Label: "New review", SuggestedPath: []string{"n", "r"}, Available: true},
+		{ActionID: "fork-review", Label: "Fork review", SuggestedPath: []string{"f", "r"}, Available: true},
+	}}
+	if err := interop.ValidateRouteCatalog(catalog); err != nil {
+		t.Fatalf("UI-authored route catalog: %v", err)
+	}
+}
+`

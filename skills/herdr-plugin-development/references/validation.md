@@ -8,7 +8,7 @@ plugin ID in the build path:
 # dependency metadata during its pre-change validation.
 go mod tidy
 
-go run github.com/raulfrk/herdr-plugin-kit/cmd/herdr-plugin-kit@v0.2.0 validate .
+go run github.com/raulfrk/herdr-plugin-kit/cmd/herdr-plugin-kit@v0.3.0 validate .
 go test ./...
 go test -race ./...
 go build -mod=mod -buildvcs=false -o ./plugin ./cmd/<plugin-id>

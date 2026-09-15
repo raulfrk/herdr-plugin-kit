@@ -23,8 +23,8 @@ requested behavior demonstrably requires a compatible extension:
 
 Use the versioned kit recipes for capability-specific composition:
 
-- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.2.0/docs/plugin-recipes.md
-- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.2.0/docs/diagnostics.md
-- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.2.0/docs/documentstore.md
-- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.2.0/docs/interop.md
-- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.2.0/docs/ui-contract.md
+- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.3.0/docs/plugin-recipes.md
+- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.3.0/docs/diagnostics.md
+- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.3.0/docs/documentstore.md
+- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.3.0/docs/interop.md
+- https://github.com/raulfrk/herdr-plugin-kit/blob/v0.3.0/docs/ui-contract.md

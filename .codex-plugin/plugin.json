@@ -1,7 +1,7 @@
 {
   "name": "herdr-plugin-development",
   "version": "0.1.0",
-  "description": "Create and validate Go plugins with Herdr Plugin Kit v0.2.0.",
+  "description": "Create and validate Go plugins with Herdr Plugin Kit v0.3.0.",
   "skills": "./skills/",
   "author": {
     "name": "Raul Farkas",

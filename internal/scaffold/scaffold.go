@@ -28,7 +28,7 @@ import (
 const (
 	Version      = "0.1.0"
 	KitModule    = "github.com/raulfrk/herdr-plugin-kit"
-	KitVersion   = "v0.2.0"
+	KitVersion   = "v0.3.0"
 	HerdrVersion = "0.8.2"
 	maxFileBytes = 1 << 20
 )

@@ -37,7 +37,7 @@ Use the exact released generator unless the repository already pins another
 supported kit version:
 
 ```sh
-go run github.com/raulfrk/herdr-plugin-kit/cmd/herdr-plugin-kit@v0.2.0 new \
+go run github.com/raulfrk/herdr-plugin-kit/cmd/herdr-plugin-kit@v0.3.0 new \
   --id <plugin-id> \
   --name <display-name> \
   --description <description> \

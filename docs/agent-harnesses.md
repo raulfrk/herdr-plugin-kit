@@ -69,4 +69,4 @@ enabled. It may also select the skill from its description.
 Review skills before installing them because they instruct agents that can read,
 write, and run commands. Pin a Git tag for repeatable installation. The plugin
 package has its own version; its instructions currently target Herdr Plugin Kit
-`v0.2.0` and Herdr `0.8.2`.
+`v0.3.0` and Herdr `0.8.2`.

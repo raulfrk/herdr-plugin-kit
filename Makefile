@@ -1,7 +1,7 @@
 GOTOOLCHAIN ?= go1.27.0
 BASE ?=
 
-.PHONY: test test-timing test-race test-properties mutation-changed mutation-full
+.PHONY: test test-timing test-race test-properties test-release-candidate mutation-changed mutation-full
 
 test:
 	$(MAKE) test-timing
@@ -16,6 +16,10 @@ test-race:
 
 test-properties:
 	RAPID_CHECKS=1000 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./... -run 'Property|Model'
+
+test-release-candidate:
+	HERDR_PLUGIN_KIT_RELEASE_CANDIDATE=1 GOTOOLCHAIN=$(GOTOOLCHAIN) go test ./consumerreadiness -run '^TestUnpublishedV030ProxyConsumers$$' -count=1 -v
+	pytest -q testtools/test_pane_capture.py
 
 mutation-changed:
 	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 2; }
