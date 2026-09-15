@@ -384,6 +384,7 @@ func TestRouteProcessCallerRejectsCrossSessionOriginsBeforeCommands(t *testing.T
 
 func TestRouteProcessCallerRejectsEachMissingRunnerAndInvalidSession(t *testing.T) {
 	request := validRouteRequest(t, RouteMethodCatalog)
+	request.Payload, _ = json.Marshal(routeCatalogPayload{Origin: RouteOrigin{Workspace: "w1", Tab: "w1:t1", Pane: "w1:p1"}})
 	validHerdr := routeCommandRunnerFunc(func(context.Context, string, []string) (command.Result, error) {
 		t.Fatal("Herdr executed")
 		return command.Result{}, nil
@@ -670,6 +671,12 @@ func TestRouteJSONDecoderBoundariesAndNestedTypes(t *testing.T) {
 			}
 		})
 	}
+	if _, err := exactJSONObject([]byte(`[]`), []string{"value"}); err == nil {
+		t.Fatal("non-object accepted as exact object")
+	}
+	if _, err := exactJSONObject([]byte(`{"value":1}]`), []string{"value"}); err == nil {
+		t.Fatal("malformed trailing token accepted by exact object decoder")
+	}
 
 	duplicateError := []byte(`{"version":1,"correlation_id":"correlation","payload":null,"error":{"category":"internal","category":"internal","message":"failed"}}`)
 	var response Response
@@ -677,12 +684,12 @@ func TestRouteJSONDecoderBoundariesAndNestedTypes(t *testing.T) {
 		t.Fatal("duplicate nested error field accepted")
 	}
 	var catalogPayload routeCatalogPayload
-	if err := decodeRouteCatalogPayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1}}`), &catalogPayload); err == nil {
-		t.Fatal("wrong catalog origin type accepted")
+	if err := decodeRouteCatalogPayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1}}`), &catalogPayload); err == nil || !strings.Contains(err.Error(), "cannot unmarshal number") {
+		t.Fatalf("wrong catalog origin type error = %v", err)
 	}
 	var invokePayload routeInvokePayload
-	if err := decodeRouteInvokePayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1},"route_revision":"revision","action_id":"new","keys":["n"]}`), &invokePayload); err == nil {
-		t.Fatal("wrong invoke origin type accepted")
+	if err := decodeRouteInvokePayload([]byte(`{"origin":{"session":"proof","workspace":"w1","tab":"w1:t1","pane":1},"route_revision":"revision","action_id":"new","keys":["n"]}`), &invokePayload); err == nil || !strings.Contains(err.Error(), "cannot unmarshal number") {
+		t.Fatalf("wrong invoke origin type error = %v", err)
 	}
 }
 
