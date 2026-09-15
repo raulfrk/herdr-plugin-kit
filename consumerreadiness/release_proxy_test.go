@@ -93,11 +93,14 @@ func seedDependencyProxy(t *testing.T, root, proxy string) {
 			continue
 		}
 		visited[dependency] = true
+		dependencyMod := copyDependencyToProxy(t, moduleCache, proxy, dependency, selected[dependency])
+		if len(dependencyMod) == 0 {
+			continue
+		}
 		if versions[dependency.Path] == nil {
 			versions[dependency.Path] = make(map[string]bool)
 		}
 		versions[dependency.Path][dependency.Version] = true
-		dependencyMod := copyDependencyToProxy(t, moduleCache, proxy, dependency, selected[dependency])
 		dependencyFile, parseErr := modfile.Parse(dependency.Path+"@"+dependency.Version+".mod", dependencyMod, nil)
 		if parseErr != nil {
 			t.Fatalf("parse cached dependency %s@%s: %v", dependency.Path, dependency.Version, parseErr)
@@ -138,6 +141,9 @@ func copyDependencyToProxy(t *testing.T, moduleCache, proxy string, dependency m
 		data, readErr := os.ReadFile(filepath.Join(source, name))
 		if os.IsNotExist(readErr) && !selected && suffix != ".mod" {
 			continue
+		}
+		if os.IsNotExist(readErr) && !selected {
+			return nil
 		}
 		if os.IsNotExist(readErr) {
 			t.Fatalf("cached dependency %s@%s lacks %s; populate the Go cache before running the offline release gate", dependency.Path, dependency.Version, name)
