@@ -466,7 +466,9 @@ func TestReadCodexServiceProcessAtParsesBoundedFixture(t *testing.T) {
 }
 
 func TestReadCodexServiceProcessAtRejectsInvalidObservations(t *testing.T) {
-	if _, err := readCodexServiceProcessAt(t.TempDir(), 0); err == nil {
+	zeroRoot := t.TempDir()
+	writeCodexServiceProcessFixture(t, zeroRoot, 0)
+	if _, err := readCodexServiceProcessAt(zeroRoot, 0); err == nil {
 		t.Fatal("invalid PID unexpectedly succeeded")
 	}
 	for _, name := range []string{"exe", "cmdline", "environ", "cgroup"} {
@@ -598,7 +600,7 @@ func TestCanonicalExistingDirectory(t *testing.T) {
 		path            string
 		requireAbsolute bool
 	}{
-		{name: "empty", path: "", requireAbsolute: true},
+		{name: "empty", path: "", requireAbsolute: false},
 		{name: "NUL", path: string([]byte{'x', 0}), requireAbsolute: false},
 		{name: "relative required", path: relative, requireAbsolute: true},
 		{name: "file", path: file, requireAbsolute: true},
@@ -921,7 +923,7 @@ func TestCodexServiceEnsureDoesNotStartUnsafeStates(t *testing.T) {
 
 func TestCodexServiceAwaitReadyUsesFallbackForNonpositiveInterval(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
-	fixture.service.pollInterval = -time.Millisecond
+	fixture.service.pollInterval = 0
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
 		if path == fixture.paths.RuntimeDir {
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
@@ -1018,6 +1020,25 @@ func TestCodexServiceValidateSocketRejectsEachOwnershipDrift(t *testing.T) {
 				t.Fatalf("validate socket error=%v, want %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCodexServiceValidateSocketUsesInjectedEUID(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	uid := os.Geteuid() + 1
+	fixture.service.euid = func() int { return uid }
+	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+		switch path {
+		case fixture.paths.RuntimeDir:
+			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: uint32(uid), dir: true}, nil
+		case fixture.paths.SocketPath:
+			return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: uint32(uid)}, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	if err := fixture.service.validateSocket(fixture.paths, fixture.descriptor); err != nil {
+		t.Fatalf("injected EUID socket validation error=%v", err)
 	}
 }
 

@@ -391,14 +391,29 @@ func TestDiscoverManagedIdentityRejectsDraftAppearingOnSecondComposerRead(t *tes
 func TestAwaitFreshStatusRejectsOldBlockWithUnrelatedNewOutput(t *testing.T) {
 	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
 	before := observedManagedStatus()
-	runner := &scriptedRunner{results: []command.Result{
-		paneScrollResult(t, target, 10), {Stdout: []byte(before + "\nunrelated output")},
-	}}
+	scroll := paneScrollResult(t, target, 10)
+	history := command.Result{Stdout: []byte(before + "\nunrelated output")}
+	reads := 0
+	// Polling may observe the same snapshot again before the deadline is handled.
+	// Keep observations repeatable; the wait loop owns cancellation.
+	runner := runnerFunc(func(_ context.Context, executable string, args []string) (command.Result, error) {
+		if executable == "herdr" {
+			switch {
+			case reflect.DeepEqual(args, []string{"pane", "get", target.PaneID}):
+				return scroll, nil
+			case reflect.DeepEqual(args, []string{"pane", "read", target.PaneID, "--source", "recent-unwrapped", "--lines", "50", "--format", "text"}):
+				reads++
+				return history, nil
+			}
+		}
+		t.Fatalf("unexpected command: %s %q", executable, args)
+		return command.Result{}, errors.New("unexpected command")
+	})
 	launcher := NewManagedCodexLauncher(Host{Runner: runner})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
-	if _, err := launcher.awaitFreshStatus(ctx, target, before, "/tmp/project", managedServiceSnapshot(), managedPolicy()); !errors.Is(err, ErrManagedStale) {
-		t.Fatalf("error=%v", err)
+	if id, err := launcher.awaitFreshStatus(ctx, target, before, "/tmp/project", managedServiceSnapshot(), managedPolicy()); !errors.Is(err, ErrManagedStale) || id != "" || reads == 0 {
+		t.Fatalf("identity=%q reads=%d error=%v", id, reads, err)
 	}
 }
 

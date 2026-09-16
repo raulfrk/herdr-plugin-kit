@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,20 @@ type codexServiceInstallFixture struct {
 	executable string
 	service    *CodexService
 	runner     *codexServiceRunner
+}
+
+// releaseLockOnFirstDoneContext releases a held test lock only after the
+// contender enters its first polling select. acquire's initial Err check does
+// not call Done, which makes the contention arrangement deterministic.
+type releaseLockOnFirstDoneContext struct {
+	context.Context
+	release func()
+	once    sync.Once
+}
+
+func (c *releaseLockOnFirstDoneContext) Done() <-chan struct{} {
+	c.once.Do(c.release)
+	return c.Context.Done()
 }
 
 func newCodexServiceInstallFixture(t *testing.T) codexServiceInstallFixture {
@@ -861,6 +876,12 @@ func TestSystemdExecStartMatchesExactPathAndArgv(t *testing.T) {
 func TestCodexServiceVerifyUninstalledRejectsEveryLoadedOrEnabledState(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
 	loaded := serviceShowForDescriptor(fixture.paths, fixture.descriptor, "inactive", "dead", 0, "")
+	loadedDisabled := loaded
+	loadedDisabled.Stdout = []byte(strings.Replace(string(loadedDisabled.Stdout), "UnitFileState=enabled", "UnitFileState=disabled", 1))
+	notFoundEnabled := notFoundShow()
+	notFoundEnabled.Stdout = []byte(strings.Replace(string(notFoundEnabled.Stdout), "UnitFileState=not-found", "UnitFileState=enabled", 1))
+	notFoundEmpty := notFoundShow()
+	notFoundEmpty.Stdout = []byte(strings.Replace(string(notFoundEmpty.Stdout), "UnitFileState=not-found", "UnitFileState=", 1))
 	for _, test := range []struct {
 		name       string
 		show       command.Result
@@ -870,8 +891,11 @@ func TestCodexServiceVerifyUninstalledRejectsEveryLoadedOrEnabledState(t *testin
 		wantErr    error
 	}{
 		{name: "not found with disabled result", show: notFoundShow(), enabled: command.Result{Stdout: []byte("disabled\n")}},
+		{name: "not found with empty unit file state", show: notFoundEmpty, enabled: command.Result{Stdout: []byte("not-found\n")}},
 		{name: "not found with manager not found", show: notFoundShow(), enabled: command.Result{Stdout: []byte("not-found\n")}, enabledErr: errors.New("not found")},
 		{name: "loaded", show: loaded, enabled: command.Result{Stdout: []byte("disabled\n")}, wantErr: ErrCodexServiceOwnership},
+		{name: "loaded with disabled unit file state", show: loadedDisabled, enabled: command.Result{Stdout: []byte("disabled\n")}, wantErr: ErrCodexServiceOwnership},
+		{name: "not found with enabled unit file state", show: notFoundEnabled, enabled: command.Result{Stdout: []byte("disabled\n")}, wantErr: ErrCodexServiceOwnership},
 		{name: "show failure", showErr: errors.New("show failed"), wantErr: ErrCodexServiceUnavailable},
 		{name: "enabled", show: notFoundShow(), enabled: command.Result{Stdout: []byte("enabled\n")}, wantErr: ErrCodexServiceOwnership},
 		{name: "foreign enabled state", show: notFoundShow(), enabled: command.Result{Stdout: []byte("static\n")}, enabledErr: errors.New("static"), wantErr: ErrCodexServiceOwnership},
@@ -996,6 +1020,87 @@ func TestCodexServiceLifecycleLockHonorsSameProcessDeadline(t *testing.T) {
 	}
 	if calls := fixture.runner.observed(); len(calls) != 0 {
 		t.Fatalf("same-process blocked Ensure ran commands: %+v", calls)
+	}
+}
+
+func TestCodexServiceLifecycleLockUsesInjectedOwnerAndCloseHandlesEmptyLocks(t *testing.T) {
+	var nilLock *codexServiceLifecycleLock
+	if err := nilLock.Close(); err != nil {
+		t.Fatalf("nil lock close error=%v", err)
+	}
+	if err := (&codexServiceLifecycleLock{}).Close(); err != nil {
+		t.Fatalf("empty lock close error=%v", err)
+	}
+	file, err := os.CreateTemp(t.TempDir(), "lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := &codexServiceLifecycleLock{file: file}
+	if err := lock.Close(); err != nil || lock.file != nil {
+		t.Fatalf("owned lock close error=%v file=%v", err, lock.file)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatalf("repeat lock close error=%v", err)
+	}
+
+	fixture := newCodexServiceFixture(t)
+	fixture.service.euid = func() int { return os.Geteuid() + 1 }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if acquired, err := fixture.service.lifecycleLock(ctx, fixture.paths, false); acquired != nil || !errors.Is(err, ErrCodexServiceOwnership) {
+		t.Fatalf("injected owner lock=%v err=%v", acquired, err)
+	}
+}
+
+func TestCodexServiceLifecycleLockPollIntervalUsesExpectedFallback(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		interval    time.Duration
+		wantAcquire bool
+	}{
+		{name: "zero uses default interval", interval: 0},
+		{name: "positive interval remains configured", interval: time.Millisecond, wantAcquire: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCodexServiceFixture(t)
+			held, err := acquireCodexServiceLifecycleLock(context.Background(), fixture.paths, false, os.Geteuid(), time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held.Close()
+
+			base, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var releaseErr error
+			var cancellation *time.Timer
+			ctx := &releaseLockOnFirstDoneContext{
+				Context: base,
+				release: func() {
+					releaseErr = held.Close()
+					cancellation = time.AfterFunc(25*time.Millisecond, cancel)
+				},
+			}
+			acquired, err := acquireCodexServiceLifecycleLock(ctx, fixture.paths, false, os.Geteuid(), test.interval)
+			if cancellation == nil {
+				t.Fatal("contender did not enter polling select")
+			}
+			cancellation.Stop()
+			if releaseErr != nil {
+				t.Fatalf("release held lock: %v", releaseErr)
+			}
+			if acquired != nil {
+				defer acquired.Close()
+			}
+			if test.wantAcquire {
+				if err != nil || acquired == nil {
+					t.Fatalf("configured poll lock=%v err=%v", acquired, err)
+				}
+				return
+			}
+			if acquired != nil || !errors.Is(err, context.Canceled) {
+				t.Fatalf("default poll lock=%v err=%v", acquired, err)
+			}
+		})
 	}
 }
 
@@ -1429,9 +1534,9 @@ func TestCodexServiceInstallExecutableAndVersionValidationFailClosed(t *testing.
 	}{
 		{name: "pinned version", result: command.Result{Stdout: []byte("codex-cli v" + SupportedCodexVersion + "\n")}},
 		{name: "unsupported version", result: command.Result{Stdout: []byte("codex-cli 0.154.01\n")}, wantErr: true},
-		{name: "runner failure", runErr: errors.New("version failed"), wantErr: true},
-		{name: "truncated stdout", result: command.Result{StdoutTruncated: true}, wantErr: true},
-		{name: "truncated stderr", result: command.Result{StderrTruncated: true}, wantErr: true},
+		{name: "runner failure", result: command.Result{Stdout: []byte("codex-cli v" + SupportedCodexVersion + "\n")}, runErr: errors.New("version failed"), wantErr: true},
+		{name: "truncated stdout", result: command.Result{Stdout: []byte("codex-cli v" + SupportedCodexVersion + "\n"), StdoutTruncated: true}, wantErr: true},
+		{name: "truncated stderr", result: command.Result{Stdout: []byte("codex-cli v" + SupportedCodexVersion + "\n"), StderrTruncated: true}, wantErr: true},
 	} {
 		t.Run("version "+test.name, func(t *testing.T) {
 			service.runner = &codexServiceRunner{run: func(_ context.Context, executable string, args []string) (command.Result, error) {
@@ -1467,8 +1572,8 @@ func TestCodexServiceManagerPrerequisitesAndUnitVerificationFailClosed(t *testin
 		{name: "ready", lingerResult: command.Result{Stdout: []byte("yes\n")}, wantLinger: true},
 		{name: "manager failure", managerErr: errors.New("manager unavailable"), wantErr: true},
 		{name: "truncated manager output", managerResult: command.Result{StdoutTruncated: true}, wantErr: true},
-		{name: "linger failure", lingerErr: errors.New("linger unavailable"), wantErr: true, wantLinger: true},
-		{name: "truncated linger output", lingerResult: command.Result{StderrTruncated: true}, wantErr: true, wantLinger: true},
+		{name: "linger failure", lingerResult: command.Result{Stdout: []byte("yes\n")}, lingerErr: errors.New("linger unavailable"), wantErr: true, wantLinger: true},
+		{name: "truncated linger output", lingerResult: command.Result{Stdout: []byte("yes\n"), StderrTruncated: true}, wantErr: true, wantLinger: true},
 		{name: "linger disabled", lingerResult: command.Result{Stdout: []byte("no\n")}, wantErr: true, wantLinger: true},
 	} {
 		t.Run("user manager "+test.name, func(t *testing.T) {
@@ -1824,18 +1929,29 @@ func TestCodexServiceMaintenanceInventoryAndStopChecksRejectDistinctUnsafeStates
 
 func TestCodexServiceStageAndFinalizeTransitionFailClosed(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		state string
-		sub   string
-		pid   int
-		id    string
+		name    string
+		state   string
+		sub     string
+		pid     int
+		id      string
+		pending bool
 	}{
-		{name: "wrong substate", state: "active", sub: "dead", pid: 42, id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		{name: "zero PID", state: "active", sub: "running", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		{name: "invalid invocation", state: "active", sub: "running", pid: 42, id: "invalid"},
+		{name: "without pending wrong substate", state: "active", sub: "dead", pid: 42, id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "without pending zero PID", state: "active", sub: "running", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "without pending invalid invocation", state: "active", sub: "running", pid: 42, id: "invalid"},
+		{name: "pending wrong substate", state: "active", sub: "dead", pid: 42, id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", pending: true},
+		{name: "pending zero PID", state: "active", sub: "running", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", pending: true},
+		{name: "pending invalid invocation", state: "active", sub: "running", pid: 42, id: "invalid", pending: true},
 	} {
 		t.Run("stage "+test.name, func(t *testing.T) {
 			fixture := newStagedCodexServiceFixture(t)
+			if test.pending {
+				previous := fixture.descriptor
+				previous.Executable += "-previous"
+				previous.CodexHome += "-previous"
+				fixture.descriptor.PendingTransition = newCodexServicePendingTransition(previous, CodexServiceSnapshot{MainPID: 42, InvocationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+				writeOwnedCodexServiceFixture(t, fixture.paths, fixture.descriptor)
+			}
 			state, err := inspectCodexServiceInstallation(fixture.paths)
 			if err != nil {
 				t.Fatal(err)
@@ -1919,4 +2035,102 @@ func TestCodexServiceStageAndFinalizeTransitionFailClosed(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("finalize write failure", func(t *testing.T) {
+		caseFixture := newCodexServiceFixture(t)
+		caseFixture.descriptor = withPendingTransition(caseFixture.descriptor)
+		writeOwnedCodexServiceFixture(t, caseFixture.paths, caseFixture.descriptor)
+		directory := filepath.Dir(caseFixture.paths.DescriptorPath)
+		if err := os.Chmod(directory, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+		if got, err := caseFixture.service.finalizeReadyTransition(caseFixture.paths, caseFixture.descriptor, ready); err == nil || got != ready {
+			t.Fatalf("finalize write failure snapshot=%+v err=%v", got, err)
+		}
+	})
+}
+
+func TestCodexServiceOwnershipHelperBoundaries(t *testing.T) {
+	want := []byte("owned")
+	state := codexServiceInstallationState{unitBytes: want, descriptorBytes: want}
+	if state.unitExact(want) || state.descriptorExact(want) {
+		t.Fatal("missing owned files were exact")
+	}
+	state.unitExists, state.descriptorExists = true, true
+	if !state.unitExact(want) || !state.descriptorExact(want) {
+		t.Fatal("exact owned files were rejected")
+	}
+	state.unitBytes = []byte("changed")
+	state.descriptorBytes = []byte("changed")
+	if state.unitExact(want) || state.descriptorExact(want) {
+		t.Fatal("changed owned files were exact")
+	}
+
+	for _, test := range []struct {
+		missing string
+		want    error
+	}{
+		{missing: "unit", want: ErrCodexServiceNotInstalled},
+		{missing: "descriptor", want: ErrCodexServiceOwnership},
+	} {
+		t.Run("read owned requires "+test.missing, func(t *testing.T) {
+			fixture := newCodexServiceFixture(t)
+			path := fixture.paths.UnitPath
+			if test.missing == "descriptor" {
+				path = fixture.paths.DescriptorPath
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readOwnedCodexService(fixture.paths); !errors.Is(err, test.want) {
+				t.Fatalf("partial owned installation error=%v", err)
+			}
+		})
+	}
+
+	t.Run("regular file error and exact limit", func(t *testing.T) {
+		root := t.TempDir()
+		exact := filepath.Join(root, "exact")
+		if err := os.WriteFile(exact, make([]byte, maxCodexServiceReceiptBytes), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if data, exists, err := readRegularOwnedFile(exact); err != nil || !exists || len(data) != maxCodexServiceReceiptBytes {
+			t.Fatalf("exact receipt data=%d exists=%t err=%v", len(data), exists, err)
+		}
+		parent := filepath.Join(root, "parent-file")
+		if err := os.WriteFile(parent, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readRegularOwnedFile(filepath.Join(parent, "child")); !errors.Is(err, ErrCodexServiceOwnership) {
+			t.Fatalf("regular-file stat failure error=%v", err)
+		}
+	})
+
+	t.Run("directory creation preserves filesystem failure", func(t *testing.T) {
+		root := t.TempDir()
+		blocked := filepath.Join(root, "blocked")
+		if err := os.Mkdir(blocked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(blocked, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+		if err := ensureNoSymlinkDirectory(filepath.Join(blocked, "child"), true); err == nil || errors.Is(err, ErrCodexServiceOwnership) {
+			t.Fatalf("directory creation error=%v", err)
+		}
+	})
+
+	t.Run("descriptor bytes must be canonical", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		raw, err := marshalCodexServiceDescriptor(fixture.descriptor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = append(raw, '\n')
+		if _, err := parseOwnedCodexServiceDescriptor(raw, fixture.paths); !errors.Is(err, ErrCodexServiceOwnership) {
+			t.Fatalf("noncanonical descriptor error=%v", err)
+		}
+	})
 }

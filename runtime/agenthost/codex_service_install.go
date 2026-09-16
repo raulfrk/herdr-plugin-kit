@@ -388,7 +388,7 @@ func (s *CodexService) Uninstall(ctx context.Context, confirmDisconnect bool) (C
 		if inspectErr != nil {
 			return result, inspectErr
 		}
-		if !state.unitExists && !state.descriptorExists && errors.Is(lockErr, ErrCodexServiceNotInstalled) {
+		if !state.descriptorExists && errors.Is(lockErr, ErrCodexServiceNotInstalled) {
 			result.AlreadyAbsent = true
 			return result, nil
 		}

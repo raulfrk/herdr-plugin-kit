@@ -400,11 +400,7 @@ func (s *CodexService) validateProcess(descriptor codexServiceDescriptor, show c
 
 func cgroupContainsUnit(cgroup, unit string) bool {
 	for _, line := range strings.Split(cgroup, "\n") {
-		separator := strings.LastIndexByte(line, ':')
-		path := line
-		if separator >= 0 {
-			path = line[separator+1:]
-		}
+		path := line[strings.LastIndexByte(line, ':')+1:]
 		for _, component := range strings.Split(path, "/") {
 			if component == unit {
 				return true
