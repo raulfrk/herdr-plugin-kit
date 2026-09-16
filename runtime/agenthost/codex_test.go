@@ -149,7 +149,7 @@ func TestCodexStatusMappingsAndOnlyAllowedMethods(t *testing.T) {
 			if err != nil || got != tc.want {
 				t.Fatalf("assessment=%+v error=%v", got, err)
 			}
-			if !reflect.DeepEqual(runner.calls, [][]string{{"herdr", "agent", "list"}, {"herdr", "agent", "list"}}) {
+			if !reflect.DeepEqual(runner.calls, [][]string{{"herdr", "--session", "default", "agent", "list"}, {"herdr", "--session", "default", "agent", "list"}}) {
 				t.Fatalf("unexpected Herdr commands (Codex must never read panes): %q", runner.calls)
 			}
 		})
@@ -494,7 +494,7 @@ func TestCodexFreshConcurrentConnectionsAndNoStaleState(t *testing.T) {
 	})
 	a := codexWire()
 	runner := runnerFunc(func(ctx context.Context, exe string, args []string) (command.Result, error) {
-		if !reflect.DeepEqual(args, []string{"agent", "list"}) {
+		if !reflect.DeepEqual(args, []string{"--session", "default", "agent", "list"}) {
 			t.Errorf("unexpected Herdr call: %q", args)
 		}
 		return jsonResult(t, listResponse(a)), nil

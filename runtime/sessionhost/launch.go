@@ -623,16 +623,7 @@ func (h Host) validateOrigin(origin Origin) error {
 }
 
 func (h Host) sessionArgs(args []string) ([]string, error) {
-	if h.Session == "" {
-		return args, nil
-	}
-	if h.Session == "default" {
-		return nil, errors.New("the default Herdr session is represented by an empty session name")
-	}
-	if err := herdrid.ValidateSessionName(h.Session); err != nil {
-		return nil, err
-	}
-	return append([]string{"--session", h.Session}, args...), nil
+	return herdrid.Args(h.Session, args)
 }
 
 func (h Host) sessionSocket(ctx context.Context) (string, error) {

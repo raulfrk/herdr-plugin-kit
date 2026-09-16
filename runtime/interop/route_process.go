@@ -88,8 +88,9 @@ func (c RouteProcessCaller) discover(ctx context.Context, target string) (string
 		return "", nil, err
 	}
 	args := []string{"plugin", "list", "--json"}
-	if c.Session != "" {
-		args = append([]string{"--session", c.Session}, args...)
+	args, err := herdrid.Args(c.Session, args)
+	if err != nil {
+		return "", nil, err
 	}
 	result, err := herdrcmd.Run(ctx, c.HerdrRunner, c.Herdr, args)
 	if err != nil {

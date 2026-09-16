@@ -399,9 +399,9 @@ func TestAwaitFreshStatusRejectsOldBlockWithUnrelatedNewOutput(t *testing.T) {
 	runner := runnerFunc(func(_ context.Context, executable string, args []string) (command.Result, error) {
 		if executable == "herdr" {
 			switch {
-			case reflect.DeepEqual(args, []string{"pane", "get", target.PaneID}):
+			case reflect.DeepEqual(args, []string{"--session", "default", "pane", "get", target.PaneID}):
 				return scroll, nil
-			case reflect.DeepEqual(args, []string{"pane", "read", target.PaneID, "--source", "recent-unwrapped", "--lines", "50", "--format", "text"}):
+			case reflect.DeepEqual(args, []string{"--session", "default", "pane", "read", target.PaneID, "--source", "recent-unwrapped", "--lines", "50", "--format", "text"}):
 				reads++
 				return history, nil
 			}

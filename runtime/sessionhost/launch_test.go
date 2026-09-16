@@ -323,7 +323,7 @@ func TestLaunchNewTabUsesExactDirectArgvInDefaultSession(t *testing.T) {
 	if err := json.Unmarshal(params["root"], &root); err != nil || !reflect.DeepEqual(root.Command, argv) || root.CWD != "/tmp/project" {
 		t.Fatalf("root = %+v, error = %v", root, err)
 	}
-	wantCalls := [][]string{{"herdr", "pane", "get", "w1:p1"}, {"herdr", "session", "list", "--json"}, {"herdr", "pane", "get", "w1:p1"}}
+	wantCalls := [][]string{{"herdr", "--session", "default", "pane", "get", "w1:p1"}, {"herdr", "session", "list", "--json"}, {"herdr", "--session", "default", "pane", "get", "w1:p1"}}
 	if !reflect.DeepEqual(runner.calls, wantCalls) {
 		t.Fatalf("calls = %q, want %q", runner.calls, wantCalls)
 	}
@@ -379,7 +379,7 @@ func TestLaunchAllowsOnlyFixedOMPStatusEnvironmentDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := runner.calls[1]; !reflect.DeepEqual(got, []string{"herdr", "pane", "split", "--pane", "w1:p1", "--direction", "right", "--cwd", "/tmp/project", "--env", "HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET=/tmp/plugin/status.sock", "--no-focus"}) {
+	if got := runner.calls[1]; !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "split", "--pane", "w1:p1", "--direction", "right", "--cwd", "/tmp/project", "--env", "HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET=/tmp/plugin/status.sock", "--no-focus"}) {
 		t.Fatalf("split call = %q", got)
 	}
 
@@ -468,7 +468,7 @@ func TestLaunchNonemptyRunOutputCleansOnlyCreatedPane(t *testing.T) {
 	if !errors.Is(err, ErrStaleTarget) {
 		t.Fatalf("error = %v", err)
 	}
-	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "pane", "close", "w1:p2"}) {
+	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "close", "w1:p2"}) {
 		t.Fatalf("cleanup call = %q", got)
 	}
 }
@@ -492,7 +492,7 @@ func TestLaunchRejectsUnsupportedShellBeforeCommandAndCleansPane(t *testing.T) {
 			t.Fatalf("command delivered to unsupported shell: %q", call)
 		}
 	}
-	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "pane", "close", "w1:p2"}) {
+	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "close", "w1:p2"}) {
 		t.Fatalf("cleanup call = %q", got)
 	}
 }
@@ -517,7 +517,7 @@ func TestLaunchReadinessCancellationCleansPaneWithUncancelledContext(t *testing.
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
-	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "pane", "close", "w1:p2"}) {
+	if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "close", "w1:p2"}) {
 		t.Fatalf("cleanup call = %q", got)
 	}
 }
@@ -596,7 +596,7 @@ func TestLaunchCleansPlausibleCreatedTargetOnResponseDrift(t *testing.T) {
 			Origin: Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"}, Argv: argv, Directory: "/tmp/project", Placement: NewTab,
 		})
 		got := runner.calls[len(runner.calls)-1]
-		if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(got, []string{"herdr", "pane", "close", "w1:p2"}) {
+		if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "close", "w1:p2"}) {
 			t.Fatalf("error=%v calls=%q", err, runner.calls)
 		}
 	})
@@ -610,7 +610,7 @@ func TestLaunchCleansPlausibleCreatedTargetOnResponseDrift(t *testing.T) {
 			Origin: Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"}, Argv: []string{"agent"}, Directory: "/tmp/project", Placement: NewPane, Direction: "right",
 		})
 		got := runner.calls[len(runner.calls)-1]
-		if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(got, []string{"herdr", "pane", "close", "w1:p2"}) {
+		if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(got, []string{"herdr", "--session", "default", "pane", "close", "w1:p2"}) {
 			t.Fatalf("error=%v calls=%q", err, runner.calls)
 		}
 	})

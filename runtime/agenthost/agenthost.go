@@ -234,13 +234,7 @@ func (h Host) runJSON(ctx context.Context, a []string, target any) error {
 	return herdrcmd.RunJSON(ctx, h.Runner, h.Herdr, args, target)
 }
 func (h Host) args(a []string) ([]string, error) {
-	if h.Session == "" {
-		return a, nil
-	}
-	if err := herdrid.ValidateSessionName(h.Session); err != nil {
-		return nil, err
-	}
-	return append([]string{"--session", h.Session}, a...), nil
+	return herdrid.Args(h.Session, a)
 }
 func wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)

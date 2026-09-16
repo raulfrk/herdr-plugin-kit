@@ -110,7 +110,7 @@ func TestChangingTextSameClassificationAndStableStatusSeqSucceeds(t *testing.T) 
 	if err != nil || !got.Stable || got.Status != Working || got.Reason != HostReport {
 		t.Fatalf("assessment=%+v error=%v", got, err)
 	}
-	if len(runner.calls) != 6 || !reflect.DeepEqual(runner.calls[0][1:], []string{"agent", "list"}) || !reflect.DeepEqual(runner.calls[1][1:], []string{"pane", "read", "w:p", "--source", "detection", "--lines", "60", "--format", "text"}) {
+	if len(runner.calls) != 6 || !reflect.DeepEqual(runner.calls[0][1:], []string{"--session", "default", "agent", "list"}) || !reflect.DeepEqual(runner.calls[1][1:], []string{"--session", "default", "pane", "read", "w:p", "--source", "detection", "--lines", "60", "--format", "text"}) {
 		t.Fatalf("observation calls=%q", runner.calls)
 	}
 }

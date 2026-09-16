@@ -150,7 +150,8 @@ func TestCleanupAcknowledgementAndDeadline(t *testing.T) {
 			t.Fatalf("cleanup context: %v %s", ctx.Err(), remaining)
 		}
 		out := okJSON()
-		if args[1] == "get" {
+		plain := withoutSessionSelection(args)
+		if len(plain) >= 2 && plain[0] == "pane" && plain[1] == "get" {
 			out = paneJSON("w1:p2", "w1", "w1:t1", "/tmp", false)
 		}
 		return command.Result{Stdout: []byte(out)}, nil
@@ -336,7 +337,7 @@ func TestCleanupOwnershipRequiresCompleteDistinctLocation(t *testing.T) {
 	}
 	runner := &scriptedRunner{outputs: []string{paneJSON("w1:p2", "w1", "other", "/tmp", false)}}
 	_, err := (Host{Runner: runner}).currentPane(context.Background(), Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"})
-	if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(runner.calls, [][]string{{"herdr", "pane", "get", "w1:p2"}}) {
+	if !errors.Is(err, ErrStaleTarget) || !reflect.DeepEqual(runner.calls, [][]string{{"herdr", "--session", "default", "pane", "get", "w1:p2"}}) {
 		t.Fatalf("location drift %v", err)
 	}
 }

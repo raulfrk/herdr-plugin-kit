@@ -176,10 +176,11 @@ func TestCommandsUseFixedEnvironmentAndExactDefaultNamedRouting(t *testing.T) {
 			if !slicesEnd(calls[0].args, "config", "check") {
 				t.Fatalf("check args=%q", calls[0].args)
 			}
-			wantReload := []string{"server", "reload-config"}
-			if session != "" {
-				wantReload = append([]string{"--session", session}, wantReload...)
+			selected := session
+			if selected == "" {
+				selected = "default"
 			}
+			wantReload := []string{"--session", selected, "server", "reload-config"}
 			if !reflect.DeepEqual(calls[1].args[9:], wantReload) {
 				t.Fatalf("reload args=%q want suffix=%q", calls[1].args, wantReload)
 			}

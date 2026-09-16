@@ -355,8 +355,9 @@ func (h Host) checkCandidate(ctx context.Context, configPath string, data []byte
 
 func (h Host) reload(ctx context.Context, configPath string) error {
 	args := []string{"server", "reload-config"}
-	if h.Session != "" {
-		args = append([]string{"--session", h.Session}, args...)
+	args, err := herdrid.Args(h.Session, args)
+	if err != nil {
+		return failure(FailureInvalid, err, "")
 	}
 	result, err := h.run(ctx, configPath, args)
 	if err != nil {

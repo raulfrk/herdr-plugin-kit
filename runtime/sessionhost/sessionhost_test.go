@@ -35,6 +35,13 @@ func (r *scriptedRunner) Run(_ context.Context, executable string, args []string
 	return command.Result{Stdout: []byte(out), ExitCode: 0}, nil
 }
 
+func withoutSessionSelection(args []string) []string {
+	if len(args) >= 2 && args[0] == "--session" {
+		return args[2:]
+	}
+	return args
+}
+
 func TestListStopDeleteCommands(t *testing.T) {
 	runner := &scriptedRunner{outputs: []string{
 		`{"sessions":[{"name":"demo","default":false,"running":true,"session_dir":"/tmp/s","socket_path":"/tmp/s/sock"}]}`,
