@@ -384,6 +384,9 @@ func (s *CodexService) Uninstall(ctx context.Context, confirmDisconnect bool) (C
 	}
 	lock, lockErr := s.lifecycleLock(bounds, paths, false)
 	if lockErr != nil {
+		if errors.Is(lockErr, ErrCodexServiceNotInstalled) && s.afterLifecycleLockMiss != nil {
+			s.afterLifecycleLockMiss()
+		}
 		state, inspectErr := inspectCodexServiceInstallation(paths)
 		if inspectErr != nil {
 			return result, inspectErr

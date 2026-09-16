@@ -1450,6 +1450,30 @@ func TestCodexServiceUninstallMarksOnlyFullyAbsentInstallationAsAlreadyAbsent(t 
 		}
 	})
 
+	t.Run("concurrent install after lock miss", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		for _, path := range []string{fixture.paths.UnitPath, fixture.paths.DescriptorPath} {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		installed := false
+		fixture.service.afterLifecycleLockMiss = func() {
+			writeOwnedCodexServiceFixture(t, fixture.paths, fixture.descriptor)
+			installed = true
+		}
+		result, err := fixture.service.Uninstall(context.Background(), true)
+		if !installed || result.AlreadyAbsent || !errors.Is(err, ErrCodexServiceUnavailable) || !errors.Is(err, ErrCodexServiceNotInstalled) {
+			t.Fatalf("concurrent install result=%+v installed=%t err=%v", result, installed, err)
+		}
+		if _, err := readOwnedCodexService(fixture.paths); err != nil {
+			t.Fatalf("concurrent installation was changed: %v", err)
+		}
+		if calls := fixture.runner.observed(); len(calls) != 0 {
+			t.Fatalf("concurrent install ran service commands: %+v", calls)
+		}
+	})
+
 	t.Run("descriptor without unit and unsafe lock", func(t *testing.T) {
 		fixture := newCodexServiceFixture(t)
 		fixture.service.euid = os.Geteuid
