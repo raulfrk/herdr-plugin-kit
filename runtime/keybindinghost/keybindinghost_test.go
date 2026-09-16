@@ -325,6 +325,31 @@ func TestActivateRejectsExternalDriftAfterCheckBeforeReload(t *testing.T) {
 	}
 }
 
+func TestActivateClassifiesCanceledTransactionLock(t *testing.T) {
+	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
+	binding := []Binding{{Key: "prefix+o", Action: "plugin.owner.open"}}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			runner := &fakeRunner{}
+			host := Host{
+				Runner:     runner,
+				ConfigPath: path,
+				acquireLock: func(context.Context, string) (io.Closer, error) {
+					return nil, cause
+				},
+			}
+			result, err := host.Activate(context.Background(), Request{Owner: "plugin.owner", Bindings: binding})
+			var operation *Error
+			if !errors.As(err, &operation) || operation.Kind != FailureCanceled || !errors.Is(err, cause) || result.Activated {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			if calls := runner.snapshotCalls(); len(calls) != 0 {
+				t.Fatalf("canceled activation ran commands: %+v", calls)
+			}
+		})
+	}
+}
+
 func TestNoopSkipsCheckWriteAndReload(t *testing.T) {
 	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
 	runner := &fakeRunner{}

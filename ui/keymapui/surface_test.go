@@ -28,6 +28,7 @@ import (
 
 type probe struct {
 	changeAfterRefresh                              bool
+	extraActions                                    int
 	name                                            string
 	editing                                         bool
 	revision, invocations, resizes, results, timers int
@@ -41,11 +42,19 @@ func (p *probe) KeymapCatalog() []keymap.Action {
 	if p.ownTab {
 		editDefaults = append(editDefaults, keymap.Sequence{"tab"})
 	}
-	return []keymap.Action{
+	actions := []keymap.Action{
 		{ID: "probe.refresh", Label: "Refresh example", Context: p.name + ".results", Quick: true, Defaults: []keymap.Sequence{{"g", "r"}, {"f5"}}},
 		{ID: "probe.edit", Label: "Edit query", Context: p.name + ".results", Quick: true, Defaults: editDefaults},
 		{ID: "probe.finish", Label: "Finish query", Context: p.name + ".editing", Editing: true, Defaults: []keymap.Sequence{{"enter"}, {"escape"}}},
 	}
+	for index := range p.extraActions {
+		actions = append(actions, keymap.Action{
+			ID:      fmt.Sprintf("probe.extra.%02d", index),
+			Label:   fmt.Sprintf("Extra action %02d", index),
+			Context: p.name + ".results",
+		})
+	}
+	return actions
 }
 func (p *probe) KeymapContext() keymap.Context {
 	context := p.name + ".results"
@@ -840,9 +849,69 @@ func TestInteractiveHelpEditsSelectedActionAndRoutesDeclaredCommands(t *testing.
 	}
 }
 
+func TestInteractiveHelpClampsSelectionAndPagesCompactRows(t *testing.T) {
+	p := &probe{name: "example", extraActions: 12}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.view, s.helpOrigin, s.helpContext = helpScreen, baseScreen, keymap.Context{ID: "example.results"}
+
+	s.helpSelected = -3
+	s.openHelpSelection(shell.EventContext{})
+	if s.helpSelected != 0 || s.selected.ID != "probe.refresh" {
+		t.Fatalf("negative selection=%d action=%q", s.helpSelected, s.selected.ID)
+	}
+	s.view = helpScreen
+	s.helpSelected = 99
+	s.openHelpSelection(shell.EventContext{})
+	actions := s.helpActions()
+	if last := len(actions) - 1; s.helpSelected != last || s.selected.ID != actions[last].ID {
+		t.Fatalf("high selection=%d action=%q last=%d", s.helpSelected, s.selected.ID, last)
+	}
+
+	layout := responsive.Resolve(responsive.Size{Columns: 40, Rows: 10})
+	s.lastResize.Layout = layout
+	s.view = helpScreen
+	s.helpSelected = 0
+	s.helpAction(shell.EventContext{}, "keymap.help.previous")
+	if s.helpSelected != 0 {
+		t.Fatalf("previous moved before first row: %d", s.helpSelected)
+	}
+	page := max(1, layout.Render.Rows-4)
+	s.helpAction(shell.EventContext{}, "keymap.help.page-next")
+	if s.helpSelected != page {
+		t.Fatalf("page next selected=%d want=%d", s.helpSelected, page)
+	}
+	s.helpAction(shell.EventContext{}, "keymap.help.page-previous")
+	if s.helpSelected != 0 {
+		t.Fatalf("page previous selected=%d want=0", s.helpSelected)
+	}
+
+	s.helpSelected = len(actions) - 1
+	palette, _ := theme.Builtin("terminal")
+	frame, err := s.Render(shell.RenderContext{Layout: layout, Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := view.ANSI(frame)
+	if !strings.Contains(text, "> "+actions[len(actions)-1].Label) || strings.Contains(text, "> "+actions[0].Label) {
+		t.Fatalf("compact Help did not keep the final selection visible: %q", text)
+	}
+
+	s.helpSelected = 99
+	lines := s.helpLines()
+	if !strings.HasPrefix(lines[len(lines)-1], "> ") || strings.HasPrefix(lines[0], "> ") {
+		t.Fatalf("rendered selection was not clamped to the final row: %q", lines)
+	}
+}
+
 func TestInteractiveHelpOptionsRejectInvalidCommandsAndLegacyDefaultsStayUnchanged(t *testing.T) {
 	p := &probe{name: "example"}
 	for name, commands := range map[string][]HelpCommand{
+		"empty label":    {{ID: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"k"}}}},
+		"empty action":   {{ID: "check", Label: "check", Defaults: []keymap.Sequence{{"k"}}}},
 		"unknown target": {{ID: "check", Label: "check", Action: "missing", Defaults: []keymap.Sequence{{"k"}}}},
 		"multi stroke":   {{ID: "check", Label: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"g", "k"}}}},
 		"duplicate ID": {
