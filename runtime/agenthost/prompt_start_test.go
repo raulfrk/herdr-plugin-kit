@@ -166,12 +166,11 @@ func TestPromptStarterInvalidOrCancelledInputCreatesNothing(t *testing.T) {
 	}
 }
 
-func TestPromptStarterOrdinaryCodexUsesSharedDiscoveryBinding(t *testing.T) {
+func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
 	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
 	topology := &fakeManagedTopology{target: created}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
-	identity := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai"}
-	verifier := &fakeManagedVerifier{preflight: managedPreflight("/tmp/project"), confirm: identity, recheck: identity, audit: managedPreflight("/tmp/project").EffectiveCodexPolicy}
+	verifier := &fakeManagedVerifier{}
 	runner := &scriptedRunner{results: []command.Result{
 		{},
 		managedAgentResult(t, managedAgent(created.Origin, "/tmp/project", managedNewID, false)),
@@ -194,7 +193,7 @@ func TestPromptStarterOrdinaryCodexUsesSharedDiscoveryBinding(t *testing.T) {
 		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
 		Argv:   []string{"codex"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, CodexPolicy: managedPolicy(),
 	})
-	if err != nil || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || service.callCount() != 1 || verifier.confirmOp != ManagedNew {
+	if err != nil || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || service.callCount() != 0 || verifier.confirmID != "" || result.Target.CodexService != (CodexServiceSnapshot{}) {
 		t.Fatalf("result=%+v service=%d verifier=%+v error=%v", result, service.callCount(), verifier, err)
 	}
 	if len(topology.launches) != 1 || !reflect.DeepEqual(topology.launches[0].Argv, []string{"codex"}) || len(topology.cleanups) != 0 || len(verifier.deleted) != 0 {

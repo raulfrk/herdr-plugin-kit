@@ -58,7 +58,9 @@ type PromptTarget struct {
 	Source          *Agent
 	OMPStatusSocket string
 	OpenCodeServer  OpenCodeServer
-	CodexService    CodexServiceSnapshot
+	// CodexService is required for explicit --remote Codex argv and must be
+	// zero for an ordinary embedded Codex target.
+	CodexService CodexServiceSnapshot
 }
 
 type PromptResult struct {
@@ -199,7 +201,7 @@ func (h PromptHost) validateTarget(target PromptTarget) error {
 	}
 	switch strings.ToLower(target.Agent.Kind) {
 	case "codex":
-		if !validManagedServiceSnapshot(target.CodexService) || !validManagedSession(target.Agent.Session) {
+		if !validPromptCodexTarget(target) {
 			return ErrPromptStale
 		}
 	case "opencode":
@@ -229,25 +231,27 @@ func (h PromptHost) observe(ctx context.Context, target PromptTarget) (Agent, se
 func (h PromptHost) nativeReady(ctx context.Context, target PromptTarget) (string, error) {
 	switch strings.ToLower(target.Agent.Kind) {
 	case "codex":
-		if !validManagedServiceSnapshot(target.CodexService) || !validManagedSession(target.Agent.Session) {
+		if !validPromptCodexTarget(target) {
 			return "", ErrPromptStale
 		}
-		managed := h.managed
-		if managed.Host.Runner == nil {
-			managed = NewManagedCodexLauncher(h.Host)
-		}
-		service, err := managed.serviceClient().Ensure(ctx)
-		if err != nil || service != target.CodexService {
-			return "", ErrPromptStale
-		}
-		verifier, err := managed.verifierFactory().Connect(ctx, service.SocketPath)
-		if err != nil {
-			return "", ErrPromptStale
-		}
-		identity, readErr := verifier.ReadThread(ctx, target.Agent.Session.Value)
-		closeErr := verifier.Close()
-		if readErr != nil || closeErr != nil || identity.ID != target.Agent.Session.Value || identity.CWD != target.Directory {
-			return "", ErrPromptStale
+		if codexRemoteArgv(target.Argv) {
+			managed := h.managed
+			if managed.Host.Runner == nil {
+				managed = NewManagedCodexLauncher(h.Host)
+			}
+			service, err := managed.serviceClient().Ensure(ctx)
+			if err != nil || service != target.CodexService {
+				return "", ErrPromptStale
+			}
+			verifier, err := managed.verifierFactory().Connect(ctx, service.SocketPath)
+			if err != nil {
+				return "", ErrPromptStale
+			}
+			identity, readErr := verifier.ReadThread(ctx, target.Agent.Session.Value)
+			closeErr := verifier.Close()
+			if readErr != nil || closeErr != nil || identity.ID != target.Agent.Session.Value || identity.CWD != target.Directory {
+				return "", ErrPromptStale
+			}
 		}
 		visible, err := (ManagedCodexLauncher{Host: h.Host}).readPaneANSI(ctx, target.Agent.PaneID, "visible", managedStatusLines)
 		if err != nil {
@@ -295,6 +299,46 @@ func (h PromptHost) nativeReady(ctx context.Context, target PromptTarget) (strin
 	default:
 		return "", ErrPromptStale
 	}
+}
+
+func codexRemoteArgv(argv []string) bool {
+	for _, arg := range argv {
+		if arg == "--remote" || strings.HasPrefix(arg, "--remote=") {
+			return true
+		}
+	}
+	return false
+}
+
+func validPromptCodexTarget(target PromptTarget) bool {
+	if !validManagedSession(target.Agent.Session) {
+		return false
+	}
+	if codexRemoteArgv(target.Argv) {
+		if !validManagedServiceSnapshot(target.CodexService) {
+			return false
+		}
+		count := 0
+		for i, arg := range target.Argv {
+			endpoint := ""
+			if arg == "--remote" {
+				if i+1 >= len(target.Argv) {
+					return false
+				}
+				endpoint = target.Argv[i+1]
+			} else if strings.HasPrefix(arg, "--remote=") {
+				endpoint = strings.TrimPrefix(arg, "--remote=")
+			} else {
+				continue
+			}
+			count++
+			if endpoint != "unix://"+target.CodexService.SocketPath {
+				return false
+			}
+		}
+		return count == 1
+	}
+	return target.CodexService == (CodexServiceSnapshot{})
 }
 
 func emptyOMPComposer(text string) bool {

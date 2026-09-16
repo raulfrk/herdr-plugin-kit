@@ -89,12 +89,6 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 			return PromptResult{State: PromptNotAttempted}, err
 		}
 	}
-	closeBinding := func() error {
-		if binding == nil {
-			return nil
-		}
-		return binding.Close()
-	}
 
 	created, err := s.topology().Launch(ctx, sessionhost.LaunchRequest{
 		Origin: request.Origin, Argv: argv, Directory: request.Directory,
@@ -104,20 +98,13 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
 		defer cancel()
-		return PromptResult{State: PromptNotAttempted}, errors.Join(err, cleanupOpenCode(cleanupCtx), closeBinding())
+		return PromptResult{State: PromptNotAttempted}, errors.Join(err, cleanupOpenCode(cleanupCtx))
 	}
 	base := PromptResult{Target: PromptTarget{Created: created, Directory: request.Directory, Argv: append([]string(nil), argv...), OMPStatusSocket: request.OMPStatusSocket, OpenCodeServer: request.OpenCodeServer}, State: PromptNotAttempted}
-	if binding != nil {
-		base.Target.CodexService = binding.service
-	}
 	failBeforeSend := func(cause error) (PromptResult, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
 		defer cancel()
-		var threadErr error
-		if binding != nil {
-			threadErr = binding.CleanupThread(cleanupCtx)
-		}
-		return base, errors.Join(cause, s.topology().Cleanup(cleanupCtx, created), cleanupOpenCode(cleanupCtx), threadErr, closeBinding())
+		return base, errors.Join(cause, s.topology().Cleanup(cleanupCtx, created), cleanupOpenCode(cleanupCtx))
 	}
 	if kind == "omp" && base.Target.OMPStatusSocket == "" {
 		base.Target.OMPStatusSocket, err = derivePromptOMPStatusSocket(ctx, s.Host, created.PaneID)
@@ -146,16 +133,16 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 		if result.State == PromptNotAttempted {
 			return failBeforeSend(err)
 		}
-		return result, errors.Join(err, closeBinding())
+		return result, err
 	}
 	if request.Focus {
 		focused, focusErr := s.Host.Focus(ctx, result.Agent)
 		if focusErr != nil {
-			return result, errors.Join(focusErr, closeBinding())
+			return result, focusErr
 		}
 		result.Agent = focused
 	}
-	return result, closeBinding()
+	return result, nil
 }
 
 func (s PromptStarter) waitForAgent(parent context.Context, created sessionhost.CreatedTarget, kind, expectedSession, directory string, timeout time.Duration) (Agent, error) {

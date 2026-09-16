@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
-func TestManagedCodexLiveNewForkAndResumeUseSharedDaemonAndExactPaneIdentity(t *testing.T) {
+func TestManagedCodexLiveNewForkAndResumeUseSharedServiceAndExactPaneIdentity(t *testing.T) {
 	if os.Getenv("HERDR_PLUGIN_KIT_MANAGED_CODEX_LIVE") != "1" {
 		t.Skip("set HERDR_PLUGIN_KIT_MANAGED_CODEX_LIVE=1 for the Herdr 0.8.2/Codex 0.154.0 integration")
 	}
@@ -83,6 +84,7 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedDaemonAndExactPaneIdentity(t *
 			}
 		})
 	}
+	launcher := newManagedLiveLauncher(t, Host{Runner: runner, Session: sessionName})
 	var operations []*ManagedCodex
 	cleaned := false
 	cleanupOperations := func() {
@@ -100,7 +102,6 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedDaemonAndExactPaneIdentity(t *
 	}
 	t.Cleanup(cleanupOperations)
 
-	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: sessionName})
 	managed, err := launcher.Launch(ctx, ManagedCodexRequest{
 		Operation: ManagedNew, Origin: origin, Directory: directory,
 		Placement: sessionhost.NewTab, TabLabel: "managed-live", Policy: managedPolicy(),
@@ -158,6 +159,9 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedDaemonAndExactPaneIdentity(t *
 	}
 
 	service := NewCodexService(runner)
+	if configured, ok := launcher.service.(*CodexService); ok {
+		service = configured
+	}
 	beforeCleanup, err := service.Inspect(ctx)
 	if err != nil || beforeCleanup != managed.Service {
 		t.Fatalf("shared service before cleanup=%+v error=%v", beforeCleanup, err)
@@ -167,6 +171,27 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedDaemonAndExactPaneIdentity(t *
 	if err != nil || afterCleanup != managed.Service {
 		t.Fatalf("shared service after cleanup=%+v error=%v", afterCleanup, err)
 	}
+}
+
+// An explicit task home selects a disposable service instead of the installed
+// user service. It must be the same temporary home inherited by the task Herdr
+// session, so ordinary source histories remain available during conversion.
+func newManagedLiveLauncher(t *testing.T, host Host) ManagedCodexLauncher {
+	t.Helper()
+	launcher := NewManagedCodexLauncher(host)
+	home := os.Getenv("HERDR_PLUGIN_KIT_LIVE_CODEX_HOME")
+	if home == "" {
+		return launcher
+	}
+	if home != os.Getenv("CODEX_HOME") || !cleanAbsolute(home) || !strings.HasPrefix(home, filepath.Clean(os.TempDir())+string(filepath.Separator)) {
+		t.Fatal("HERDR_PLUGIN_KIT_LIVE_CODEX_HOME must equal CODEX_HOME and name the task-owned temporary home inherited by Herdr")
+	}
+	fixture := newIsolatedCodexServiceLifecycleFixture(t, home)
+	launcher.service = fixture.Service
+	promptHost := NewPromptHost(host)
+	promptHost.managed = launcher
+	launcher.deliver = promptHost.Deliver
+	return launcher
 }
 
 func createLiveShellTab(ctx context.Context, runner command.Runner, sessionName, workspaceID, directory string) (sessionhost.Origin, error) {

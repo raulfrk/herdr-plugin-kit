@@ -432,7 +432,7 @@ func unstyledCodexStatusFooter(line string) bool {
 	}
 	parts := strings.Split(strings.TrimSpace(line), " · ")
 	model := strings.Fields(parts[0])
-	if len(parts) < 3 || len(model) != 2 || !(strings.HasPrefix(parts[1], "/") || strings.HasPrefix(parts[1], "~/")) {
+	if len(parts) < 2 || len(model) != 2 || !(strings.HasPrefix(parts[1], "/") || strings.HasPrefix(parts[1], "~/")) {
 		return false
 	}
 	for _, part := range parts {
@@ -482,13 +482,18 @@ func parseManagedStatus(text, cwd string, service CodexServiceSnapshot, policy M
 		}
 		return r
 	}, block)
-	remote := "unix://" + service.SocketPath
+	if service == (CodexServiceSnapshot{}) {
+		if strings.Contains(compact, "Remote:") {
+			return "", ErrManagedStale
+		}
+	} else if !validManagedServiceSnapshot(service) || !strings.Contains(compact, "Remote:unix://"+service.SocketPath+"(v"+SupportedCodexVersion+")") {
+		return "", ErrManagedNarrow
+	}
 	displayCWD := cwd
 	if home, err := os.UserHomeDir(); err == nil && (cwd == home || strings.HasPrefix(cwd, home+string(filepath.Separator))) {
 		displayCWD = "~" + strings.TrimPrefix(cwd, home)
 	}
 	if !strings.Contains(compact, "OpenAICodex(v"+SupportedCodexVersion+")") ||
-		!strings.Contains(compact, "Remote:"+remote+"(v"+SupportedCodexVersion+")") ||
 		!strings.Contains(compact, "Model:"+policy.Model+"(reasoning"+policy.ReasoningEffort) ||
 		!strings.Contains(compact, "Directory:"+displayCWD) ||
 		!strings.Contains(compact, "Session:"+threadID) {

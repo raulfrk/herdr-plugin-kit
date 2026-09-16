@@ -106,7 +106,6 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 
 	var ompSessions []string
 	var openCodeSessions []string
-	var codexThreads []string
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
@@ -126,21 +125,6 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 			}
 			if err := os.Remove(session); err != nil && !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("remove task OMP session %s: %v", session, err)
-			}
-		}
-		if len(codexThreads) != 0 {
-			service, err := NewCodexService(runner).Inspect(cleanupCtx)
-			if err != nil {
-				t.Errorf("inspect shared Codex service for cleanup: %v", err)
-			} else if verifier, err := newCodexLifecycle(cleanupCtx, service.SocketPath); err != nil {
-				t.Errorf("connect shared Codex service for cleanup: %v", err)
-			} else {
-				defer verifier.Close()
-				for i := len(codexThreads) - 1; i >= 0; i-- {
-					if err := verifier.DeleteThread(cleanupCtx, codexThreads[i]); err != nil {
-						t.Errorf("delete task Codex thread %s: %v", codexThreads[i], err)
-					}
-				}
 			}
 		}
 	})
@@ -169,7 +153,7 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 				t.Fatalf("new result=%+v error=%v", started, err)
 			}
 			source := awaitLivePromptResult(t, ctx, host, topology, started, newCanary)
-			trackPromptLiveSession(t, source, &ompSessions, &openCodeSessions, &codexThreads)
+			trackPromptLiveSession(t, source, &ompSessions, &openCodeSessions)
 
 			forkCanary := "HPK-API5-FORK-" + strings.ToUpper(test.kind)
 			forkPrompt, _ := PreparePrompt("Reply exactly " + forkCanary)
@@ -182,7 +166,7 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 				t.Fatalf("fork result=%+v error=%v", forked, err)
 			}
 			child := awaitLivePromptResult(t, ctx, host, topology, forked.Prompt, forkCanary)
-			trackPromptLiveSession(t, child, &ompSessions, &openCodeSessions, &codexThreads)
+			trackPromptLiveSession(t, child, &ompSessions, &openCodeSessions)
 			sourceHistory, err := (ManagedCodexLauncher{Host: host}).readFullPaneHistory(ctx, sessionhost.Origin{
 				SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID,
 			})
@@ -235,7 +219,7 @@ func awaitLivePromptResult(t *testing.T, ctx context.Context, host Host, topolog
 	}
 }
 
-func trackPromptLiveSession(t *testing.T, agent Agent, ompSessions, openCodeSessions, codexThreads *[]string) {
+func trackPromptLiveSession(t *testing.T, agent Agent, ompSessions, openCodeSessions *[]string) {
 	t.Helper()
 	if agent.Session == nil {
 		t.Fatalf("prompt target has no session: %+v", agent)
@@ -246,7 +230,8 @@ func trackPromptLiveSession(t *testing.T, agent Agent, ompSessions, openCodeSess
 	case "opencode":
 		*openCodeSessions = append(*openCodeSessions, agent.Session.Value)
 	case "codex":
-		*codexThreads = append(*codexThreads, agent.Session.Value)
+		// Ordinary Codex is not owned by the shared server. Preserve its
+		// conversation in the task CODEX_HOME; cleanup owns only its topology.
 	default:
 		t.Fatalf("unexpected prompt harness %q", agent.Kind)
 	}

@@ -61,6 +61,9 @@ func (r *promptRunner) Run(_ context.Context, executable string, args []string) 
 		argv := r.argv
 		if len(argv) == 0 {
 			argv = []string{r.agent.Agent}
+			if r.agent.Agent == "codex" {
+				argv = []string{"codex", "--remote", "unix://" + managedServiceSnapshot().SocketPath}
+			}
 		}
 		return jsonCommandResult(map[string]any{
 			"id": "cli:pane:process_info",
@@ -381,6 +384,83 @@ func TestDeliverCodexPromptRequiresSharedServiceAndThreadBeforeSend(t *testing.T
 	}
 }
 
+func TestDeliverOrdinaryCodexPromptDoesNotStartOrReadService(t *testing.T) {
+	target, wire := validPromptTarget(t)
+	target.Argv = []string{"codex"}
+	target.CodexService = CodexServiceSnapshot{}
+	caller := &recordedPromptCall{receipt: herdrapi.Receipt{State: herdrapi.RequestAcknowledged}, agent: wire}
+	host := newTestCodexPromptHost(Host{Runner: &promptRunner{agent: wire, argv: target.Argv}}, caller)
+	service := &fakeManagedService{err: ErrCodexServiceUnavailable}
+	host.managed.service = service
+	prompt, _ := PreparePrompt("hello")
+	result, err := host.Deliver(context.Background(), prompt, target)
+	if err != nil || result.State != PromptAcknowledged || caller.calls != 1 || service.callCount() != 0 {
+		t.Fatalf("result=%+v calls=%d service=%d error=%v", result, caller.calls, service.callCount(), err)
+	}
+}
+
+func TestPromptCodexTransportCannotBeDowngradedByOmittingSnapshot(t *testing.T) {
+	target, _ := validPromptTarget(t)
+	for _, argv := range [][]string{
+		{"codex", "--remote", "unix:///tmp/other.sock"},
+		{"codex", "--remote"},
+		{"codex", "--remote="},
+		{"codex", "--remote", "unix://" + target.CodexService.SocketPath, "--remote", "unix://" + target.CodexService.SocketPath},
+	} {
+		bad := target
+		bad.Argv = argv
+		if validPromptCodexTarget(bad) {
+			t.Fatalf("accepted mismatching or ambiguous endpoint: %v", argv)
+		}
+	}
+	target.CodexService = CodexServiceSnapshot{}
+	if validPromptCodexTarget(target) {
+		t.Fatal("remote argv accepted without service snapshot")
+	}
+	target.Argv = []string{"codex", "--remote=unix:///tmp/socket"}
+	if validPromptCodexTarget(target) {
+		t.Fatal("inline remote argv accepted without service snapshot")
+	}
+	target.Argv = []string{"codex"}
+	target.CodexService = managedServiceSnapshot()
+	if validPromptCodexTarget(target) {
+		t.Fatal("ordinary argv incorrectly described as managed")
+	}
+}
+
+func TestPromptCodexTransportModel(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Model: ordinary has no endpoint/receipt; managed has exactly one
+		// endpoint equal to the receipt. All other combinations reject.
+		mode := rapid.IntRange(0, 4).Draw(t, "mode")
+		receipt := rapid.Bool().Draw(t, "receipt")
+		validSession := rapid.Bool().Draw(t, "valid-session")
+		service := managedServiceSnapshot()
+		argv := []string{"codex"}
+		switch mode {
+		case 1:
+			argv = append(argv, "--remote", "unix://"+service.SocketPath)
+		case 2:
+			argv = append(argv, "--remote=unix://"+service.SocketPath)
+		case 3:
+			argv = append(argv, "--remote", "unix:///different/socket")
+		case 4:
+			argv = append(argv, "--remote", "unix://"+service.SocketPath, "--remote=unix://"+service.SocketPath)
+		}
+		target := PromptTarget{Argv: argv, Agent: Agent{Session: &SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: managedNewID}}}
+		if receipt {
+			target.CodexService = service
+		}
+		if !validSession {
+			target.Agent.Session.Value = "truncated"
+		}
+		want := validSession && (mode == 0 && !receipt || (mode == 1 || mode == 2) && receipt)
+		if got := validPromptCodexTarget(target); got != want {
+			t.Fatalf("mode=%d receipt=%t validSession=%t got=%t want=%t", mode, receipt, validSession, got, want)
+		}
+	})
+}
+
 func TestDeliverOpenCodePromptRejectsServerDirectoryMismatchBeforeNativeRequest(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
@@ -576,7 +656,7 @@ func validPromptTarget(t *testing.T) (PromptTarget, wireAgent) {
 	agent := mustPublic(t, wire)
 	return PromptTarget{
 		Created: sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"}},
-		Agent:   agent, Directory: "/tmp/project", Argv: []string{"codex"}, CodexService: managedServiceSnapshot(),
+		Agent:   agent, Directory: "/tmp/project", Argv: []string{"codex", "--remote", "unix://" + managedServiceSnapshot().SocketPath}, CodexService: managedServiceSnapshot(),
 	}, wire
 }
 

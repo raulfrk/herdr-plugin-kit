@@ -46,6 +46,29 @@ func TestParseManagedStatusAcceptsObservedWrappedCodex01540Shape(t *testing.T) {
 	}
 }
 
+func TestParseOrdinaryStatusUsesPaneUUIDWithoutRemoteOrServerInference(t *testing.T) {
+	base := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Model: gpt-5.6-sol (reasoning medium, summaries auto) │
+│ Directory: /tmp/project │
+│ Permissions: Read Only (never) │
+│ Session: 01a0a793-5a65-78e1-b56f-ab827c31b2f9 │`
+	id, err := parseManagedStatus(base, "/tmp/project", CodexServiceSnapshot{}, managedPolicy())
+	if err != nil || id != "01a0a793-5a65-78e1-b56f-ab827c31b2f9" {
+		t.Fatalf("id=%q error=%v", id, err)
+	}
+	for _, text := range []string{
+		base + "\n│ Remote: unix:///tmp/other.sock (v0.154.0) │",
+		strings.Replace(base, "01a0a793-5a65-78e1-b56f-ab827c31b2f9", "01a0a793-5a65-78e1-b56f", 1),
+		base + "\n│ Session: " + managedChildID + " │",
+		strings.Replace(base, "/tmp/project", "/tmp/other", 1),
+	} {
+		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, managedPolicy()); err == nil {
+			t.Fatalf("accepted ambiguous or drifted ordinary status: %q", text)
+		}
+	}
+}
+
 func TestParseManagedStatusRejectsTruncationDriftAndAmbiguity(t *testing.T) {
 	base := `/status
 │ >_ OpenAI Codex (v0.154.0) │
@@ -89,6 +112,10 @@ func TestParseManagedStatusAcceptsLabeledForkParentButRejectsUnlabeledUUID(t *te
 }
 
 func TestEmptyCodexComposerRejectsSingleAndMultilineDrafts(t *testing.T) {
+	// Observed zero-turn Codex 0.154.0 ANSI: no context item until the first turn.
+	if !emptyCodexComposer("\x1b[0m\x1b[1m›\x1b[0m \x1b[0m\x1b[2mAsk Codex to do anything\x1b[0m\r\n \r\n  gpt-5.6-sol medium · ~/projects/herdr-plugin-kit") {
+		t.Fatal("observed zero-turn status footer rejected")
+	}
 	if !emptyCodexComposer(string(managedEmptyComposer("header"))) {
 		t.Fatal("empty composer rejected")
 	}

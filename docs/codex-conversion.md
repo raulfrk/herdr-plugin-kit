@@ -1,9 +1,13 @@
 # Ordinary-to-managed Codex conversion
 
 `agenthost.CodexConverter` converts one ordinary Codex 0.154.0 TUI in its
-existing Herdr 0.8.2 pane. It uses Codex's one native App Server daemon for the
-effective `CODEX_HOME`; it never starts a per-pane server, creates a replacement
+existing Herdr 0.8.2 pane. It uses the Kit's one installed user-systemd App Server
+service and configured `CODEX_HOME`; it never starts a per-pane server, creates a replacement
 conversation, injects environment, or moves the session to another pane.
+
+Plain `codex` remains unmanaged even while the service runs. Managed New/Fork
+explicitly connect to its private socket. See [service lifecycle](codex-service.md)
+for installation, migration, maintenance restart, and uninstall.
 
 ## Identity prerequisite
 
@@ -42,7 +46,7 @@ Call `Convert` with the exact `Agent` returned for the source pane. Conversion:
 7. if Codex startup reapplies a default policy, reconciles the captured model,
    reasoning effort, approval policy, and complete sandbox or permission
    profile once through `thread/settings/update`; and
-8. verifies the same thread, history, pane, process, CWD, daemon, and exposed
+8. verifies the same thread, history, pane, process, CWD, service instance, and exposed
    policy before returning.
 
 The captured effective policy is authoritative. A CLI sandbox flag can resolve
@@ -100,12 +104,12 @@ that limitation instead of claiming they were compared.
 Pre-stop rejection sends no pane input. If authoritative capture fails after a
 successful stop, conversion performs exactly one minimal ordinary
 `codex resume --cd CWD ORIGINAL_ID` after rechecking the unchanged shell,
-identity, history, and daemon. The returned result has outcome
+identity, history, and service instance. The returned result has outcome
 `ordinary_fallback`, and the error matches both the original cause and
 `ErrCodexConversionFallback` so the UI must expose the fallback.
 
 An eligible managed launch may be retried once with a byte-identical request
-after renewed shell, daemon, identity, and history checks. Each retry and the
+after renewed shell, service-instance, identity, and history checks. Each retry and the
 ordinary fallback obtain a fresh lease for the original shell process. If the
 pane becomes focused, its visible buffer or revision changes, the shell or CWD
 changes, or the observations do not stabilize, conversion sends no next

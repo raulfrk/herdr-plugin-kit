@@ -109,12 +109,6 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			return ForkResult{}, fmt.Errorf("fork Codex identity: %w", err)
 		}
 	}
-	closeBinding := func() error {
-		if binding == nil {
-			return nil
-		}
-		return binding.Close()
-	}
 	created, err := f.topology().Launch(ctx, sessionhost.LaunchRequest{
 		Origin: sessionhost.Origin{
 			SessionName: request.Source.SessionName,
@@ -127,16 +121,12 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		OMPStatusSocket: request.OMPStatusSocket,
 	})
 	if err != nil {
-		return ForkResult{}, errors.Join(fmt.Errorf("fork launch: %w", err), closeBinding())
+		return ForkResult{}, fmt.Errorf("fork launch: %w", err)
 	}
 	fail := func(cause error) (ForkResult, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
 		defer cancel()
-		var threadErr error
-		if binding != nil {
-			threadErr = binding.CleanupThread(cleanupCtx)
-		}
-		return ForkResult{}, errors.Join(cause, f.topology().Cleanup(cleanupCtx, created), threadErr, closeBinding())
+		return ForkResult{}, errors.Join(cause, f.topology().Cleanup(cleanupCtx, created))
 	}
 	ompStatusSocket := request.OMPStatusSocket
 	if kind == "omp" && request.Prompt != nil && ompStatusSocket == "" {
@@ -168,16 +158,13 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			Created: created, Agent: child, Directory: request.Source.CWD, Argv: argv,
 			Source: &after, OMPStatusSocket: ompStatusSocket, OpenCodeServer: request.OpenCodeServer,
 		}
-		if binding != nil {
-			promptTarget.CodexService = binding.service
-		}
 		promptResult, promptErr := deliver(ctx, *request.Prompt, promptTarget)
 		result.Prompt = promptResult
 		if promptErr != nil {
 			if promptResult.State == PromptNotAttempted {
 				return fail(promptErr)
 			}
-			return result, errors.Join(promptErr, closeBinding())
+			return result, promptErr
 		}
 		child, result.Child = promptResult.Agent, promptResult.Agent
 	}
@@ -185,28 +172,28 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		child, err = f.Host.Focus(ctx, child)
 		if err != nil {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, errors.Join(fmt.Errorf("fork focus: %w", err), closeBinding())
+				return result, fmt.Errorf("fork focus: %w", err)
 			}
 			return fail(fmt.Errorf("fork focus: %w", err))
 		}
 		result.Child = child
 		if ready, _ := classifyForkChild(request.Source, child, created, kind); !ready {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, errors.Join(fmt.Errorf("fork focus: %w", ErrStaleReport), closeBinding())
+				return result, fmt.Errorf("fork focus: %w", ErrStaleReport)
 			}
 			return fail(fmt.Errorf("fork focus: %w", ErrStaleReport))
 		}
 		afterFocus, findErr := f.Host.find(ctx, request.Source.PaneID)
 		if findErr != nil || !sameForkSource(before, afterFocus) {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, errors.Join(fmt.Errorf("fork source changed after focus: %w", ErrStaleReport), closeBinding())
+				return result, fmt.Errorf("fork source changed after focus: %w", ErrStaleReport)
 			}
 			return fail(fmt.Errorf("fork source changed after focus: %w", ErrStaleReport))
 		}
 		after = afterFocus
 	}
 	result.Source, result.Child = after, child
-	return result, closeBinding()
+	return result, nil
 }
 
 func (f Forker) waitForChild(parent context.Context, created sessionhost.CreatedTarget, source Agent, kind string, timeout time.Duration) (Agent, error) {

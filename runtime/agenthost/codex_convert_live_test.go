@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,9 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: sessionName})
+	launcher := newManagedLiveLauncher(t, Host{Runner: runner, Session: sessionName})
+	converter := NewCodexConverter(launcher.Host)
+	converter.launcher = launcher
 	service, err := launcher.serviceClient().Ensure(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +75,7 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			agent, err := awaitLiveOrdinaryCodex(ctx, launcher, shell, directory, argv)
+			agent, err := awaitLiveOrdinaryCodex(ctx, launcher, shell, directory, argv, sourcePolicy)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -91,14 +94,14 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 			}
 			request := CodexConversionRequest{Source: current, ReadyTimeout: 35 * time.Second}
 			if test.custom != nil {
-				disclosure, prepareErr := NewCodexConverter(launcher.Host).PrepareCustomization(ctx, current, *test.custom, 35*time.Second)
+				disclosure, prepareErr := converter.PrepareCustomization(ctx, current, *test.custom, 35*time.Second)
 				if prepareErr != nil {
 					verifier.Close()
 					t.Fatal(prepareErr)
 				}
 				request.Customization = &CodexConversionCustomization{Desired: disclosure.Desired, ConfirmationToken: disclosure.ConfirmationToken}
 			}
-			converted, err := NewCodexConverter(launcher.Host).Convert(ctx, request)
+			converted, err := converter.Convert(ctx, request)
 			if err != nil {
 				verifier.Close()
 				t.Fatal(err)
@@ -152,7 +155,7 @@ func createLiveConversionWorkspace(ctx context.Context, runner command.Runner, s
 	return sessionhost.Origin{SessionName: sessionName, WorkspaceID: workspace.Result.RootPane.WorkspaceID, TabID: workspace.Result.RootPane.TabID, PaneID: workspace.Result.RootPane.PaneID}, nil
 }
 
-func awaitLiveOrdinaryCodex(ctx context.Context, launcher ManagedCodexLauncher, target sessionhost.Origin, directory string, argv []string) (Agent, error) {
+func awaitLiveOrdinaryCodex(ctx context.Context, launcher ManagedCodexLauncher, target sessionhost.Origin, directory string, argv []string, policy ManagedCodexPolicy) (Agent, error) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	var prior Agent
@@ -160,6 +163,20 @@ func awaitLiveOrdinaryCodex(ctx context.Context, launcher ManagedCodexLauncher, 
 		wire, agent, err := launcher.readManagedAgent(ctx, target, directory)
 		_, processErr := launcher.topologyHost().VerifyForegroundProcess(ctx, target, directory, argv)
 		visible, readErr := launcher.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+		// The standalone fixture intentionally does not install a hook or
+		// autoattach ordinary Codex. Wait for the actual inline reply before
+		// using the same guarded status discovery available to consumers.
+		if err == nil && processErr == nil && readErr == nil && managedPaneQuiescent(wire) && agent.Session == nil && emptyCodexComposer(visible) {
+			for _, line := range strings.Split(managedANSI.ReplaceAllString(visible, ""), "\n") {
+				if strings.TrimSpace(line) == "• OK" {
+					observed, id, discoverErr := launcher.discoverManagedIdentity(ctx, target, directory, argv, CodexServiceSnapshot{}, policy)
+					if discoverErr != nil {
+						return Agent{}, discoverErr
+					}
+					return launcher.bindManagedIdentity(ctx, target, directory, observed, id)
+				}
+			}
+		}
 		if err == nil && processErr == nil && readErr == nil && !wire.Focused && !wire.LaunchPending && managedPaneQuiescent(wire) && agent.Session != nil && validManagedSession(agent.Session) && sameManagedTarget(agent, target, directory, false, agent.Session.Value) && emptyCodexComposer(visible) {
 			if prior.Session != nil && sameImmutable(prior, agent) && *prior.Session == *agent.Session {
 				return agent, nil
@@ -169,7 +186,7 @@ func awaitLiveOrdinaryCodex(ctx context.Context, launcher ManagedCodexLauncher, 
 			prior = Agent{}
 		}
 		if err := waitManaged(ctx, 50*time.Millisecond); err != nil {
-			return Agent{}, fmt.Errorf("wait for completed ordinary turn and hook identity: %w", err)
+			return Agent{}, fmt.Errorf("wait for completed ordinary turn and pane identity: %w", err)
 		}
 	}
 }

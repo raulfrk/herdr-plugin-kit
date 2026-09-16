@@ -182,19 +182,13 @@ func TestForkPostPromptSourceDriftPreservesAcknowledgedChild(t *testing.T) {
 	}
 }
 
-func TestOrdinaryCodexForkPromptUsesSharedDiscoveryBinding(t *testing.T) {
+func TestOrdinaryCodexForkPromptUsesPaneBindingWithoutService(t *testing.T) {
 	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
 	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
 	process := sessionhost.ForegroundProcess{PID: 101, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}
 	topology := &fakeManagedTopology{target: created, inspected: process}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
-	identity := codexThreadIdentity{ID: managedChildID, CWD: source.CWD, ForkedFromID: managedSourceID, ModelProvider: "openai"}
-	effective := managedPreflight(source.CWD).EffectiveCodexPolicy
-	verifier := &fakeManagedVerifier{
-		preflight: managedPreflight(source.CWD), confirm: identity, recheck: identity,
-		read:   []codexThreadIdentity{{ID: managedSourceID, CWD: source.CWD, ModelProvider: "openai"}, {ID: managedSourceID, CWD: source.CWD, ModelProvider: "openai"}},
-		audits: []EffectiveCodexPolicy{effective, effective},
-	}
+	verifier := &fakeManagedVerifier{}
 	runner := &scriptedRunner{results: []command.Result{
 		listForkResult(t, source),
 		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
@@ -222,10 +216,10 @@ func TestOrdinaryCodexForkPromptUsesSharedDiscoveryBinding(t *testing.T) {
 		Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
 		CodexPolicy: managedPolicy(), Prompt: &prompt,
 	})
-	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 1 || verifier.confirmOp != ManagedFork || verifier.confirmSrc != managedSourceID {
+	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 0 || verifier.confirmID != "" {
 		t.Fatalf("result=%+v service=%d verifier=%+v error=%v", result, service.callCount(), verifier, err)
 	}
-	if len(topology.cleanups) != 0 || len(verifier.deleted) != 0 || verifier.closed != 1 {
+	if len(topology.cleanups) != 0 || len(verifier.deleted) != 0 || verifier.closed != 0 {
 		t.Fatalf("cleanup=%v deleted=%v closed=%d", topology.cleanups, verifier.deleted, verifier.closed)
 	}
 }
