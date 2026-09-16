@@ -212,6 +212,69 @@ func TestExplicitChildTabOwnershipPreservesFormBinding(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPickerReservesGlobalFooterAtMinimumSize(t *testing.T) {
+	palette, _ := theme.Builtin("terminal")
+	tests := []struct {
+		name          string
+		wrapperFooter string
+		build         func(*testing.T) *Surface
+	}{
+		{name: "internal editor", wrapperFooter: "Ctrl-C quit · ctrl+k Actions · tab nav", build: func(t *testing.T) *Surface {
+			surface, _ := uiForTest(t, t.TempDir(), false)
+			surface.view = editorScreen
+			return surface
+		}},
+		{name: "consumer main picker", wrapperFooter: "Ctrl-C quit · Actions ctrl+k", build: func(t *testing.T) *Surface {
+			picker, err := interaction.NewPicker(interaction.PickerOptions{Title: "Main", Load: func(context.Context, string, interaction.Cursor) (interaction.Page, error) {
+				return interaction.Page{}, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			surface, err := New(Options{Main: picker, ConfigDirectory: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return surface
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			surface := test.build(t)
+			t.Cleanup(func() { _ = surface.Close() })
+			frame, err := surface.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}), Theme: palette})
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := func(row int) string {
+				var text strings.Builder
+				for column := 0; column < frame.Width(); column++ {
+					cell, _ := frame.CellAt(column, row)
+					if cell.Continuation {
+						continue
+					}
+					if cell.Text == "" {
+						text.WriteByte(' ')
+					} else {
+						text.WriteString(cell.Text)
+					}
+				}
+				return strings.TrimRight(text.String(), " ")
+			}
+			want := []string{
+				"? help · / search · j/k move · o open",
+				"n/p page · q quit",
+				test.wrapperFooter,
+			}
+			for index, expected := range want {
+				if got := line(frame.Height() - len(want) + index); got != expected {
+					t.Fatalf("composed footer row %d=%q, want %q", index, got, expected)
+				}
+			}
+		})
+	}
+}
+
 func TestConsumerDebugKeyOverridesOnlyBareWrapperFallback(t *testing.T) {
 	main := &probe{name: "example", ownDebugKey: true}
 	debug := &probe{name: "debug"}

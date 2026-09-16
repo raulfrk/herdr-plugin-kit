@@ -35,6 +35,9 @@ type RenderContext struct {
 	Focused          bool
 	ResizeGeneration uint64
 	Settled          bool
+	// ReservedBottomRows are owned by an enclosing surface and remain outside
+	// the child's content area while the child still renders a full-size frame.
+	ReservedBottomRows int
 }
 
 type ProgramOptions struct {

@@ -12,10 +12,12 @@ import (
 func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 	var frame *view.Frame
 	var err error
+	childContext := context
+	childContext.ReservedBottomRows = min(max(0, context.ReservedBottomRows)+1, context.Layout.Render.Rows)
 	if picker := s.activePicker(); picker != nil {
-		frame, err = picker.Render(context)
+		frame, err = picker.Render(childContext)
 	} else if s.view == baseScreen {
-		frame, err = s.base().Render(context)
+		frame, err = s.base().Render(childContext)
 	} else {
 		frame, err = view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows)
 	}

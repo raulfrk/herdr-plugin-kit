@@ -665,33 +665,59 @@ func TestPickerTextFitMeasuresEssentialContentOnly(t *testing.T) {
 	recovery, _ := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 20, Rows: 5}), Theme: palette})
 	recoveryReport := recovery.TextFit()
 	if len(recoveryReport.Observations) != 2 || recoveryReport.Observations[0].Element.String() != "picker-recovery-title" ||
-		recoveryReport.Observations[1].Element.String() != "picker-recovery-body" || !recoveryReport.Observations[1].Truncated {
+		recoveryReport.Observations[1].Element.String() != "picker-recovery-body" || recoveryReport.Observations[1].AvailableRows != 3 || !recoveryReport.Observations[1].Truncated {
 		t.Fatalf("recovery text-fit report = %+v", recoveryReport)
 	}
 }
 
-func TestPickerNarrowFootersReportUnexpectedTruncation(t *testing.T) {
+func TestPickerFootersFitSupportedWidths(t *testing.T) {
 	picker := newPickerForTest(t)
 	_ = picker.applyPage(loadResult{page: Page{Items: []Item{{Key: "one", Label: "One"}}}})
 	palette, _ := theme.Builtin("terminal")
-	for _, screen := range []pickerScreen{rootScreen, detailScreen} {
-		picker.screen = screen
-		frame, err := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 40, Rows: 10}), Theme: palette})
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, observation := range frame.TextFit().Observations {
-			if observation.Element.String() == "picker-footer" || observation.Element.String() == "picker-detail-footer" {
-				found = true
-				if !observation.Truncated || observation.AllowTruncation {
-					t.Fatalf("essential footer fit=%+v", observation)
+	tests := []struct {
+		name         string
+		screen       pickerScreen
+		columns      int
+		wantLines    []string
+		wantElement  string
+		wantBodyRows int
+	}{
+		{name: "root minimum", screen: rootScreen, columns: 40, wantLines: []string{"? help · / search · j/k move · o open", "n/p page · q quit"}, wantElement: "picker-footer"},
+		{name: "root phone", screen: rootScreen, columns: 48, wantLines: []string{"? help · / search · j/k move · o open", "n/p page · q quit"}, wantElement: "picker-footer"},
+		{name: "root exact full", screen: rootScreen, columns: 57, wantLines: []string{"? help · / search · j/k move · o open · n/p page · q quit"}, wantElement: "picker-footer"},
+		{name: "detail minimum", screen: detailScreen, columns: 40, wantLines: []string{"Enter/a activate · Backspace/Esc back", "? help"}, wantElement: "picker-detail-footer", wantBodyRows: 4},
+		{name: "detail exact full", screen: detailScreen, columns: 46, wantLines: []string{"Enter/a activate · Backspace/Esc back · ? help"}, wantElement: "picker-detail-footer", wantBodyRows: 5},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			picker.screen = test.screen
+			frame, err := picker.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: test.columns, Rows: 10}), Theme: palette})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(stripANSI(view.ANSI(frame)), "\n")
+			footer := lines[len(lines)-len(test.wantLines):]
+			for index, want := range test.wantLines {
+				if got := strings.TrimRight(footer[index], " "); got != want {
+					t.Fatalf("footer row %d=%q, want %q", index, got, want)
 				}
 			}
-		}
-		if !found {
-			t.Fatal("footer unmeasured")
-		}
+			found := false
+			for _, observation := range frame.TextFit().Observations {
+				if observation.Element.String() == test.wantElement {
+					found = true
+					if observation.Truncated || observation.Clipped || observation.LayoutRows != len(test.wantLines) {
+						t.Fatalf("essential footer fit=%+v", observation)
+					}
+				}
+				if observation.Element.String() == "picker-detail-body" && test.wantBodyRows > 0 && observation.AvailableRows != test.wantBodyRows {
+					t.Fatalf("detail body rows=%d, want %d: %+v", observation.AvailableRows, test.wantBodyRows, observation)
+				}
+			}
+			if !found {
+				t.Fatal("footer unmeasured")
+			}
+		})
 	}
 }
 
