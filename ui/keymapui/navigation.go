@@ -150,6 +150,34 @@ func (s *Surface) openEditor(events shell.EventContext) []shell.Effect {
 	return s.refreshEditor(events)
 }
 
+func (s *Surface) helpActions() []keymap.Action {
+	var actions []keymap.Action
+	for _, action := range s.runtime.Catalog() {
+		if action.Context == s.helpContext.ID && action.ID != s.options.HelpOpenedAction {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
+func (s *Surface) openHelpSelection(events shell.EventContext) []shell.Effect {
+	actions := s.helpActions()
+	if len(actions) == 0 {
+		s.status = "No configurable shortcut"
+		return nil
+	}
+	s.helpSelected = min(max(0, s.helpSelected), len(actions)-1)
+	if !s.draftOpen {
+		s.editorOrigin = s.helpOrigin
+		s.draftOpen = true
+		s.resetDraft()
+	}
+	s.selected = actions[s.helpSelected]
+	s.view = entryScreen
+	s.actionsFocused = false
+	return s.refreshEntry(events)
+}
+
 func (s *Surface) resetDraft() {
 	s.draft = s.runtime.Document()
 	if s.options.DefaultKeymap && s.disk.valid {

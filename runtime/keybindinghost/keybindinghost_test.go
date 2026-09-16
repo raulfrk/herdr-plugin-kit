@@ -188,6 +188,143 @@ func TestCommandsUseFixedEnvironmentAndExactDefaultNamedRouting(t *testing.T) {
 	}
 }
 
+func TestActivateReloadsExistingBindingsWithoutWritingConfig(t *testing.T) {
+	for _, session := range []string{"", "named"} {
+		t.Run(map[bool]string{true: "default", false: "named"}[session == ""], func(t *testing.T) {
+			path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
+			bindings := []Binding{{Key: "prefix+o", Action: "plugin.owner.open"}}
+			applyBindings(t, Host{Runner: &fakeRunner{}, ConfigPath: path, Session: session}, "plugin.owner", bindings)
+			before := readFile(t, path)
+			snapshot, err := (Host{Runner: &fakeRunner{}, ConfigPath: path, Session: session}).Read(context.Background(), "plugin.owner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &fakeRunner{}
+			host := Host{Runner: runner, Herdr: "/tmp/herdr-literal", ConfigPath: path, Session: session}
+			result, err := host.Activate(context.Background(), Request{Owner: "plugin.owner", Expected: snapshot.Revision, Bindings: bindings})
+			if err != nil || result.Changed || !result.Activated || result.Revision != snapshot.Revision {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			if got := readFile(t, path); !bytes.Equal(got, before) {
+				t.Fatalf("activation changed config:\ngot  %q\nwant %q", got, before)
+			}
+			calls := runner.snapshotCalls()
+			if len(calls) != 2 || !slicesEnd(calls[0].args, "config", "check") {
+				t.Fatalf("calls=%+v", calls)
+			}
+			selected := session
+			if selected == "" {
+				selected = "default"
+			}
+			if want := []string{"--session", selected, "server", "reload-config"}; !reflect.DeepEqual(calls[1].args[9:], want) {
+				t.Fatalf("reload args=%q want=%q", calls[1].args, want)
+			}
+		})
+	}
+}
+
+func TestActivateRejectsDriftMismatchAndCollisionWithoutCommandsOrWrites(t *testing.T) {
+	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
+	bindings := []Binding{{Key: "prefix+o", Action: "plugin.owner.open"}}
+	applyBindings(t, Host{Runner: &fakeRunner{}, ConfigPath: path}, "plugin.owner", bindings)
+	snapshot, err := (Host{Runner: &fakeRunner{}, ConfigPath: path}).Read(context.Background(), "plugin.owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, path)
+	for name, request := range map[string]Request{
+		"stale revision":   {Owner: "plugin.owner", Expected: documentstore.Revision{}, Bindings: bindings},
+		"binding mismatch": {Owner: "plugin.owner", Expected: snapshot.Revision, Bindings: []Binding{{Key: "prefix+x", Action: "plugin.owner.open"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &fakeRunner{}
+			result, err := (Host{Runner: runner, ConfigPath: path}).Activate(context.Background(), request)
+			if !errors.Is(err, ErrDrift) || result.Activated || len(runner.snapshotCalls()) != 0 || !bytes.Equal(readFile(t, path), before) {
+				t.Fatalf("result=%+v error=%v calls=%+v", result, err, runner.snapshotCalls())
+			}
+		})
+	}
+	section, err := parseManaged(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unmanaged := []byte("[[keys.command]]\nkey='prefix+o'\ntype='plugin_action'\ncommand='external.open'\n")
+	conflicted := append(append([]byte(nil), before[:section.start]...), unmanaged...)
+	conflicted = append(conflicted, before[section.start:]...)
+	if err := os.WriteFile(path, conflicted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conflictSnapshot, err := (Host{Runner: &fakeRunner{}, ConfigPath: path}).Read(context.Background(), "plugin.owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	result, err := (Host{Runner: runner, ConfigPath: path}).Activate(context.Background(), Request{Owner: "plugin.owner", Expected: conflictSnapshot.Revision, Bindings: bindings})
+	if !errors.Is(err, ErrCollision) || result.Activated || len(runner.snapshotCalls()) != 0 || !bytes.Equal(readFile(t, path), conflicted) {
+		t.Fatalf("result=%+v error=%v calls=%+v", result, err, runner.snapshotCalls())
+	}
+}
+
+func TestActivateReportsCheckAndReloadFailuresWithoutWritingConfig(t *testing.T) {
+	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
+	bindings := []Binding{{Key: "prefix+o", Action: "plugin.owner.open"}}
+	applyBindings(t, Host{Runner: &fakeRunner{}, ConfigPath: path}, "plugin.owner", bindings)
+	snapshot, _ := (Host{Runner: &fakeRunner{}, ConfigPath: path}).Read(context.Background(), "plugin.owner")
+	before := readFile(t, path)
+	for _, test := range []struct {
+		name string
+		want error
+		run  func(int) (command.Result, error)
+	}{
+		{name: "check", want: ErrCheck, run: func(int) (command.Result, error) {
+			return command.Result{Stdout: []byte("config: invalid\n"), ExitCode: 1}, &command.RunError{Kind: command.ErrorExit, Cause: errors.New("exit status 1")}
+		}},
+		{name: "reload", want: ErrReload, run: func(index int) (command.Result, error) {
+			if index == 0 {
+				return command.Result{Stdout: []byte("config: ok\n")}, nil
+			}
+			return command.Result{Stderr: []byte("down"), ExitCode: 1}, &command.RunError{Kind: command.ErrorExit, Cause: errors.New("exit status 1")}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{run: func(_ context.Context, _ string, _ []string, index int) (command.Result, error) {
+				return test.run(index)
+			}}
+			result, err := (Host{Runner: runner, ConfigPath: path}).Activate(context.Background(), Request{Owner: "plugin.owner", Expected: snapshot.Revision, Bindings: bindings})
+			if !errors.Is(err, test.want) || result.Activated || !bytes.Equal(readFile(t, path), before) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestActivateRejectsExternalDriftAfterCheckBeforeReload(t *testing.T) {
+	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
+	bindings := []Binding{{Key: "prefix+o", Action: "plugin.owner.open"}}
+	applyBindings(t, Host{Runner: &fakeRunner{}, ConfigPath: path}, "plugin.owner", bindings)
+	snapshot, err := (Host{Runner: &fakeRunner{}, ConfigPath: path}).Read(context.Background(), "plugin.owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := append(readFile(t, path), []byte("\n# external edit\n")...)
+	runner := &fakeRunner{run: func(_ context.Context, _ string, args []string, _ int) (command.Result, error) {
+		if !slicesEnd(args, "config", "check") {
+			t.Fatal("reload ran after post-check drift")
+		}
+		if err := os.WriteFile(path, external, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return command.Result{Stdout: []byte("config: ok\n")}, nil
+	}}
+	result, err := (Host{Runner: runner, ConfigPath: path}).Activate(context.Background(), Request{Owner: "plugin.owner", Expected: snapshot.Revision, Bindings: bindings})
+	if !errors.Is(err, ErrDrift) || result.Activated || result.Revision == snapshot.Revision || len(runner.snapshotCalls()) != 1 {
+		t.Fatalf("result=%+v error=%v calls=%+v", result, err, runner.snapshotCalls())
+	}
+	if got := readFile(t, path); !bytes.Equal(got, external) {
+		t.Fatalf("activation changed external bytes: %q", got)
+	}
+}
+
 func TestNoopSkipsCheckWriteAndReload(t *testing.T) {
 	path := writeConfig(t, []byte("onboarding = false\n"), 0o600)
 	runner := &fakeRunner{}

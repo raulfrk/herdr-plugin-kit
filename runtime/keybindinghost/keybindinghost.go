@@ -145,6 +145,7 @@ type Request struct {
 type Result struct {
 	Revision          documentstore.Revision
 	Changed           bool
+	Activated         bool
 	RolledBack        bool
 	EffectiveRestored bool
 }
@@ -278,10 +279,79 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 	}
 	result := Result{Revision: nextRevision, Changed: true}
 	if reloadErr := h.reload(ctx, path); reloadErr == nil {
+		result.Activated = true
 		return result, nil
 	} else {
 		return h.rollback(ctx, store, name, path, previous, nextRevision, result, reloadErr)
 	}
+}
+
+// Activate validates an already-durable owner binding set against one exact
+// config revision, checks the unchanged bytes, and reloads only the addressed
+// default or named Herdr session. It never writes the config file.
+func (h Host) Activate(ctx context.Context, request Request) (Result, error) {
+	if err := validateOwner(request.Owner); err != nil {
+		return Result{}, failure(FailureInvalid, err, "")
+	}
+	if err := validateBindings(request.Owner, request.Bindings); err != nil {
+		return Result{}, err
+	}
+	path, err := h.validate()
+	if err != nil {
+		return Result{}, err
+	}
+	transaction, err := h.transactionLock(ctx, path)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Result{}, failure(FailureCanceled, err, "")
+		}
+		return Result{}, failure(FailureWrite, fmt.Errorf("lock keybinding transaction: %w", err), "")
+	}
+	defer transaction.Close()
+	store, name, err := h.store(path)
+	if err != nil {
+		return Result{}, err
+	}
+	defer store.Close()
+	document, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	if err != nil {
+		if errors.Is(err, documentstore.ErrTooLarge) {
+			return Result{}, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
+		}
+		return Result{}, err
+	}
+	result := Result{Revision: document.Revision}
+	if document.Revision != request.Expected {
+		return result, failure(FailureDrift, documentstore.ErrConflict, "")
+	}
+	_, changed, err := replaceOwned(document.Bytes, request.Owner, request.Bindings)
+	if err != nil {
+		return result, err
+	}
+	if changed {
+		return result, failure(FailureDrift, errors.New("durable owner bindings differ from activation request"), "")
+	}
+	if err := h.checkCandidate(ctx, path, document.Bytes); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, failure(FailureCanceled, err, "")
+	}
+	verified, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	if err != nil {
+		if errors.Is(err, documentstore.ErrTooLarge) {
+			return result, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
+		}
+		return result, err
+	}
+	if verified.Revision != document.Revision {
+		return Result{Revision: verified.Revision}, failure(FailureDrift, documentstore.ErrConflict, "")
+	}
+	if err := h.reload(ctx, path); err != nil {
+		return result, err
+	}
+	result.Activated = true
+	return result, nil
 }
 
 func (h Host) rollback(parent context.Context, store documentStore, name, path string, previous documentstore.Document, written documentstore.Revision, result Result, reloadErr error) (Result, error) {

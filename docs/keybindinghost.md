@@ -27,6 +27,23 @@ result, err := host.Apply(ctx, keybindinghost.Request{
 })
 ```
 
+`Apply` reports `Result.Activated` only after the exact addressed Herdr session
+accepts the reload. If the requested owner bindings are already durable and a
+fresh activation receipt is required, call `Activate` with the same snapshot
+revision and binding set:
+
+```go
+result, err = host.Activate(ctx, keybindinghost.Request{
+    Owner: "attention.plugin", Expected: snapshot.Revision,
+    Bindings: snapshot.Bindings,
+})
+```
+
+`Activate` revalidates the exact revision, ownership, requested bindings, and
+unmanaged collisions; checks the unchanged config; and reloads only the
+addressed default or named session. It never writes the config. A binding
+mismatch is `ErrDrift`, and only an accepted reload sets `Result.Activated`.
+
 The host resolves `HERDR_CONFIG_PATH` when present, otherwise
 `$XDG_CONFIG_HOME/herdr/config.toml` (or the platform user-config default).
 An explicit `ConfigPath` is useful for isolated consumers and tests. Paths

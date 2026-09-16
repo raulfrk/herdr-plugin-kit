@@ -3,6 +3,7 @@ package keymapui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -43,11 +44,24 @@ func (s *Surface) childOwnsTab(context keymap.Context) bool {
 }
 
 type Options struct {
-	Main            MappedSurface
-	Debug           MappedSurface
-	ConfigDirectory string
-	DefaultKeymap   bool
-	StartDebug      bool
+	Main             MappedSurface
+	Debug            MappedSurface
+	ConfigDirectory  string
+	DefaultKeymap    bool
+	StartDebug       bool
+	InteractiveHelp  bool
+	HelpOpenedAction string
+	HelpCommands     []HelpCommand
+}
+
+// HelpCommand adds one consumer-owned action to interactive generated Help.
+// Action is dispatched to Main after Help closes; the Kit retains ownership of
+// shortcut validation and the Help lifecycle.
+type HelpCommand struct {
+	ID       string
+	Label    string
+	Action   string
+	Defaults []keymap.Sequence
 }
 
 type screen uint8
@@ -78,6 +92,8 @@ type Surface struct {
 	checkerOrigin, helpOrigin                 screen
 	helpContext                               keymap.Context
 	helpOffset                                int
+	helpSelected                              int
+	helpCommands                              map[string]HelpCommand
 	draftOpen                                 bool
 	draft                                     keymap.Document
 	draftRevision                             documentstore.Revision
@@ -107,8 +123,11 @@ func New(options Options) (*Surface, error) {
 	if options.StartDebug && options.Debug == nil {
 		return nil, errors.New("keymap debug surface is nil")
 	}
-	s := &Surface{options: options, showingDebug: options.StartDebug, now: time.Now}
-	var err error
+	helpCommands, err := validateHelpCommands(options)
+	if err != nil {
+		return nil, err
+	}
+	s := &Surface{options: options, showingDebug: options.StartDebug, now: time.Now, helpCommands: helpCommands}
 	if s.menu, err = newList("ACTIONS", "keymap.actions"); err != nil {
 		return nil, err
 	}
@@ -134,6 +153,42 @@ func New(options Options) (*Surface, error) {
 		_ = s.runtime.Apply(s.disk.document)
 	}
 	return s, nil
+}
+
+func validateHelpCommands(options Options) (map[string]HelpCommand, error) {
+	if !options.InteractiveHelp && (options.HelpOpenedAction != "" || len(options.HelpCommands) != 0) {
+		return nil, errors.New("Help extensions require interactive Help")
+	}
+	targets := make(map[string]bool)
+	for _, action := range options.Main.KeymapCatalog() {
+		targets[action.ID] = true
+	}
+	if options.HelpOpenedAction != "" && !targets[options.HelpOpenedAction] {
+		return nil, errors.New("Help-opened action must target a main action")
+	}
+	commands := make(map[string]HelpCommand, len(options.HelpCommands))
+	for _, command := range options.HelpCommands {
+		id := helpCommandID(command)
+		if _, err := diagnostics.NewID(id); err != nil {
+			return nil, fmt.Errorf("help command ID: %w", err)
+		}
+		if command.Label == "" || command.Action == "" || !targets[command.Action] {
+			return nil, fmt.Errorf("help command %q must have a label and target a main action", command.ID)
+		}
+		if _, duplicate := commands[id]; duplicate {
+			return nil, fmt.Errorf("duplicate help command %q", command.ID)
+		}
+		for _, sequence := range command.Defaults {
+			if len(sequence) != 1 {
+				return nil, fmt.Errorf("help command %q defaults must be single-stroke", command.ID)
+			}
+			if _, err := keymap.Normalize(sequence[0]); err != nil {
+				return nil, fmt.Errorf("help command %q default: %w", command.ID, err)
+			}
+		}
+		commands[id] = command
+	}
+	return commands, nil
 }
 
 func (s *Surface) Close() error {
@@ -226,11 +281,38 @@ func (s *Surface) catalog() []keymap.Action {
 	for _, a := range []struct{ id, label, key string }{{"finish", "Use sequence", "enter"}, {"cancel", "Cancel", "escape"}, {"backspace", "Delete before cursor", "backspace"}, {"delete", "Delete at cursor", "delete"}, {"left", "Move cursor left", "left"}, {"right", "Move cursor right", "right"}, {"home", "Move to start", "home"}, {"end", "Move to end", "end"}} {
 		add("keymap.text."+a.id, a.label, "keymap.text", true, false, a.key)
 	}
+	claimedHelpKeys := make(map[string]bool)
+	for _, command := range s.options.HelpCommands {
+		for _, sequence := range command.Defaults {
+			key, _ := keymap.Normalize(sequence[0])
+			claimedHelpKeys[key] = true
+		}
+	}
 	for _, a := range []struct {
 		id, label string
 		keys      []string
-	}{{"back", "Close help", []string{"?", "escape", "backspace", "enter"}}, {"quit", "Quit", []string{"q"}}, {"next", "Scroll down", []string{"down", "j"}}, {"previous", "Scroll up", []string{"up", "k"}}, {"page-next", "Next page", []string{"page-down"}}, {"page-previous", "Previous page", []string{"page-up"}}, {"home", "First shortcut", []string{"home"}}, {"end", "Last shortcut", []string{"end"}}} {
-		add("keymap.help."+a.id, a.label, "keymap.help", false, false, a.keys...)
+	}{{"back", "Close help", []string{"?", "escape", "backspace", "enter"}}, {"quit", "Quit", []string{"q"}}, {"next", "Next shortcut", []string{"down", "j"}}, {"previous", "Previous shortcut", []string{"up", "k"}}, {"page-next", "Next page", []string{"page-down"}}, {"page-previous", "Previous page", []string{"page-up"}}, {"home", "First shortcut", []string{"home"}}, {"end", "Last shortcut", []string{"end"}}} {
+		keys := a.keys
+		if s.options.InteractiveHelp {
+			filtered := keys[:0]
+			for _, key := range keys {
+				normalized, _ := keymap.Normalize(key)
+				if (a.id == "back" && normalized == "enter") || claimedHelpKeys[normalized] {
+					continue
+				}
+				filtered = append(filtered, key)
+			}
+			keys = filtered
+		}
+		add("keymap.help."+a.id, a.label, "keymap.help", false, false, keys...)
+	}
+	if s.options.InteractiveHelp {
+		add("keymap.help.edit", "Edit selected shortcut", "keymap.help", false, false, "enter")
+		for _, command := range s.options.HelpCommands {
+			action := keymap.Action{ID: helpCommandID(command), Label: command.Label, Context: "keymap.help"}
+			action.Defaults = append([]keymap.Sequence(nil), command.Defaults...)
+			catalog = append(catalog, action)
+		}
 	}
 	// Tab traverses the existing controls and the appended Actions control unless
 	// an explicit child context owns Tab for its internal form navigation.
@@ -296,6 +378,8 @@ func (s *Surface) catalog() []keymap.Action {
 	return catalog
 }
 
+func helpCommandID(command HelpCommand) string { return "keymap.help.command." + command.ID }
+
 func (s *Surface) ActionState(id string) keymap.State {
 	known := false
 	context := s.KeymapContext().ID
@@ -308,10 +392,13 @@ func (s *Surface) ActionState(id string) keymap.State {
 	if !known {
 		return keymap.State{Reason: "Unavailable in this view"}
 	}
+	if _, ok := s.helpCommands[id]; ok {
+		return keymap.State{Enabled: true}
+	}
 	switch id {
 	case "keymap.actions", "keymap.focus-next", "keymap.editor", "keymap.checker", "keymap.help", "keymap.debug", "keymap.save", "keymap.discard", "keymap.reload", "keymap.reset-all",
 		"keymap.text.finish", "keymap.text.cancel", "keymap.text.backspace", "keymap.text.delete", "keymap.text.left", "keymap.text.right", "keymap.text.home", "keymap.text.end",
-		"keymap.help.back", "keymap.help.quit", "keymap.help.next", "keymap.help.previous", "keymap.help.page-next", "keymap.help.page-previous", "keymap.help.home", "keymap.help.end":
+		"keymap.help.back", "keymap.help.quit", "keymap.help.next", "keymap.help.previous", "keymap.help.page-next", "keymap.help.page-previous", "keymap.help.home", "keymap.help.end", "keymap.help.edit":
 		switch id {
 		case "keymap.checker":
 			if s.saving {
@@ -333,6 +420,10 @@ func (s *Surface) ActionState(id string) keymap.State {
 		case "keymap.discard", "keymap.reload", "keymap.reset-all":
 			if !s.draftOpen || s.saving {
 				return keymap.State{Reason: "No editable draft"}
+			}
+		case "keymap.help.edit":
+			if len(s.helpActions()) == 0 {
+				return keymap.State{Reason: "No configurable shortcut"}
 			}
 		}
 		return keymap.State{Enabled: true}
@@ -427,10 +518,15 @@ func (s *Surface) action(events shell.EventContext, id string) []shell.Effect {
 	case "keymap.help":
 		s.helpOrigin = s.view
 		s.helpContext = s.contentContext()
+		var effects []shell.Effect
+		if s.options.HelpOpenedAction != "" {
+			effects = s.options.Main.Update(events, shell.ActionEvent{ID: s.options.HelpOpenedAction})
+		}
 		s.helpOffset = 0
+		s.helpSelected = 0
 		s.view = helpScreen
 		s.actionsFocused = false
-		return nil
+		return effects
 	case "keymap.debug":
 		s.showingDebug = !s.showingDebug
 		s.view = baseScreen
@@ -447,6 +543,16 @@ func (s *Surface) action(events shell.EventContext, id string) []shell.Effect {
 		s.draft = keymap.Document{Version: 1}
 		s.status = "Defaults restored in draft; save to apply."
 		return s.refreshEditor(events)
+	case "keymap.help.edit":
+		return s.openHelpSelection(events)
+	}
+	if command, ok := s.helpCommands[id]; ok {
+		s.view = baseScreen
+		s.showingDebug = false
+		s.actionsFocused = false
+		s.status = ""
+		effects := s.options.Main.Update(events, shell.ActionEvent{ID: command.Action})
+		return append(effects, s.resizeActive(events)...)
 	}
 	if s.view == helpScreen {
 		return s.helpAction(events, id)
@@ -613,6 +719,31 @@ func (s *Surface) SuppressEffectDiagnostics(effect shell.Effect) bool {
 }
 
 func (s *Surface) helpAction(events shell.EventContext, id string) []shell.Effect {
+	if s.options.InteractiveHelp {
+		actions := s.helpActions()
+		last := max(0, len(actions)-1)
+		page := max(1, s.lastResize.Layout.Render.Rows-4)
+		switch id {
+		case "keymap.help.quit":
+			return []shell.Effect{shell.Quit()}
+		case "keymap.help.back":
+			s.view = s.helpOrigin
+			return s.resizeActive(events)
+		case "keymap.help.next":
+			s.helpSelected = min(last, s.helpSelected+1)
+		case "keymap.help.previous":
+			s.helpSelected = max(0, s.helpSelected-1)
+		case "keymap.help.page-next":
+			s.helpSelected = min(last, s.helpSelected+page)
+		case "keymap.help.page-previous":
+			s.helpSelected = max(0, s.helpSelected-page)
+		case "keymap.help.home":
+			s.helpSelected = 0
+		case "keymap.help.end":
+			s.helpSelected = last
+		}
+		return nil
+	}
 	switch id {
 	case "keymap.help.quit":
 		return []shell.Effect{shell.Quit()}

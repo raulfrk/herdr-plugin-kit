@@ -84,6 +84,37 @@ program, err := shell.NewProgram(shell.ProgramOptions{
 }, surface)
 ```
 
+Generated Help remains scroll-only with its original Enter-to-close and `j/k`
+defaults unless a consumer opts into `InteractiveHelp`. Interactive Help makes
+the current context's actions selectable and opens the existing shortcut entry
+editor for the selected action on Enter. A consumer may also declare bounded,
+single-stroke Help commands; the wrapper closes Help and dispatches only the
+declared main-surface action:
+
+```go
+surface, err := keymapui.New(keymapui.Options{
+    Main: mainSurface, ConfigDirectory: configDirectory,
+    InteractiveHelp: true,
+    HelpOpenedAction: "plugin.help.opened",
+    HelpCommands: []keymapui.HelpCommand{
+        {ID: "check", Label: "check", Action: "plugin.bindings.check",
+            Defaults: []keymap.Sequence{{"k"}}},
+        {ID: "reset", Label: "reset", Action: "plugin.bindings.reset",
+            Defaults: []keymap.Sequence{{"r"}}},
+    },
+})
+```
+
+Declared commands always return to `Main` before dispatch, including when Help
+was opened from the shortcut editor or Debug UI, so consumer dialogs cannot be
+hidden behind a wrapper screen. Command keys take precedence over legacy Help
+navigation defaults; for example, a declared `k` leaves Up as the previous-row
+key. Runtime conflict
+validation still applies. `HelpOpenedAction` optionally notifies the main
+surface before Help takes focus, allowing a consumer to consume an armed
+one-shot navigation state without making Help product-specific. The consumer
+remains responsible for action availability and product policy.
+
 `Main` and `Debug` implement both `shell.Surface` and `shell.ActionSurface`;
 the standard Picker, Form, and Debug UI already do. A custom surface declares
 stable actions and reports the current context and availability:

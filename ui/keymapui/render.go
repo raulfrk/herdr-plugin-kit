@@ -51,13 +51,27 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 			lines = []string{s.selected.Label, s.text.Text(), "Separate strokes with spaces: g r", "Names: enter, escape, ctrl+k, alt+d"}
 		case helpScreen:
 			title = "EFFECTIVE SHORTCUTS"
-			all := view.Wrap(strings.Join(s.helpLines(), "\n"), max(0, w-2))
-			offset := min(s.helpOffset, max(0, len(all)-max(1, h-3)))
-			lines = all[offset:]
+			if s.options.InteractiveHelp {
+				all := s.helpLines()
+				visible := max(1, h-3)
+				selectedLine := 0
+				for index, line := range all {
+					if strings.HasPrefix(line, "> ") {
+						selectedLine = index
+						break
+					}
+				}
+				offset := max(0, selectedLine-visible+1)
+				lines = all[offset:min(len(all), offset+visible)]
+			} else {
+				all := view.Wrap(strings.Join(s.helpLines(), "\n"), max(0, w-2))
+				offset := min(s.helpOffset, max(0, len(all)-max(1, h-3)))
+				lines = all[offset:]
+			}
 		}
 		frame.Fill(0, 0, w, 1, header)
 		put(frame, "keymap-title", 0, 0, w, 1, []string{title}, header, false)
-		put(frame, "keymap-content", 1, 2, max(0, w-2), max(0, h-3), lines, base, true)
+		put(frame, "keymap-content", 1, 2, max(0, w-2), max(0, h-3), lines, base, !(s.view == helpScreen && s.options.InteractiveHelp))
 	}
 	message := s.status
 	if s.warning != "" {
@@ -99,6 +113,14 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 	if s.view == captureScreen {
 		footer = "Enter finish · Esc cancel · Ctrl-C quit"
 		compactFooter = footer
+	}
+	if s.view == helpScreen && s.options.InteractiveHelp {
+		parts := []string{"Enter edit"}
+		for _, command := range s.options.HelpCommands {
+			parts = append(parts, sequenceLabel(s.runtime.Effective("keymap.help", helpCommandID(command)))+" "+command.Label)
+		}
+		footer = strings.Join(parts, " · ")
+		compactFooter = "Enter edit · Help commands active"
 	}
 	footer = fittingFooter(w, footer, compactFooter)
 	frame.Fill(0, h-1, w, 1, muted)
@@ -149,10 +171,16 @@ func (s *Surface) helpLines() []string {
 			lines = append([]string{"Draft conflict: " + err.Error(), ""}, lines...)
 		}
 	}
-	for _, action := range s.runtime.Catalog() {
-		if action.Context == s.helpContext.ID {
-			lines = append(lines, action.Label+": "+sequenceLabel(s.runtime.Effective(action.Context, action.ID)))
+	actions := s.helpActions()
+	for index, action := range actions {
+		prefix := ""
+		if s.options.InteractiveHelp {
+			prefix = "  "
+			if index == min(max(0, s.helpSelected), max(0, len(actions)-1)) {
+				prefix = "> "
+			}
 		}
+		lines = append(lines, prefix+action.Label+": "+sequenceLabel(s.runtime.Effective(action.Context, action.ID)))
 	}
 	return lines
 }

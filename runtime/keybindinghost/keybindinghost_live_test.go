@@ -77,6 +77,18 @@ func runLiveKeybindingCase(t *testing.T, session string) {
 	observeLogCount(t, ctx, live.env, session, id, 0, 100*time.Millisecond)
 	host := Host{Runner: command.ExecRunner{}, ConfigPath: config, Session: session}
 	applyBindings(t, host, id, []Binding{{Key: "prefix+u", Action: id + ".mark", Description: "Live proof"}})
+	activationSnapshot, err := host.Read(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeActivation := readFile(t, config)
+	activation, err := host.Activate(ctx, Request{Owner: id, Expected: activationSnapshot.Revision, Bindings: activationSnapshot.Bindings})
+	if err != nil || !activation.Activated || activation.Changed {
+		t.Fatalf("activate unchanged config: result=%+v error=%v", activation, err)
+	}
+	if got := readFile(t, config); !bytes.Equal(got, beforeActivation) {
+		t.Fatal("activation rewrote live config")
+	}
 	live.send(t, "\x02u")
 	waitLogCount(t, ctx, live.env, session, id, 1)
 	if _, err := os.Stat(canary); err != nil {

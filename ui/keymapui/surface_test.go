@@ -770,6 +770,118 @@ func TestHelpListsOnlyOriginContextAndCheckerReportsPlainKey(t *testing.T) {
 	}
 }
 
+func TestInteractiveHelpEditsSelectedActionAndRoutesDeclaredCommands(t *testing.T) {
+	p := &probe{name: "example"}
+	commands := []HelpCommand{
+		{ID: "check", Label: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"k"}}},
+		{ID: "reset", Label: "reset", Action: "probe.edit", Defaults: []keymap.Sequence{{"r"}}},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOpenedAction: "probe.refresh", HelpCommands: commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.runtime.Effective("keymap.help", "keymap.help.previous"); !reflect.DeepEqual(got, []keymap.Sequence{{"up"}}) {
+		t.Fatalf("interactive previous bindings=%v", got)
+	}
+	if got := s.runtime.Effective("keymap.help", "keymap.help.back"); slices.ContainsFunc(got, func(sequence keymap.Sequence) bool { return reflect.DeepEqual(sequence, keymap.Sequence{"enter"}) }) {
+		t.Fatalf("interactive back still owns Enter: %v", got)
+	}
+	if got := s.runtime.Effective("keymap.help", "keymap.help.edit"); !reflect.DeepEqual(got, []keymap.Sequence{{"enter"}}) {
+		t.Fatalf("interactive edit bindings=%v", got)
+	}
+	if got := s.runtime.Effective("keymap.help", "keymap.help.command.check"); !reflect.DeepEqual(got, []keymap.Sequence{{"k"}}) {
+		t.Fatalf("check bindings=%v", got)
+	}
+	s.view, s.helpOrigin, s.helpContext = helpScreen, baseScreen, keymap.Context{ID: "example.results"}
+	s.helpAction(shell.EventContext{}, "keymap.help.next")
+	if s.helpSelected != 1 {
+		t.Fatalf("next selected=%d", s.helpSelected)
+	}
+	s.helpAction(shell.EventContext{}, "keymap.help.end")
+	if s.helpSelected != len(s.helpActions())-1 {
+		t.Fatalf("end selected=%d actions=%d", s.helpSelected, len(s.helpActions()))
+	}
+	s.helpAction(shell.EventContext{}, "keymap.help.home")
+	palette, _ := theme.Builtin("terminal")
+	for _, size := range []responsive.Size{{Columns: 110, Rows: 24}, {Columns: 80, Rows: 18}, {Columns: 48, Rows: 18}, {Columns: 40, Rows: 10}} {
+		frame, renderErr := s.Render(shell.RenderContext{Layout: responsive.Resolve(size), Theme: palette})
+		text := view.ANSI(frame)
+		if renderErr != nil || !strings.Contains(text, "> Edit query") || !strings.Contains(text, "Enter edit · k check · r reset") {
+			t.Fatalf("size=%+v frame=%q error=%v", size, text, renderErr)
+		}
+	}
+	s.view = baseScreen
+
+	// A declared command always returns to Main before dispatch, including when
+	// Help was opened from an editor or Debug surface.
+	for index, origin := range []screen{baseScreen, editorScreen, entryScreen} {
+		s.view, s.helpOrigin, s.helpContext = helpScreen, origin, keymap.Context{ID: "example.results"}
+		s.showingDebug = index == 2
+		s.status = "editor status"
+		s.action(shell.EventContext{}, "keymap.help.command.check")
+		if s.view != baseScreen || s.showingDebug || s.status != "" || p.invocations != index+1 {
+			t.Fatalf("origin=%v view=%v debug=%t status=%q invocations=%d", origin, s.view, s.showingDebug, s.status, p.invocations)
+		}
+	}
+	p.invocations = 0
+
+	d := runUIForTest(t, s, p)
+	d.key(tea.KeyCtrlK)
+	d.wait(t, func(o observation) bool { return o.view == actionsScreen && !o.pending })
+	d.choose(t, "keymap.help", "Help and effective shortcuts")
+	d.wait(t, func(o observation) bool { return o.view == helpScreen })
+	if p.invocations != 1 {
+		t.Fatalf("Help-opened action invocations=%d", p.invocations)
+	}
+	d.key(tea.KeyEnter)
+	d.wait(t, func(o observation) bool { return o.view == entryScreen && !o.pending })
+	if s.selected.ID != "probe.edit" {
+		t.Fatalf("Enter opened %q, want selected Help action", s.selected.ID)
+	}
+}
+
+func TestInteractiveHelpOptionsRejectInvalidCommandsAndLegacyDefaultsStayUnchanged(t *testing.T) {
+	p := &probe{name: "example"}
+	for name, commands := range map[string][]HelpCommand{
+		"unknown target": {{ID: "check", Label: "check", Action: "missing", Defaults: []keymap.Sequence{{"k"}}}},
+		"multi stroke":   {{ID: "check", Label: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"g", "k"}}}},
+		"duplicate ID": {
+			{ID: "check", Label: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"k"}}},
+			{ID: "check", Label: "again", Action: "probe.edit", Defaults: []keymap.Sequence{{"r"}}},
+		},
+		"colliding keys": {
+			{ID: "check", Label: "check", Action: "probe.refresh", Defaults: []keymap.Sequence{{"k"}}},
+			{ID: "reset", Label: "reset", Action: "probe.edit", Defaults: []keymap.Sequence{{"k"}}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if surface, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpCommands: commands}); err == nil {
+				_ = surface.Close()
+				t.Fatal("invalid Help commands were accepted")
+			}
+		})
+	}
+	legacy, err := New(Options{Main: p, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if got := legacy.runtime.Effective("keymap.help", "keymap.help.back"); !slices.ContainsFunc(got, func(sequence keymap.Sequence) bool { return reflect.DeepEqual(sequence, keymap.Sequence{"enter"}) }) {
+		t.Fatalf("legacy Enter-to-close changed: %v", got)
+	}
+	if got := legacy.runtime.Effective("keymap.help", "keymap.help.previous"); !slices.ContainsFunc(got, func(sequence keymap.Sequence) bool { return reflect.DeepEqual(sequence, keymap.Sequence{"k"}) }) {
+		t.Fatalf("legacy k-to-scroll changed: %v", got)
+	}
+	if surface, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOpenedAction: "missing"}); err == nil {
+		_ = surface.Close()
+		t.Fatal("unknown Help-opened action was accepted")
+	}
+	if surface, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), HelpOpenedAction: "probe.refresh"}); err == nil {
+		_ = surface.Close()
+		t.Fatal("Help extension without interactive Help was accepted")
+	}
+}
+
 func TestTabUsesDeclaredActionsAndHelpRetainsDefaultKeys(t *testing.T) {
 	p := &probe{name: "example", ownTab: true}
 	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir()})
