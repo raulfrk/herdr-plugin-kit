@@ -70,6 +70,14 @@ def _read_text_exact(path: Path) -> str:
         return stream.read()
 
 
+def _terminal_emulation_ansi(value: str) -> str:
+    # Herdr 0.8.2 emits bare LF between complete captured rows. A terminal
+    # emulator otherwise preserves the prior column, unlike the pane read's
+    # row-oriented text representation. Keep the captured bytes unchanged for
+    # hashing and normalize line movement only while reconstructing the screen.
+    return value.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
 def _validate_herdr_id(name: str, value: str) -> None:
     if (
         not value
@@ -97,7 +105,7 @@ def render_pane_capture(
         _validate_herdr_id(name, value)
 
     screen = pyte.Screen(capture.columns, capture.rows)
-    pyte.Stream(screen).feed(capture.ansi)
+    pyte.Stream(screen).feed(_terminal_emulation_ansi(capture.ansi))
     rendered_text = _visible_text(screen)
     if rendered_text != capture.text.rstrip("\n"):
         raise ValueError("ANSI and plain-text pane captures differ")

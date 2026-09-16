@@ -65,6 +65,19 @@ def test_render_pane_capture_is_deterministic_and_visually_inspectable(tmp_path:
         assert image.getpixel((0, 2 * metadata["cell_height"])) == (0, 0, 0)
 
 
+def test_render_pane_capture_accepts_herdr_bare_linefeeds_without_changing_raw_hash(tmp_path: Path) -> None:
+    bare_ansi = ANSI_FIXTURE.replace("\r\n", "\n")
+    capture = replace(fixture_capture(), ansi=bare_ansi)
+    bare = tmp_path / "bare.png"
+    crlf = tmp_path / "crlf.png"
+
+    metadata = render_pane_capture(capture, bare)
+    render_pane_capture(fixture_capture(), crlf)
+
+    assert bare.read_bytes() == crlf.read_bytes()
+    assert metadata["ansi_sha256"] == hashlib.sha256(bare_ansi.encode()).hexdigest()
+
+
 def test_capture_command_writes_png_and_metadata(tmp_path: Path) -> None:
     ansi = tmp_path / "pane.ansi"
     text = tmp_path / "pane.txt"
