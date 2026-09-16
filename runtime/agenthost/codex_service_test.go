@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -429,6 +430,7 @@ func TestCgroupContainsExactUnitComponent(t *testing.T) {
 		{name: "systemd hierarchy", cgroup: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit, contains: true},
 		{name: "legacy hierarchy", cgroup: "7:name=systemd:/user.slice/" + unit, contains: true},
 		{name: "plain path", cgroup: "/user.slice/" + unit, contains: true},
+		{name: "bare post-separator path", cgroup: "0::" + unit, contains: true},
 		{name: "partial component", cgroup: "0::/user.slice/" + unit + ".d", contains: false},
 		{name: "different component", cgroup: "0::/user.slice/other.service", contains: false},
 	} {
@@ -733,6 +735,386 @@ func TestCodexServiceHandshakeRequiresPinnedMetadata(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+func TestCodexServiceUsableRequiresEveryDependency(t *testing.T) {
+	var nilService *CodexService
+	if nilService.usable() {
+		t.Fatal("nil service is usable")
+	}
+	base := &CodexService{
+		runner:       &codexServiceRunner{},
+		resolveHome:  func() (string, error) { return "/fixture/home", nil },
+		resolvePaths: func() (codexServicePaths, error) { return codexServicePaths{}, nil },
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CodexService)
+		want   bool
+	}{
+		{name: "complete", want: true},
+		{name: "runner", mutate: func(service *CodexService) { service.runner = nil }},
+		{name: "home resolver", mutate: func(service *CodexService) { service.resolveHome = nil }},
+		{name: "path resolver", mutate: func(service *CodexService) { service.resolvePaths = nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := *base
+			if test.mutate != nil {
+				test.mutate(&service)
+			}
+			if got := service.usable(); got != test.want {
+				t.Fatalf("usable=%t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodexServiceWithTimeoutUsesDefaultForNonpositiveValues(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+		timeout    time.Duration
+		expected   time.Duration
+	}{
+		{name: "zero", timeout: 0, expected: codexServiceTimeout},
+		{name: "negative", timeout: -time.Second, expected: codexServiceTimeout},
+		{name: "configured", timeout: 75 * time.Millisecond, expected: 75 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewCodexService(&codexServiceRunner{})
+			service.timeout = test.timeout
+			started := time.Now()
+			ctx, cancel := service.withTimeout(context.Background())
+			defer cancel()
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("bounded context has no deadline")
+			}
+			got := deadline.Sub(started)
+			if got < test.expected-100*time.Millisecond || got > test.expected+100*time.Millisecond {
+				t.Fatalf("deadline duration=%s, want approximately %s", got, test.expected)
+			}
+		})
+	}
+}
+
+func fixtureCodexSystemdShow(t *testing.T, fixture codexServiceFixture, state, substate string, pid int, invocation string) codexSystemdShow {
+	t.Helper()
+	show, err := parseCodexSystemdShow(serviceShowForDescriptor(fixture.paths, fixture.descriptor, state, substate, pid, invocation).Stdout, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return show
+}
+
+func TestCodexServiceIdentityChecksRejectOneMismatchedFieldAtATime(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	loaded := fixtureCodexSystemdShow(t, fixture, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if !loadedCodexServiceUnitMatches(fixture.paths, fixture.descriptor, loaded) {
+		t.Fatal("valid loaded unit was rejected")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*codexSystemdShow)
+	}{
+		{name: "load state", mutate: func(show *codexSystemdShow) { show.LoadState = "not-found" }},
+		{name: "fragment", mutate: func(show *codexSystemdShow) { show.FragmentPath = "/foreign.service" }},
+		{name: "ExecStart", mutate: func(show *codexSystemdShow) { show.ExecStart = "{ path=/foreign ; argv[]=/foreign ; }" }},
+		{name: "environment", mutate: func(show *codexSystemdShow) { show.Environment = "CODEX_HOME=/foreign" }},
+	} {
+		t.Run("loaded unit "+test.name, func(t *testing.T) {
+			show := loaded
+			test.mutate(&show)
+			if loadedCodexServiceUnitMatches(fixture.paths, fixture.descriptor, show) {
+				t.Fatalf("accepted mismatched %s", test.name)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*codexSystemdShow)
+	}{
+		{name: "active state", mutate: func(show *codexSystemdShow) { show.ActiveState = "inactive" }},
+		{name: "substate", mutate: func(show *codexSystemdShow) { show.SubState = "dead" }},
+		{name: "zero PID", mutate: func(show *codexSystemdShow) { show.MainPID = 0 }},
+		{name: "invocation", mutate: func(show *codexSystemdShow) { show.InvocationID = "not-a-valid-invocation" }},
+	} {
+		t.Run("running process "+test.name, func(t *testing.T) {
+			caseFixture := newCodexServiceFixture(t)
+			show := fixtureCodexSystemdShow(t, caseFixture, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			test.mutate(&show)
+			readCalls, handshakeCalls := 0, 0
+			caseFixture.service.readProcess = func(int) (codexServiceProcess, error) {
+				readCalls++
+				return codexServiceProcess{}, errors.New("process reader must not run")
+			}
+			caseFixture.service.handshake = func(context.Context, string) (codexServiceHandshake, error) {
+				handshakeCalls++
+				return codexServiceHandshake{}, errors.New("handshake must not run")
+			}
+			snapshot, err := caseFixture.service.inspectRunningConfiguration(context.Background(), caseFixture.paths, caseFixture.descriptor, CodexServiceSnapshot{State: CodexServiceDegraded}, show)
+			if !errors.Is(err, ErrCodexServiceUnavailable) || snapshot.State != CodexServiceDegraded {
+				t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+			}
+			if readCalls != 0 || handshakeCalls != 0 {
+				t.Fatalf("invalid %s reached process=%d handshake=%d", test.name, readCalls, handshakeCalls)
+			}
+		})
+	}
+}
+
+func TestCodexServiceEnsureDoesNotStartUnsafeStates(t *testing.T) {
+	t.Run("drifted but startable inventory", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		starts := 0
+		fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+			switch {
+			case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+				result := serviceShowForDescriptor(fixture.paths, fixture.descriptor, "inactive", "dead", 0, "")
+				result.Stdout = []byte(strings.Replace(string(result.Stdout), "path="+fixture.descriptor.Executable, "path=/foreign/codex", 1))
+				return result, nil
+			case executable == fixture.descriptor.Executable && reflect.DeepEqual(args, []string{"--version"}):
+				return command.Result{Stdout: []byte("codex-cli " + SupportedCodexVersion)}, nil
+			case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "start", fixture.paths.unitName()}):
+				starts++
+				return command.Result{}, nil
+			default:
+				return command.Result{}, errors.New("unexpected command")
+			}
+		}
+		_, err := fixture.service.Ensure(context.Background())
+		if !errors.Is(err, ErrCodexServiceDrift) || starts != 0 {
+			t.Fatalf("drifted Ensure err=%v starts=%d", err, starts)
+		}
+	})
+
+	t.Run("unavailable active process", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		fixture.service.timeout = 10 * time.Millisecond
+		fixture.service.pollInterval = time.Millisecond
+		fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+			if path == fixture.paths.RuntimeDir {
+				return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		starts := 0
+		fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+			switch {
+			case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+				return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+			case executable == fixture.descriptor.Executable && reflect.DeepEqual(args, []string{"--version"}):
+				return command.Result{Stdout: []byte("codex-cli " + SupportedCodexVersion)}, nil
+			case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "start", fixture.paths.unitName()}):
+				starts++
+				return command.Result{}, nil
+			default:
+				return command.Result{}, errors.New("unexpected command")
+			}
+		}
+		_, err := fixture.service.Ensure(context.Background())
+		if !errors.Is(err, ErrCodexServiceUnavailable) || starts != 0 {
+			t.Fatalf("unavailable active Ensure err=%v starts=%d", err, starts)
+		}
+	})
+}
+
+func TestCodexServiceAwaitReadyUsesFallbackForNonpositiveInterval(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	fixture.service.pollInterval = -time.Millisecond
+	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+		if path == fixture.paths.RuntimeDir {
+			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	shows := 0
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		if executable != "systemctl" || !reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())) {
+			return command.Result{}, errors.New("unexpected command")
+		}
+		shows++
+		return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := fixture.service.awaitReady(ctx, fixture.paths, fixture.descriptor, CodexServiceSnapshot{State: CodexServiceDegraded})
+	if !errors.Is(err, ErrCodexServiceUnavailable) || !errors.Is(err, context.DeadlineExceeded) || shows != 1 {
+		t.Fatalf("await error=%v show calls=%d", err, shows)
+	}
+}
+
+func TestCodexServiceShowUnitFailsClosedForTruncationAndRunnerErrors(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	valid := serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	runFailure := errors.New("systemctl failed")
+	for _, test := range []struct {
+		name       string
+		result     command.Result
+		runErr     error
+		wantError  error
+		wantAbsent bool
+	}{
+		{name: "stdout truncated", result: command.Result{Stdout: valid.Stdout, StdoutTruncated: true}, wantError: ErrCodexServiceReceipt},
+		{name: "stderr truncated", result: command.Result{Stdout: valid.Stdout, StderrTruncated: true}, wantError: ErrCodexServiceReceipt},
+		{name: "loaded runner error", result: valid, runErr: runFailure, wantError: ErrCodexServiceUnavailable},
+		{name: "not found runner error", result: notFoundShow(), runErr: runFailure, wantAbsent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture.runner.run = func(context.Context, string, []string) (command.Result, error) { return test.result, test.runErr }
+			show, err := fixture.service.showUnit(context.Background(), fixture.paths.unitName())
+			if test.wantAbsent {
+				if err != nil || show.LoadState != "not-found" {
+					t.Fatalf("show=%+v err=%v", show, err)
+				}
+				return
+			}
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("show=%+v err=%v, want %v", show, err, test.wantError)
+			}
+			if test.runErr != nil && !errors.Is(err, test.runErr) {
+				t.Fatalf("runner failure was not retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestCodexServiceValidateSocketRejectsEachOwnershipDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target string
+		info   codexServiceFileInfo
+		err    error
+		want   error
+	}{
+		{name: "missing runtime directory", target: "runtime", err: os.ErrNotExist, want: ErrCodexServiceUnavailable},
+		{name: "runtime stat error", target: "runtime", err: errors.New("runtime failure"), want: ErrCodexServiceDrift},
+		{name: "runtime symlink", target: "runtime", info: codexServiceFileInfo{mode: os.ModeDir | os.ModeSymlink | 0o700, uid: 1000, dir: true}, want: ErrCodexServiceDrift},
+		{name: "runtime not directory", target: "runtime", info: codexServiceFileInfo{mode: 0o700, uid: 1000}, want: ErrCodexServiceDrift},
+		{name: "runtime wrong mode", target: "runtime", info: codexServiceFileInfo{mode: os.ModeDir | 0o755, uid: 1000, dir: true}, want: ErrCodexServiceDrift},
+		{name: "runtime wrong owner", target: "runtime", info: codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 2000, dir: true}, want: ErrCodexServiceDrift},
+		{name: "missing socket", target: "socket", err: os.ErrNotExist, want: ErrCodexServiceUnavailable},
+		{name: "socket stat error", target: "socket", err: errors.New("socket failure"), want: ErrCodexServiceDrift},
+		{name: "socket symlink", target: "socket", info: codexServiceFileInfo{mode: os.ModeSocket | os.ModeSymlink | 0o600, uid: 1000}, want: ErrCodexServiceDrift},
+		{name: "not socket", target: "socket", info: codexServiceFileInfo{mode: 0o600, uid: 1000}, want: ErrCodexServiceDrift},
+		{name: "socket wrong mode", target: "socket", info: codexServiceFileInfo{mode: os.ModeSocket | 0o640, uid: 1000}, want: ErrCodexServiceDrift},
+		{name: "socket wrong owner", target: "socket", info: codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: 2000}, want: ErrCodexServiceDrift},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCodexServiceFixture(t)
+			fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+				if (test.target == "runtime" && path == fixture.paths.RuntimeDir) || (test.target == "socket" && path == fixture.paths.SocketPath) {
+					if test.err != nil {
+						return nil, test.err
+					}
+					return test.info, nil
+				}
+				if path == fixture.paths.RuntimeDir {
+					return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
+				}
+				return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: 1000}, nil
+			}
+			if err := fixture.service.validateSocket(fixture.paths, fixture.descriptor); !errors.Is(err, test.want) {
+				t.Fatalf("validate socket error=%v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseCodexSystemdShowRejectsBoundaryAndMissingFieldDrift(t *testing.T) {
+	valid := notFoundShow().Stdout
+	for _, test := range []struct {
+		name      string
+		raw       []byte
+		truncated bool
+	}{
+		{name: "empty", raw: nil},
+		{name: "truncated", raw: valid, truncated: true},
+		{name: "oversized", raw: append(append([]byte(nil), valid...), make([]byte, maxCodexServiceReceiptBytes)...)},
+		{name: "loaded without ExecStart", raw: []byte(strings.Replace(string(valid), "LoadState=not-found", "LoadState=loaded", 1))},
+		{name: "negative PID", raw: []byte(strings.Replace(string(valid), "MainPID=0", "MainPID=-1", 1))},
+		{name: "malformed PID", raw: []byte(strings.Replace(string(valid), "MainPID=0", "MainPID=not-a-pid", 1))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseCodexSystemdShow(test.raw, test.truncated); !errors.Is(err, ErrCodexServiceReceipt) {
+				t.Fatalf("parse error=%v", err)
+			}
+		})
+	}
+
+	exactLimit := append([]byte(nil), valid...)
+	remaining := maxCodexServiceReceiptBytes - len(exactLimit) - len("Ignored=\n")
+	if remaining <= 0 {
+		t.Fatal("not-found systemctl fixture unexpectedly exceeds receipt limit")
+	}
+	exactLimit = append(exactLimit, []byte("Ignored="+strings.Repeat("x", remaining)+"\n")...)
+	if len(exactLimit) != maxCodexServiceReceiptBytes {
+		t.Fatalf("exact receipt length=%d", len(exactLimit))
+	}
+	show, err := parseCodexSystemdShow(exactLimit, false)
+	if err != nil || show.LoadState != "not-found" || show.MainPID != 0 {
+		t.Fatalf("exact limit show=%+v err=%v", show, err)
+	}
+}
+
+func TestCodexServiceStartableAndInvocationIDRequireExactValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		show  codexSystemdShow
+		valid bool
+	}{
+		{name: "inactive loaded", show: codexSystemdShow{LoadState: "loaded", ActiveState: "inactive"}, valid: true},
+		{name: "failed loaded", show: codexSystemdShow{LoadState: "loaded", ActiveState: "failed"}, valid: true},
+		{name: "active loaded", show: codexSystemdShow{LoadState: "loaded", ActiveState: "active"}},
+		{name: "inactive not loaded", show: codexSystemdShow{LoadState: "not-found", ActiveState: "inactive"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.show.startable(); got != test.valid {
+				t.Fatalf("startable=%t, want %t", got, test.valid)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{name: "lowercase hex", value: "0123456789abcdef0123456789abcdef", valid: true},
+		{name: "short", value: "0123456789abcdef"},
+		{name: "uppercase", value: "0123456789ABCDEF0123456789ABCDEF"},
+		{name: "nonhex", value: "0123456789abcdef0123456789abcdeg"},
+	} {
+		t.Run("invocation "+test.name, func(t *testing.T) {
+			if got := validInvocationID(test.value); got != test.valid {
+				t.Fatalf("validInvocationID(%q)=%t, want %t", test.value, got, test.valid)
+			}
+		})
+	}
+}
+
+func TestCodexServiceHandshakeRejectsEachMissingMetadataField(t *testing.T) {
+	const request = `{"id":1,"method":"initialize","params":{"clientInfo":{"name":"herdr-plugin-kit","version":"0.3.0"},"capabilities":{"experimentalApi":true}}}`
+	for _, missing := range []string{"userAgent", "codexHome", "platformFamily", "platformOs"} {
+		t.Run(missing, func(t *testing.T) {
+			userAgent, home, family, platform := "codex-cli/"+SupportedCodexVersion, "/fixture/home", "unix", "linux"
+			switch missing {
+			case "userAgent":
+				userAgent = ""
+			case "codexHome":
+				home = ""
+			case "platformFamily":
+				family = ""
+			case "platformOs":
+				platform = ""
+			}
+			socket := unixServer(t, func(ctx context.Context, connection *websocket.Conn) {
+				receive(t, ctx, connection, request)
+				send(t, ctx, connection, fmt.Sprintf(`{"id":1,"result":{"userAgent":%q,"codexHome":%q,"platformFamily":%q,"platformOs":%q}}`, userAgent, home, family, platform))
+			})
+			if _, err := readCodexServiceHandshake(context.Background(), socket); !errors.Is(err, errCodexProtocol) {
+				t.Fatalf("missing %s handshake error=%v", missing, err)
+			}
+		})
+	}
 }
 
 func codexSystemdShowArgs(unit string) []string {

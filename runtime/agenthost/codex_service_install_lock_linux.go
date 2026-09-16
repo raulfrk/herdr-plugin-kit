@@ -82,7 +82,8 @@ func acquireCodexServiceLifecycleLock(ctx context.Context, paths codexServicePat
 		if err == nil {
 			return &codexServiceLifecycleLock{file: file}, nil
 		}
-		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+		// Linux defines EWOULDBLOCK as EAGAIN; one comparison is enough here.
+		if err != unix.EAGAIN {
 			return closeOnError(err)
 		}
 		timer := time.NewTimer(interval)

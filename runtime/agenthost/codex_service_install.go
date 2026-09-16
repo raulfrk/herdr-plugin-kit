@@ -601,22 +601,19 @@ func retainedCodexServicePendingTransition(current, desired codexServiceDescript
 func systemdExecStartMatches(value string, descriptor codexServiceDescriptor) bool {
 	const pathPrefix = "{ path="
 	const argvPrefix = " ; argv[]="
-	pathStart := strings.Index(value, pathPrefix)
-	if pathStart < 0 {
+	_, rest, found := strings.Cut(value, pathPrefix)
+	if !found {
 		return false
 	}
-	pathStart += len(pathPrefix)
-	argvStart := strings.Index(value[pathStart:], argvPrefix)
-	if argvStart < 0 {
+	path, rest, found := strings.Cut(rest, argvPrefix)
+	if !found {
 		return false
 	}
-	argvStart += pathStart + len(argvPrefix)
-	argvEnd := strings.Index(value[argvStart:], " ; ")
-	if argvEnd < 0 {
+	argv, _, found := strings.Cut(rest, " ; ")
+	if !found {
 		return false
 	}
-	argvEnd += argvStart
-	return value[pathStart:argvStart-len(argvPrefix)] == descriptor.Executable && value[argvStart:argvEnd] == descriptor.Executable+" app-server --listen unix://"+descriptor.SocketPath
+	return path == descriptor.Executable && argv == descriptor.Executable+" app-server --listen unix://"+descriptor.SocketPath
 }
 
 func (s *CodexService) installHome(explicit string) (string, error) {
@@ -712,12 +709,9 @@ func (s *CodexService) verifyUninstalled(ctx context.Context, unit string) error
 	if show.LoadState != "not-found" || (show.UnitFileState != "" && show.UnitFileState != "disabled" && show.UnitFileState != "not-found") {
 		return fmt.Errorf("%w: unit remains loaded or enabled", ErrCodexServiceOwnership)
 	}
-	result, enabledErr := s.runner.Run(ctx, "systemctl", []string{"--user", "is-enabled", unit})
+	result, _ := s.runner.Run(ctx, "systemctl", []string{"--user", "is-enabled", unit})
 	state := strings.TrimSpace(string(result.Stdout))
 	if result.StdoutTruncated || result.StderrTruncated || (state != "" && state != "disabled" && state != "not-found") {
-		return fmt.Errorf("%w: unit remains enabled", ErrCodexServiceOwnership)
-	}
-	if enabledErr == nil && state == "enabled" {
 		return fmt.Errorf("%w: unit remains enabled", ErrCodexServiceOwnership)
 	}
 	return nil

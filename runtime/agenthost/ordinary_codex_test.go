@@ -10,6 +10,31 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
+func TestOrdinaryCodexBindingRejectsOperationAndPolicyIndependently(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		operation ManagedOperation
+		policy    ManagedCodexPolicy
+	}{
+		{"unsupported operation", ManagedOperation("invalid"), managedPolicy()},
+		{"invalid policy", ManagedNew, ManagedCodexPolicy{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &scriptedRunner{}
+			service := &fakeManagedService{}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner})
+			launcher.service = service
+			binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, tc.operation, Agent{}, "/tmp/project", tc.policy, 0)
+			if binding != nil || !errors.Is(err, ErrManagedUnsupported) {
+				t.Fatalf("binding=%+v error=%v", binding, err)
+			}
+			if len(runner.calls) != 0 || service.callCount() != 0 {
+				t.Fatal("invalid launch caused external calls")
+			}
+		})
+	}
+}
+
 func TestOrdinaryCodexBindingRejectsInvalidOrSourceIdentityBeforeReporting(t *testing.T) {
 	for _, id := range []string{"", "truncated", managedSourceID} {
 		launcher := NewManagedCodexLauncher(Host{})

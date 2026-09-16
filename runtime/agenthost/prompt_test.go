@@ -660,6 +660,63 @@ func validPromptTarget(t *testing.T) (PromptTarget, wireAgent) {
 	}, wire
 }
 
+type promptFailingVerifier struct {
+	*fakeManagedVerifier
+	identity codexThreadIdentity
+	readErr  error
+	closeErr error
+}
+
+func (v *promptFailingVerifier) ReadThread(context.Context, string) (codexThreadIdentity, error) {
+	return v.identity, v.readErr
+}
+
+func (v *promptFailingVerifier) Close() error {
+	v.closed++
+	return v.closeErr
+}
+
+func TestPromptRemoteReadinessRejectsEachUncertainIdentityBeforePaneRead(t *testing.T) {
+	for _, name := range []string{"service error", "service changed", "read error", "close error", "thread changed", "directory changed"} {
+		t.Run(name, func(t *testing.T) {
+			target, wire := validPromptTarget(t)
+			runner := &promptRunner{agent: wire}
+			service := &fakeManagedService{snapshot: target.CodexService}
+			verifier := &promptFailingVerifier{
+				fakeManagedVerifier: &fakeManagedVerifier{},
+				identity:            codexThreadIdentity{ID: target.Agent.Session.Value, CWD: target.Directory},
+			}
+			failure := errors.New("unavailable")
+			wantClosed := 1
+			switch name {
+			case "service error":
+				service.err, wantClosed = failure, 0
+			case "service changed":
+				service.snapshot.SocketPath += "-changed"
+				wantClosed = 0
+			case "read error":
+				verifier.readErr = failure
+			case "close error":
+				verifier.closeErr = failure
+			case "thread changed":
+				verifier.identity.ID = managedSecondID
+			case "directory changed":
+				verifier.identity.CWD = "/tmp/other-project"
+			}
+			host := newTestCodexPromptHost(Host{Runner: runner}, nil)
+			host.managed.service = service
+			host.managed.verifiers = fakeManagedVerifierFactory{verifier}
+			ready, err := host.nativeReady(context.Background(), target)
+			if ready != "" || !errors.Is(err, ErrPromptStale) {
+				t.Fatalf("ready=%q error=%v", ready, err)
+			}
+			if verifier.closed != wantClosed || service.callCount() != 1 || len(runner.calls) != 0 {
+				t.Fatalf("closed=%d service calls=%d pane calls=%q", verifier.closed, service.callCount(), runner.calls)
+			}
+		})
+	}
+}
+
 func newTestCodexPromptHost(host Host, caller promptCaller) PromptHost {
 	identity := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai"}
 	verifier := &fakeManagedVerifier{read: []codexThreadIdentity{identity, identity, identity}}
