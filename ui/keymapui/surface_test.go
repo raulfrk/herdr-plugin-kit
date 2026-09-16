@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -32,13 +33,18 @@ type probe struct {
 	revision, invocations, resizes, results, timers int
 	text                                            string
 	suppress                                        bool
+	ownTab                                          bool
 }
 
 func (p *probe) KeymapCatalog() []keymap.Action {
+	editDefaults := []keymap.Sequence{{"/"}}
+	if p.ownTab {
+		editDefaults = append(editDefaults, keymap.Sequence{"tab"})
+	}
 	return []keymap.Action{
 		{ID: "probe.refresh", Label: "Refresh example", Context: p.name + ".results", Quick: true, Defaults: []keymap.Sequence{{"g", "r"}, {"f5"}}},
-		{ID: "probe.edit", Label: "Edit query", Context: p.name + ".results", Quick: true, Defaults: []keymap.Sequence{{"/"}, {"tab"}}},
-		{ID: "probe.finish", Label: "Finish query", Context: p.name + ".editing", Editing: true, Defaults: []keymap.Sequence{{"enter"}, {"escape"}, {"tab"}}},
+		{ID: "probe.edit", Label: "Edit query", Context: p.name + ".results", Quick: true, Defaults: editDefaults},
+		{ID: "probe.finish", Label: "Finish query", Context: p.name + ".editing", Editing: true, Defaults: []keymap.Sequence{{"enter"}, {"escape"}}},
 	}
 }
 func (p *probe) KeymapContext() keymap.Context {
@@ -150,9 +156,46 @@ func TestGlobalFooterFitsSupportedMinimum(t *testing.T) {
 				}
 				if text := view.ANSI(frame); !strings.Contains(text, state.want) {
 					t.Fatalf("footer lost %q: %q", state.want, text)
+				} else if state.name == "base" && size.Columns == 40 && !strings.Contains(text, "Ctrl-C quit · ctrl+k Actions · tab nav") {
+					t.Fatalf("minimum footer is not explicit: %q", text)
 				}
 			})
 		}
+	}
+}
+
+func TestExplicitChildTabOwnershipPreservesFormBinding(t *testing.T) {
+	p := &probe{name: "example", ownTab: true}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := s
+	t.Cleanup(func() { _ = first.Close() })
+	action, consumed := s.runtime.Step(p.KeymapContext(), "tab", time.Now())
+	if !consumed || action != "probe.edit" {
+		t.Fatalf("action=%q consumed=%v", action, consumed)
+	}
+	if got := s.runtime.Effective("example.results", "keymap.focus-next"); len(got) != 0 {
+		t.Fatalf("wrapper Tab still competes in owned context: %v", got)
+	}
+	palette, _ := theme.Builtin("catppuccin")
+	frame, err := s.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 80, Rows: 18}), Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := view.ANSI(frame); strings.Contains(text, "unbound controls") || !strings.Contains(text, "Actions ctrl+k") {
+		t.Fatalf("owned Tab footer is misleading: %q", text)
+	}
+	p.ownTab = false
+	s, err = New(Options{Main: p, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := s
+	t.Cleanup(func() { _ = second.Close() })
+	if got := s.runtime.Effective("example.results", "keymap.focus-next"); !reflect.DeepEqual(got, []keymap.Sequence{{"tab"}}) {
+		t.Fatalf("ordinary wrapper Tab changed: %v", got)
 	}
 }
 
@@ -508,11 +551,11 @@ func TestRecordReplaceRemoveResetDiscardAndMobileActions(t *testing.T) {
 	s, p := uiForTest(t, t.TempDir(), false)
 	d := runUIForTest(t, s, p)
 	d.program.Send(tea.WindowSizeMsg{Width: 40, Height: 10})
-	d.key(tea.KeyTab)
+	d.typeText("/")
 	d.wait(t, func(o observation) bool { return o.editing })
-	d.key(tea.KeyTab)
-	d.wait(t, func(o observation) bool { return strings.Contains(o.frame, "[Actions]") })
 	d.key(tea.KeyEnter)
+	d.wait(t, func(o observation) bool { return !o.editing })
+	d.key(tea.KeyCtrlK)
 	d.wait(t, func(o observation) bool { return o.view == actionsScreen && !o.pending })
 	d.choose(t, "keymap.editor", "Keyboard shortcuts")
 	d.wait(t, func(o observation) bool { return o.view == editorScreen && !o.pending })
@@ -728,16 +771,18 @@ func TestHelpListsOnlyOriginContextAndCheckerReportsPlainKey(t *testing.T) {
 }
 
 func TestTabUsesDeclaredActionsAndHelpRetainsDefaultKeys(t *testing.T) {
-	s, p := uiForTest(t, t.TempDir(), false)
+	p := &probe{name: "example", ownTab: true}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := runUIForTest(t, s, p)
 	d.key(tea.KeyTab)
 	d.wait(t, func(o observation) bool { return o.editing })
 	d.typeText("preserved")
 	d.wait(t, func(o observation) bool { return o.text == "preserved" })
-	d.key(tea.KeyTab)
-	d.wait(t, func(o observation) bool { return !o.editing && strings.Contains(o.frame, "[Actions]") })
-	d.key(tea.KeyTab)
-	d.wait(t, func(o observation) bool { return !o.editing && !strings.Contains(o.frame, "[Actions]") })
+	d.key(tea.KeyEnter)
+	d.wait(t, func(o observation) bool { return !o.editing })
 	openHelp := func() {
 		d.key(tea.KeyCtrlK)
 		d.wait(t, func(o observation) bool { return o.view == actionsScreen && !o.pending })

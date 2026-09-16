@@ -79,7 +79,11 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 		put(frame, "keymap-status", 0, row, w, 1, []string{message}, muted, false)
 	}
 	footer := "Ctrl-C quit · Actions " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next") + " controls"
-	compactFooter := "Ctrl-C quit · Actions " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next")
+	compactFooter := "Ctrl-C quit · " + s.bindingLabel("keymap.actions") + " Actions · " + s.bindingLabel("keymap.focus-next") + " nav"
+	if s.childOwnsTab(s.contentContext()) && !s.actionsFocused {
+		footer = "Ctrl-C quit · Actions " + s.bindingLabel("keymap.actions")
+		compactFooter = footer
+	}
 	if s.actionsFocused {
 		footer = "[Actions] " + s.bindingLabel("keymap.actions") + " open · " + s.bindingLabel("keymap.focus-next") + " return"
 		compactFooter = "[Actions] " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next") + " return"

@@ -18,6 +18,30 @@ type MappedSurface interface {
 	shell.Surface
 	shell.ActionSurface
 }
+
+func (s *Surface) childOwnsTab(context keymap.Context) bool {
+	for _, child := range []MappedSurface{s.options.Main, s.options.Debug} {
+		if child == nil {
+			continue
+		}
+		for _, action := range child.KeymapCatalog() {
+			if action.Context != context.ID || action.Editing != context.Editing {
+				continue
+			}
+			for _, sequence := range action.Defaults {
+				if len(sequence) != 1 {
+					continue
+				}
+				key, _ := keymap.Normalize(sequence[0])
+				if key == "tab" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 type Options struct {
 	Main            MappedSurface
 	Debug           MappedSurface
@@ -170,6 +194,18 @@ func (s *Surface) catalog() []keymap.Action {
 	for _, l := range []*list{s.menu, s.editor, s.entry} {
 		catalog = append(catalog, l.picker.KeymapCatalog()...)
 	}
+	tabOwned := make(map[keymap.Context]bool)
+	for _, child := range []MappedSurface{s.options.Main, s.options.Debug} {
+		if child == nil {
+			continue
+		}
+		for _, action := range child.KeymapCatalog() {
+			context := keymap.Context{ID: action.Context, Editing: action.Editing}
+			if s.childOwnsTab(context) {
+				tabOwned[context] = true
+			}
+		}
+	}
 	helpDefaults := map[string][]keymap.Sequence{}
 	filtered := catalog[:0]
 	for _, action := range catalog {
@@ -196,8 +232,9 @@ func (s *Surface) catalog() []keymap.Action {
 	}{{"back", "Close help", []string{"?", "escape", "backspace", "enter"}}, {"quit", "Quit", []string{"q"}}, {"next", "Scroll down", []string{"down", "j"}}, {"previous", "Scroll up", []string{"up", "k"}}, {"page-next", "Next page", []string{"page-down"}}, {"page-previous", "Previous page", []string{"page-up"}}, {"home", "First shortcut", []string{"home"}}, {"end", "Last shortcut", []string{"end"}}} {
 		add("keymap.help."+a.id, a.label, "keymap.help", false, false, a.keys...)
 	}
-	// Tab traverses the existing controls and the appended Actions control.
-	// Its behavior is one ordinary remappable action, never a hidden raw fallback.
+	// Tab traverses the existing controls and the appended Actions control unless
+	// an explicit child context owns Tab for its internal form navigation.
+	// Either behavior is an ordinary remappable action, never a hidden fallback.
 	contexts := map[string]bool{"keymap.actions-control": false}
 	var order []string
 	for i, a := range catalog {
@@ -209,7 +246,7 @@ func (s *Surface) catalog() []keymap.Action {
 		for _, sequence := range a.Defaults {
 			if len(sequence) == 1 {
 				key, _ := keymap.Normalize(sequence[0])
-				if key == "tab" {
+				if key == "tab" && !tabOwned[keymap.Context{ID: a.Context, Editing: a.Editing}] {
 					continue
 				}
 			}
@@ -228,7 +265,11 @@ func (s *Surface) catalog() []keymap.Action {
 			keys = append(keys, "enter")
 		}
 		add("keymap.actions", "Actions", context, editing, false, keys...)
-		add("keymap.focus-next", "Next control", context, editing, false, "tab")
+		var focusKeys []string
+		if !tabOwned[keymap.Context{ID: context, Editing: editing}] {
+			focusKeys = []string{"tab"}
+		}
+		add("keymap.focus-next", "Next control", context, editing, false, focusKeys...)
 		add("keymap.editor", "Keyboard shortcuts", context, editing, true)
 		add("keymap.checker", "Key checker", context, editing, true)
 		var helpKeys []string
