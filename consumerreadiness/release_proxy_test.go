@@ -278,7 +278,10 @@ func releaseCommand(t *testing.T, directory string, environment []string, name s
 
 func releaseCommandBytes(t *testing.T, directory string, environment []string, name string, arguments ...string) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Each isolated consumer starts with an empty build cache; race compilation
+	// can exceed a minute without indicating a product or performance failure.
+	const commandTimeout = 3 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, name, arguments...)
 	command.Dir = directory
@@ -288,7 +291,7 @@ func releaseCommandBytes(t *testing.T, directory string, environment []string, n
 	output, err := command.CombinedOutput()
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("%s %s exceeded 60 seconds\n%s", name, strings.Join(arguments, " "), output)
+			t.Fatalf("%s %s exceeded %s\n%s", name, strings.Join(arguments, " "), commandTimeout, output)
 		}
 		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(arguments, " "), err, output)
 	}

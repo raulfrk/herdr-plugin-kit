@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -392,10 +394,302 @@ func TestCodexUserAgentRequiresExactPinnedVersionToken(t *testing.T) {
 		{userAgent: "codex-cli/0.154.01", match: false},
 		{userAgent: "codex-cli/0.154.0+build", match: false},
 		{userAgent: "codex-cli/0.153.0", match: false},
+		{userAgent: "codex-cli/0.154.01 other/0.154.0\tlinux", match: true},
 	} {
 		if got := codexUserAgentHasExactVersion(test.userAgent, SupportedCodexVersion); got != test.match {
 			t.Fatalf("userAgent=%q match=%t, want %t", test.userAgent, got, test.match)
 		}
+	}
+}
+
+func TestNewCodexServiceUsesBoundedReadinessDefaults(t *testing.T) {
+	service := NewCodexService(&codexServiceRunner{})
+	if service.timeout != 10*time.Second || service.pollInterval != 50*time.Millisecond {
+		t.Fatalf("timeout=%s pollInterval=%s", service.timeout, service.pollInterval)
+	}
+}
+
+func TestCodexServiceShowUnitCombinesRunnerAndReceiptFailures(t *testing.T) {
+	runFailure := errors.New("systemctl failed")
+	runner := &codexServiceRunner{run: func(context.Context, string, []string) (command.Result, error) {
+		return command.Result{Stdout: []byte("not a systemctl property list\n")}, runFailure
+	}}
+	_, err := NewCodexService(runner).showUnit(context.Background(), "fixture.service")
+	if !errors.Is(err, ErrCodexServiceUnavailable) || !errors.Is(err, ErrCodexServiceReceipt) || !errors.Is(err, runFailure) {
+		t.Fatalf("show error=%v", err)
+	}
+}
+
+func TestCgroupContainsExactUnitComponent(t *testing.T) {
+	const unit = "herdr-plugin-kit-codex.service"
+	for _, test := range []struct {
+		name, cgroup string
+		contains     bool
+	}{
+		{name: "systemd hierarchy", cgroup: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit, contains: true},
+		{name: "legacy hierarchy", cgroup: "7:name=systemd:/user.slice/" + unit, contains: true},
+		{name: "plain path", cgroup: "/user.slice/" + unit, contains: true},
+		{name: "partial component", cgroup: "0::/user.slice/" + unit + ".d", contains: false},
+		{name: "different component", cgroup: "0::/user.slice/other.service", contains: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := cgroupContainsUnit(test.cgroup, unit); got != test.contains {
+				t.Fatalf("contains=%t, want %t for %q", got, test.contains, test.cgroup)
+			}
+		})
+	}
+}
+
+func TestReadCodexServiceProcessAtParsesBoundedFixture(t *testing.T) {
+	root := t.TempDir()
+	executable := writeCodexServiceProcessFixture(t, root, 42)
+	process, err := readCodexServiceProcessAt(root, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process.Executable != executable {
+		t.Fatalf("executable=%q, want %q", process.Executable, executable)
+	}
+	wantArgv := []string{executable, "app-server", "--listen", "unix:///tmp/fixture.sock"}
+	if !reflect.DeepEqual(process.Argv, wantArgv) {
+		t.Fatalf("argv=%q, want %q", process.Argv, wantArgv)
+	}
+	wantEnvironment := map[string]string{"CODEX_HOME": "/tmp/fixture-home", "FIXTURE": "yes"}
+	if !reflect.DeepEqual(process.Environment, wantEnvironment) {
+		t.Fatalf("environment did not contain expected fixture entries")
+	}
+	if process.Cgroup != "0::/user.slice/fixture.service\n" {
+		t.Fatalf("cgroup=%q", process.Cgroup)
+	}
+}
+
+func TestReadCodexServiceProcessAtRejectsInvalidObservations(t *testing.T) {
+	if _, err := readCodexServiceProcessAt(t.TempDir(), 0); err == nil {
+		t.Fatal("invalid PID unexpectedly succeeded")
+	}
+	for _, name := range []string{"exe", "cmdline", "environ", "cgroup"} {
+		t.Run("missing "+name, func(t *testing.T) {
+			root := t.TempDir()
+			writeCodexServiceProcessFixture(t, root, 42)
+			if err := os.Remove(filepath.Join(root, "42", name)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readCodexServiceProcessAt(root, 42); err == nil {
+				t.Fatalf("missing %s unexpectedly succeeded", name)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, file string
+		data       []byte
+	}{
+		{name: "empty argv", file: "cmdline", data: []byte{0, 0}},
+		{name: "duplicate environment", file: "environ", data: []byte("CODEX_HOME=/tmp/fixture-home\x00CODEX_HOME=/tmp/other\x00")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeCodexServiceProcessFixture(t, root, 42)
+			if err := os.WriteFile(filepath.Join(root, "42", test.file), test.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readCodexServiceProcessAt(root, 42); err == nil {
+				t.Fatal("invalid process observation unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func writeCodexServiceProcessFixture(t *testing.T, root string, pid int) string {
+	t.Helper()
+	processDirectory := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.MkdirAll(processDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(root, "codex")
+	if err := os.WriteFile(executable, []byte("fixture executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(processDirectory, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{
+		"cmdline": []byte(executable + "\x00app-server\x00--listen\x00unix:///tmp/fixture.sock\x00"),
+		"environ": []byte("CODEX_HOME=/tmp/fixture-home\x00FIXTURE=yes\x00ignored\x00=ignored\x00"),
+		"cgroup":  []byte("0::/user.slice/fixture.service\n"),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(processDirectory, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return executable
+}
+
+func TestReadSmallProcFileBoundsObservation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observation")
+	if _, err := readSmallProcFile(path); err == nil {
+		t.Fatal("missing observation unexpectedly succeeded")
+	}
+	if err := os.WriteFile(path, make([]byte, maxCodexServiceReceiptBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readSmallProcFile(path)
+	if err != nil || len(data) != maxCodexServiceReceiptBytes {
+		t.Fatalf("bounded observation length=%d err=%v", len(data), err)
+	}
+	if err := os.WriteFile(path, make([]byte, maxCodexServiceReceiptBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSmallProcFile(path); err == nil {
+		t.Fatal("oversized observation unexpectedly succeeded")
+	}
+}
+
+func TestSplitNULDropsEmptyEntriesAndTrailingTerminator(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data []byte
+		want []string
+	}{
+		{name: "empty", data: nil, want: []string{}},
+		{name: "unterminated", data: []byte("one"), want: []string{"one"}},
+		{name: "empty entries", data: []byte("\x00one\x00\x00two\x00"), want: []string{"one", "two"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := splitNUL(test.data); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("split=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalExistingDirectory(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	file := filepath.Join(root, "file")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDirectory, link); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := canonicalExistingDirectory(link, true); err != nil || got != realDirectory {
+		t.Fatalf("canonical symlink=%q err=%v", got, err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(workingDirectory, realDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := canonicalExistingDirectory(relative, false); err != nil || got != realDirectory {
+		t.Fatalf("canonical relative=%q err=%v", got, err)
+	}
+	for _, test := range []struct {
+		name            string
+		path            string
+		requireAbsolute bool
+	}{
+		{name: "empty", path: "", requireAbsolute: true},
+		{name: "NUL", path: string([]byte{'x', 0}), requireAbsolute: false},
+		{name: "relative required", path: relative, requireAbsolute: true},
+		{name: "file", path: file, requireAbsolute: true},
+		{name: "missing", path: filepath.Join(root, "missing"), requireAbsolute: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := canonicalExistingDirectory(test.path, test.requireAbsolute); err == nil {
+				t.Fatal("invalid directory unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestCanonicalNativeDaemonActive(t *testing.T) {
+	home := t.TempDir()
+	controlDirectory := filepath.Join(home, "app-server-control")
+	if err := os.Mkdir(controlDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(controlDirectory, "app-server-control.sock")
+	if active, err := canonicalNativeDaemonActive(context.Background(), home); err != nil || active {
+		t.Fatalf("missing socket active=%t err=%v", active, err)
+	}
+	if err := os.WriteFile(socket, []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := canonicalNativeDaemonActive(context.Background(), home); err != nil || active {
+		t.Fatalf("regular file active=%t err=%v", active, err)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, socket); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := canonicalNativeDaemonActive(context.Background(), home); err != nil || active {
+		t.Fatalf("symlink active=%t err=%v", active, err)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socket)
+	}()
+	accepted := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			acceptErr = connection.Close()
+		}
+		accepted <- acceptErr
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if active, err := canonicalNativeDaemonActive(ctx, home); err != nil || !active {
+		t.Fatalf("listening socket active=%t err=%v", active, err)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(socket)
+	if err != nil {
+		t.Fatalf("stale socket stat: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("stale socket mode=%#o", info.Mode())
+	}
+	connection, dialErr := (&net.Dialer{}).DialContext(context.Background(), "unix", socket)
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("stale socket unexpectedly accepted a connection")
+	}
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		t.Fatalf("stale socket dial error=%v, want ECONNREFUSED", dialErr)
+	}
+	if active, err := canonicalNativeDaemonActive(context.Background(), home); err != nil || active {
+		t.Fatalf("refused socket active=%t err=%v", active, err)
+	}
+	if _, err := canonicalNativeDaemonActive(context.Background(), string([]byte{0})); err == nil {
+		t.Fatal("invalid native home unexpectedly succeeded")
 	}
 }
 

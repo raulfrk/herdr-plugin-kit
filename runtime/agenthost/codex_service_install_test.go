@@ -988,3 +988,141 @@ func lockTestPaths(configHome string) codexServicePaths {
 		SocketPath:     filepath.Join(filepath.Dir(configHome), "runtime", "herdr-plugin-kit", "codex.sock"),
 	}
 }
+
+func TestDefaultCodexServicePathsUsesConfiguredRootsAndRejectsUnsafeRuntimeRoot(t *testing.T) {
+	root := t.TempDir()
+	configHome := filepath.Join(root, "config")
+	runtimeRoot := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	paths, err := defaultCodexServicePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.ConfigHome != configHome || paths.KitConfigDir != filepath.Join(configHome, "herdr-plugin-kit") || paths.UnitDirectory != filepath.Join(configHome, "systemd", "user") || paths.UnitPath != filepath.Join(configHome, "systemd", "user", codexServiceUnitName) || paths.DescriptorPath != filepath.Join(configHome, "herdr-plugin-kit", codexServiceDescriptorName) || paths.RuntimeDir != filepath.Join(runtimeRoot, "herdr-plugin-kit") || paths.SocketPath != filepath.Join(runtimeRoot, "herdr-plugin-kit", "codex.sock") {
+		t.Fatalf("unexpected paths: %+v", paths)
+	}
+
+	t.Run("uses user config fallback", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		paths, err := defaultCodexServicePaths()
+		if err != nil {
+			t.Fatal(err)
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(home, ".config"); paths.ConfigHome != want {
+			t.Fatalf("config home=%q, want %q", paths.ConfigHome, want)
+		}
+	})
+
+	t.Run("rejects relative config home", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "relative")
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		if _, err := defaultCodexServicePaths(); err == nil {
+			t.Fatal("relative XDG_CONFIG_HOME unexpectedly succeeded")
+		}
+	})
+
+	for _, test := range []struct {
+		name    string
+		runtime string
+	}{
+		{name: "missing", runtime: filepath.Join(root, "missing")},
+		{name: "regular file", runtime: filepath.Join(root, "runtime-file")},
+		{name: "symlink", runtime: filepath.Join(root, "runtime-link")},
+	} {
+		t.Run("rejects runtime "+test.name, func(t *testing.T) {
+			if test.name == "regular file" {
+				if err := os.WriteFile(test.runtime, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.name == "symlink" {
+				if err := os.Symlink(runtimeRoot, test.runtime); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("XDG_CONFIG_HOME", configHome)
+			t.Setenv("XDG_RUNTIME_DIR", test.runtime)
+			if _, err := defaultCodexServicePaths(); err == nil {
+				t.Fatalf("unsafe runtime root %q unexpectedly succeeded", test.runtime)
+			}
+		})
+	}
+}
+
+func TestRestoreOwnedUnitReplacesOrRemovesOnlyExactCurrentContents(t *testing.T) {
+	const current = "[Service]\nExecStart=current\n"
+	const previous = "[Service]\nExecStart=previous\n"
+	writeCurrent := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "fixture.service")
+		if err := os.WriteFile(path, []byte(current), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("restores previous unit", func(t *testing.T) {
+		path := writeCurrent(t)
+		if err := restoreOwnedUnit(path, []byte(current), []byte(previous), true); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != previous {
+			t.Fatalf("restored unit=%q err=%v", got, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("restored unit mode=%#o err=%v", info.Mode().Perm(), err)
+		}
+	})
+
+	t.Run("removes newly written unit", func(t *testing.T) {
+		path := writeCurrent(t)
+		if err := restoreOwnedUnit(path, []byte(current), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("removed unit stat error=%v", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{name: "missing", setup: func(t *testing.T, path string) {}},
+		{name: "changed", setup: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unsafe permissions", setup: func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(current), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run("refuses "+test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fixture.service")
+			test.setup(t, path)
+			if err := restoreOwnedUnit(path, []byte(current), []byte(previous), true); !errors.Is(err, ErrCodexServiceOwnership) {
+				t.Fatalf("restore error=%v", err)
+			}
+		})
+	}
+}

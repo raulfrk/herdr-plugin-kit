@@ -1,0 +1,122 @@
+--- a/internal/engine/engine.go
++++ b/internal/engine/engine.go
+@@ -127,17 +127,28 @@
+ 	_ = src.Close()
+ 
+ 	ast.Inspect(file, func(node ast.Node) bool {
++		if declaration, ok := node.(*ast.GenDecl); ok && declaration.Tok == token.CONST {
++			// Constants have no statement-coverage locations. Execute their
++			// mutations and let the test result establish whether they are caught.
++			ast.Inspect(declaration, func(expression ast.Node) bool {
++				if n, ok := NewTokenNode(expression); ok {
++					mu.findMutations(fileName, set, file, n, true)
++				}
++				return true
++			})
++			return false
++		}
+ 		n, ok := NewTokenNode(node)
+ 		if !ok {
+ 			return true
+ 		}
+-		mu.findMutations(fileName, set, file, n)
++		mu.findMutations(fileName, set, file, n, false)
+ 
+ 		return true
+ 	})
+ }
+ 
+-func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken) {
++func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken, constant bool) {
+ 	mutantTypes, ok := TokenMutantType[node.Tok()]
+ 	if !ok {
+ 		return
+@@ -151,7 +162,7 @@
+ 		mutantType := mt
+ 		tm := NewTokenMutant(pkg, set, file, node)
+ 		tm.SetType(mutantType)
+-		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos)))
++		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos), constant))
+ 
+ 		mu.mutantStream <- tm
+ 	}
+@@ -185,10 +196,10 @@
+ 	return strings.ReplaceAll(pkg, sep, "/")
+ }
+ 
+-func (mu *Engine) mutationStatus(pos token.Position) mutator.Status {
++func (mu *Engine) mutationStatus(pos token.Position, constant bool) mutator.Status {
+ 	var status mutator.Status
+ 
+-	if mu.codeData.Cov.IsCovered(pos) {
++	if constant || mu.codeData.Cov.IsCovered(pos) {
+ 		status = mutator.Runnable
+ 	}
+ 
+--- /dev/null
++++ b/internal/engine/constants_test.go
+@@ -0,0 +1,64 @@
++package engine_test
++
++import (
++	"context"
++	"regexp"
++	"testing"
++	"testing/fstest"
++
++	"github.com/go-gremlins/gremlins/internal/configuration"
++	"github.com/go-gremlins/gremlins/internal/diff"
++	"github.com/go-gremlins/gremlins/internal/engine"
++	"github.com/go-gremlins/gremlins/internal/exclusion"
++	"github.com/go-gremlins/gremlins/internal/gomodule"
++	"github.com/go-gremlins/gremlins/internal/mutator"
++)
++
++func TestConstantMutantsWithoutStatementCoverage(t *testing.T) {
++	for _, tc := range []struct {
++		name    string
++		source  string
++		changes diff.Diff
++		want    mutator.Status
++	}{
++		{"constant-only file", "package example\nconst delay = 10 * 1000\n", nil, mutator.Runnable},
++		{"local constant", "package example\nfunc f() int { const delay = 10 * 1000; return delay }\n", nil, mutator.Runnable},
++		{"unchanged constant", "package example\nconst delay = 10 * 1000\n", diff.Diff{"file.go": nil}, mutator.Skipped},
++		{"changed constant", "package example\nconst delay = 10 * 1000\n", diff.Diff{"file.go": {{StartLine: 2, EndLine: 2}}}, mutator.Runnable},
++		{"ordinary expression remains uncovered", "package example\nfunc f(n int) int { return n * 1000 }\n", nil, mutator.NotCovered},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			viperSet(map[string]any{configuration.UnleashDryRunKey: true})
++			defer viperReset()
++			mod := gomodule.GoModule{Name: "example.com", Root: ".", CallingDir: "."}
++			fs := fstest.MapFS{"file.go": {Data: []byte(tc.source)}}
++			m := engine.New(mod, engine.CodeData{Diff: tc.changes}, newJobDealerStub(t), engine.WithDirFs(fs))
++			result := m.Run(context.Background())
++			if len(result.Mutants) != 1 || result.Mutants[0].Status() != tc.want {
++				t.Fatalf("mutants=%v, want one %v", result.Mutants, tc.want)
++			}
++		})
++	}
++}
++
++func TestConstantMutantsRespectExclusionAndDisabledMutators(t *testing.T) {
++	for _, excluded := range []bool{false, true} {
++		t.Run(map[bool]string{false: "disabled", true: "excluded"}[excluded], func(t *testing.T) {
++			viperSet(map[string]any{
++				configuration.UnleashDryRunKey:                             true,
++				configuration.MutantTypeEnabledKey(mutator.ArithmeticBase): excluded,
++			})
++			defer viperReset()
++			data := engine.CodeData{}
++			if excluded {
++				data.Exclusion = exclusion.Rules{regexp.MustCompile(`^file\.go$`)}
++			}
++			mod := gomodule.GoModule{Name: "example.com", Root: ".", CallingDir: "."}
++			fs := fstest.MapFS{"file.go": {Data: []byte("package example\nconst delay = 10 * 1000\n")}}
++			m := engine.New(mod, data, newJobDealerStub(t), engine.WithDirFs(fs))
++			if result := m.Run(context.Background()); len(result.Mutants) != 0 {
++				t.Fatalf("excluded/disabled constants produced mutants: %v", result.Mutants)
++			}
++		})
++	}
++}

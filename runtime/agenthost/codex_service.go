@@ -309,17 +309,15 @@ func (s *CodexService) inspectReceiptBoundPrevious(ctx context.Context, paths co
 
 func codexUserAgentHasExactVersion(userAgent, version string) bool {
 	marker := "/" + version
-	for offset := 0; ; {
-		index := strings.Index(userAgent[offset:], marker)
-		if index < 0 {
+	for {
+		_, after, found := strings.Cut(userAgent, marker)
+		if !found {
 			return false
 		}
-		index += offset
-		after := index + len(marker)
-		if after == len(userAgent) || userAgent[after] == ' ' || userAgent[after] == '\t' || userAgent[after] == '(' {
+		if after == "" || after[0] == ' ' || after[0] == '\t' || after[0] == '(' {
 			return true
 		}
-		offset = after
+		userAgent = after
 	}
 }
 
@@ -450,10 +448,17 @@ func ownedBy(info fs.FileInfo, uid int) bool {
 }
 
 func readCodexServiceProcess(pid int) (codexServiceProcess, error) {
+	return readCodexServiceProcessAt("/proc", pid)
+}
+
+// readCodexServiceProcessAt keeps the production reader pinned to /proc while
+// allowing filesystem fixtures to exercise malformed and unavailable process
+// observations without reading a test runner's environment.
+func readCodexServiceProcessAt(procRoot string, pid int) (codexServiceProcess, error) {
 	if pid <= 0 {
 		return codexServiceProcess{}, errors.New("invalid process ID")
 	}
-	base := filepath.Join("/proc", strconv.Itoa(pid))
+	base := filepath.Join(procRoot, strconv.Itoa(pid))
 	executable, err := os.Readlink(filepath.Join(base, "exe"))
 	if err != nil {
 		return codexServiceProcess{}, err
@@ -724,7 +729,10 @@ func canonicalNativeDaemonActive(ctx context.Context, home string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	if info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+	if info.Mode()&os.ModeSocket == 0 {
 		return false, nil
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)

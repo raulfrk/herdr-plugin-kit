@@ -25,7 +25,8 @@ receipt lifecycle, and diagnostics reservation concurrency.
 
 ## Mutation policy
 
-Gremlins v0.6.0 runs with arithmetic-base, conditionals-boundary,
+Gremlins v0.6.0 with the pinned constant-coverage correction runs with
+arithmetic-base, conditionals-boundary,
 conditionals-negation, increment-decrement, invert-negatives, and
 invert-logical enabled. Assignment, bitwise, loop-control, and self-assignment
 mutators remain disabled initially. Only generated files and vendor content may
@@ -87,8 +88,16 @@ the supported, semantically equivalent baseline.
 
 Do not pass Gremlins v0.6.0 --test-cpu: it emits a malformed Go argument.
 Do not rely on its threshold exit status; mutationgate independently parses
-the JSON and applies this policy. The runner verifies the executable's embedded
-module version is exactly v0.6.0. Mutation workers are capped at half the
+the JSON and applies this policy. The runner builds a task-local tool using
+`scripts/gremlins-build`: a SHA-256-pinned upstream v0.6.0 module archive plus
+`testtools/gremlins-constant-coverage.patch`. It records the explicit
+`v0.6.0+hpk.constants.<patch-SHA-256>` identity in the gate report. Building
+requires Python 3 and `unzip`; no module-cache source or global tool is edited.
+The correction executes constant-expression mutants despite their lack of Go
+statement-coverage locations, preserving normal diff/exclusion filters and
+test-based KILLED/LIVED outcomes. It does not exempt mutants or alter thresholds.
+The builder runs the upstream engine tests, including the added regressions.
+Mutation workers are capped at half the
 available logical CPUs. The mutation-process timeout coefficient is 3, which
 leaves normal tests several complete baseline durations while bounding an
 unexpected infinite mutant. Mutation and live Herdr/device tests share

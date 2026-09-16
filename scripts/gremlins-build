@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+# Build the reviewed upstream correction without changing the module cache or
+# installing a global binary. The caller owns the new absolute output path.
+output=${1:?usage: gremlins-build /absolute/new/binary}
+case "$output" in /*) ;; *) echo "output must be absolute" >&2; exit 2 ;; esac
+if [ -e "$output" ] || [ -L "$output" ]; then
+  echo "refusing to overwrite an existing tool" >&2
+  exit 2
+fi
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+patch="$repo/testtools/gremlins-constant-coverage.patch"
+patch_hash=$(sha256sum "$patch")
+patch_hash=${patch_hash%% *}
+version="v0.6.0+hpk.constants.$patch_hash"
+archive=$(go mod download -json github.com/go-gremlins/gremlins@v0.6.0 |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["Zip"])')
+printf '%s  %s\n' 50af4000c527a392363cf76fb31b1669d7527ccdec1753c0dd2e2a875a8376ae "$archive" |
+  sha256sum --check --status
+
+build_root=$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-kit-gremlins.XXXXXX")
+cleanup() { find "$build_root" -depth -delete; }
+trap cleanup EXIT HUP INT TERM
+unzip -q "$archive" -d "$build_root"
+source_dir="$build_root/github.com/go-gremlins/gremlins@v0.6.0"
+chmod -R u+w "$source_dir"
+cd "$source_dir"
+git apply --check "$patch"
+git apply "$patch"
+go test ./internal/engine
+go build -trimpath -ldflags "-X main.version=$version" -o "$output" ./cmd/gremlins
+"$output" --version
