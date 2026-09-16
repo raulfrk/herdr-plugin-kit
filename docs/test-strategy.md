@@ -96,6 +96,10 @@ requires Python 3 and `unzip`; no module-cache source or global tool is edited.
 The correction executes constant-expression mutants despite their lack of Go
 statement-coverage locations, preserving normal diff/exclusion filters and
 test-based KILLED/LIVED outcomes. It does not exempt mutants or alter thresholds.
+It also preserves the baseline environment instead of injecting a longer
+`GOTMPDIR` for mutant executions, which can otherwise cause unrelated Unix-socket
+path-length failures and false kills. An explicitly inherited `GOTMPDIR` remains
+unchanged.
 The builder runs the upstream engine tests, including the added regressions.
 Mutation workers are capped at half the
 available logical CPUs. The mutation-process timeout coefficient is 3, which

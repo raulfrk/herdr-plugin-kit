@@ -611,7 +611,18 @@ func TestCanonicalExistingDirectory(t *testing.T) {
 }
 
 func TestCanonicalNativeDaemonActive(t *testing.T) {
-	home := t.TempDir()
+	// Unix socket paths are limited to 108 bytes on Linux. This test needs a
+	// real socket, including a retained stale inode, so keep its task-owned
+	// root independent of a potentially long Go test temporary directory.
+	home, err := os.MkdirTemp("/tmp", "hpk-codex-native-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(home); err != nil {
+			t.Errorf("remove native daemon test root: %v", err)
+		}
+	})
 	controlDirectory := filepath.Join(home, "app-server-control")
 	if err := os.Mkdir(controlDirectory, 0o700); err != nil {
 		t.Fatal(err)

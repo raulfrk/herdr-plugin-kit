@@ -26,8 +26,8 @@ unzip -q "$archive" -d "$build_root"
 source_dir="$build_root/github.com/go-gremlins/gremlins@v0.6.0"
 chmod -R u+w "$source_dir"
 cd "$source_dir"
-git apply --check "$patch"
-git apply "$patch"
+git apply --unidiff-zero --check "$patch"
+git apply --unidiff-zero "$patch"
 go test ./internal/engine
 go build -trimpath -ldflags "-X main.version=$version" -o "$output" ./cmd/gremlins
 "$output" --version

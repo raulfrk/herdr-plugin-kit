@@ -506,9 +506,6 @@ func readSmallProcFile(path string) ([]byte, error) {
 
 func splitNUL(data []byte) []string {
 	parts := bytes.Split(data, []byte{0})
-	if len(parts) != 0 && len(parts[len(parts)-1]) == 0 {
-		parts = parts[:len(parts)-1]
-	}
 	values := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if len(part) != 0 {

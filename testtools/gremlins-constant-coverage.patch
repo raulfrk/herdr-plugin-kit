@@ -1,9 +1,6 @@
 --- a/internal/engine/engine.go
 +++ b/internal/engine/engine.go
-@@ -127,17 +127,28 @@
- 	_ = src.Close()
- 
- 	ast.Inspect(file, func(node ast.Node) bool {
+@@ -129,0 +130,11 @@
 +		if declaration, ok := node.(*ast.GenDecl); ok && declaration.Tok == token.CONST {
 +			// Constants have no statement-coverage locations. Execute their
 +			// mutations and let the test result establish whether they are caught.
@@ -15,44 +12,21 @@
 +			})
 +			return false
 +		}
- 		n, ok := NewTokenNode(node)
- 		if !ok {
- 			return true
- 		}
+@@ -134 +145 @@
 -		mu.findMutations(fileName, set, file, n)
 +		mu.findMutations(fileName, set, file, n, false)
- 
- 		return true
- 	})
- }
- 
+@@ -140 +151 @@
 -func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken) {
 +func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken, constant bool) {
- 	mutantTypes, ok := TokenMutantType[node.Tok()]
- 	if !ok {
- 		return
-@@ -151,7 +162,7 @@
- 		mutantType := mt
- 		tm := NewTokenMutant(pkg, set, file, node)
- 		tm.SetType(mutantType)
+@@ -154 +165 @@
 -		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos)))
 +		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos), constant))
- 
- 		mu.mutantStream <- tm
- 	}
-@@ -185,10 +196,10 @@
- 	return strings.ReplaceAll(pkg, sep, "/")
- }
- 
+@@ -188 +199 @@
 -func (mu *Engine) mutationStatus(pos token.Position) mutator.Status {
 +func (mu *Engine) mutationStatus(pos token.Position, constant bool) mutator.Status {
- 	var status mutator.Status
- 
+@@ -191 +202 @@
 -	if mu.codeData.Cov.IsCovered(pos) {
 +	if constant || mu.codeData.Cov.IsCovered(pos) {
- 		status = mutator.Runnable
- 	}
- 
 --- /dev/null
 +++ b/internal/engine/constants_test.go
 @@ -0,0 +1,64 @@
@@ -120,3 +94,28 @@
 +		})
 +	}
 +}
+--- a/internal/engine/executor.go
++++ b/internal/engine/executor.go
+@@ -203 +202,0 @@
+-	cmd.Env = append(cmd.Env, fmt.Sprintf("GOTMPDIR=%s", m.wdDealer.WorkDir()))
+--- a/internal/engine/executor_test.go
++++ b/internal/engine/executor_test.go
+@@ -203,2 +203,6 @@
+-				goTmpDirEnv := fmt.Sprintf("GOTMPDIR=%s", wdDealer.WorkDir())
+-				actualGoTmpDir := ""
++				var expected, actual []string
++				for _, v := range os.Environ() {
++					if strings.HasPrefix(v, "GOTMPDIR=") {
++						expected = append(expected, v)
++					}
++				}
+@@ -207,3 +211 @@
+-						actualGoTmpDir = v
+-
+-						break
++						actual = append(actual, v)
+@@ -212,2 +214,2 @@
+-				if goTmpDirEnv != actualGoTmpDir {
+-					t.Errorf("expected GOTMPDIR to be %s, got %s", goTmpDirEnv, actualGoTmpDir)
++				if fmt.Sprint(expected) != fmt.Sprint(actual) {
++					t.Errorf("mutant GOTMPDIR differs from inherited baseline: want %q, got %q", expected, actual)
