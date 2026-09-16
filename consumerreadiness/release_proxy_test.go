@@ -214,6 +214,7 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
 		"GOPROXY=" + proxyURL,
 		"GONOSUMDB=*",
 		"GOSUMDB=off",
+		"GOFLAGS=-buildvcs=false",
 		"GOTOOLCHAIN=go1.27.0",
 		"GOWORK=off",
 	}
