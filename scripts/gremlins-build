@@ -29,5 +29,5 @@ cd "$source_dir"
 git apply --unidiff-zero --check "$patch"
 git apply --unidiff-zero "$patch"
 go test ./internal/engine
-go build -trimpath -ldflags "-X main.version=$version" -o "$output" ./cmd/gremlins
+go build -buildvcs=false -trimpath -ldflags "-X main.version=$version" -o "$output" ./cmd/gremlins
 "$output" --version
