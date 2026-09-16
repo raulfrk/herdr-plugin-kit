@@ -79,21 +79,41 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 		put(frame, "keymap-status", 0, row, w, 1, []string{message}, muted, false)
 	}
 	footer := "Ctrl-C quit · Actions " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next") + " controls"
+	compactFooter := "Ctrl-C quit · Actions " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next")
 	if s.actionsFocused {
 		footer = "[Actions] " + s.bindingLabel("keymap.actions") + " open · " + s.bindingLabel("keymap.focus-next") + " return"
+		compactFooter = "[Actions] " + s.bindingLabel("keymap.actions") + " · " + s.bindingLabel("keymap.focus-next") + " return"
 	}
 	if pending := s.runtime.Pending(); len(pending) > 0 {
 		footer = strings.Join(pending, " ") + " → " + strings.Join(s.runtime.Continuations(), " / ")
+		compactFooter = strings.Join(pending, " ") + " → " + strings.Join(s.runtime.Continuations(), "/")
 	}
 	if s.view == checkerScreen {
 		footer = "Esc Esc within 1s return · Ctrl-C quit"
+		compactFooter = footer
 	}
 	if s.view == captureScreen {
 		footer = "Enter finish · Esc cancel · Ctrl-C quit"
+		compactFooter = footer
 	}
+	footer = fittingFooter(w, footer, compactFooter)
 	frame.Fill(0, h-1, w, 1, muted)
 	put(frame, "keymap-footer", 0, h-1, w, 1, []string{footer}, muted, false)
 	return frame, nil
+}
+
+func fittingFooter(width int, full, compact string) string {
+	if len([]rune(full)) <= width {
+		return full
+	}
+	if len([]rune(compact)) <= width {
+		return compact
+	}
+	const fallback = "Keys active · Ctrl-C quit"
+	if len([]rune(fallback)) <= width {
+		return fallback
+	}
+	return ""
 }
 
 func modifiers(stroke string) string {

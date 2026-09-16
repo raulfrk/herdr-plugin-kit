@@ -113,6 +113,49 @@ func uiForTest(t *testing.T, directory string, recovery bool) (*Surface, *probe)
 	return s, p
 }
 
+func TestGlobalFooterFitsSupportedMinimum(t *testing.T) {
+	palette, err := theme.Builtin("catppuccin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := []struct {
+		name  string
+		setup func(*Surface)
+		want  string
+	}{
+		{name: "base", setup: func(*Surface) {}, want: "Ctrl-C quit"},
+		{name: "actions focused", setup: func(surface *Surface) { surface.actionsFocused = true }, want: "[Actions]"},
+		{name: "pending", setup: func(surface *Surface) {
+			if _, consumed := surface.runtime.Step(surface.contentContext(), "g", time.Now()); !consumed {
+				t.Fatal("test prefix was not consumed")
+			}
+		}, want: "g → r"},
+		{name: "checker", setup: func(surface *Surface) { surface.view = checkerScreen }, want: "Esc Esc within 1s return"},
+		{name: "capture", setup: func(surface *Surface) { surface.view = captureScreen }, want: "Enter finish"},
+	}
+	for _, size := range []responsive.Size{{Columns: 110, Rows: 24}, {Columns: 80, Rows: 18}, {Columns: 48, Rows: 18}, {Columns: 40, Rows: 10}} {
+		for _, state := range states {
+			t.Run(fmt.Sprintf("%s/%dx%d", state.name, size.Columns, size.Rows), func(t *testing.T) {
+				surface, _ := uiForTest(t, t.TempDir(), false)
+				t.Cleanup(func() { _ = surface.Close() })
+				state.setup(surface)
+				frame, err := surface.Render(shell.RenderContext{Layout: responsive.Resolve(size), Theme: palette})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, observation := range frame.TextFit().Observations {
+					if observation.Element.String() == "keymap-footer" && (observation.Clipped || observation.Truncated) {
+						t.Fatalf("footer did not fit: %+v", observation)
+					}
+				}
+				if text := view.ANSI(frame); !strings.Contains(text, state.want) {
+					t.Fatalf("footer lost %q: %q", state.want, text)
+				}
+			})
+		}
+	}
+}
+
 type observation struct {
 	view                                   screen
 	debug, editing, pending, draft, paste  bool
