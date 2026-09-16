@@ -30,6 +30,7 @@ type probe struct {
 	changeAfterRefresh                              bool
 	extraActions                                    int
 	name                                            string
+	ownDebugKey                                     bool
 	editing                                         bool
 	revision, invocations, resizes, results, timers int
 	text                                            string
@@ -46,6 +47,9 @@ func (p *probe) KeymapCatalog() []keymap.Action {
 		{ID: "probe.refresh", Label: "Refresh example", Context: p.name + ".results", Quick: true, Defaults: []keymap.Sequence{{"g", "r"}, {"f5"}}},
 		{ID: "probe.edit", Label: "Edit query", Context: p.name + ".results", Quick: true, Defaults: editDefaults},
 		{ID: "probe.finish", Label: "Finish query", Context: p.name + ".editing", Editing: true, Defaults: []keymap.Sequence{{"enter"}, {"escape"}}},
+	}
+	if p.ownDebugKey {
+		actions = append(actions, keymap.Action{ID: "probe.d", Label: "Consumer D", Context: p.name + ".results", Defaults: []keymap.Sequence{{"d"}}})
 	}
 	for index := range p.extraActions {
 		actions = append(actions, keymap.Action{
@@ -205,6 +209,39 @@ func TestExplicitChildTabOwnershipPreservesFormBinding(t *testing.T) {
 	t.Cleanup(func() { _ = second.Close() })
 	if got := s.runtime.Effective("example.results", "keymap.focus-next"); !reflect.DeepEqual(got, []keymap.Sequence{{"tab"}}) {
 		t.Fatalf("ordinary wrapper Tab changed: %v", got)
+	}
+}
+
+func TestConsumerDebugKeyOverridesOnlyBareWrapperFallback(t *testing.T) {
+	main := &probe{name: "example", ownDebugKey: true}
+	debug := &probe{name: "debug"}
+	s, err := New(Options{Main: main, Debug: debug, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.runtime.Effective("example.results", "keymap.debug"); !reflect.DeepEqual(got, []keymap.Sequence{{"alt+d"}}) {
+		t.Fatalf("claimed-context diagnostics bindings=%v", got)
+	}
+	if action, consumed := s.runtime.Step(main.KeymapContext(), "d", time.Now()); !consumed || action != "probe.d" {
+		t.Fatalf("consumer d action=%q consumed=%t", action, consumed)
+	}
+	if action, consumed := s.runtime.Step(main.KeymapContext(), "alt+d", time.Now()); !consumed || action != "keymap.debug" {
+		t.Fatalf("Alt+D diagnostics action=%q consumed=%t", action, consumed)
+	}
+
+	ordinary := &probe{name: "ordinary"}
+	legacy, err := New(Options{Main: ordinary, Debug: debug, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if action, consumed := legacy.runtime.Step(ordinary.KeymapContext(), "d", time.Now()); !consumed || action != "keymap.debug" {
+		t.Fatalf("unclaimed d action=%q consumed=%t", action, consumed)
+	}
+	ordinary.editing = true
+	if action, consumed := legacy.runtime.Step(ordinary.KeymapContext(), "d", time.Now()); consumed || action != "" {
+		t.Fatalf("editing d action=%q consumed=%t", action, consumed)
 	}
 }
 

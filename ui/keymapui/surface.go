@@ -242,7 +242,8 @@ func (s *Surface) KeymapContext() keymap.Context {
 }
 
 func (s *Surface) catalog() []keymap.Action {
-	catalog := append([]keymap.Action(nil), s.options.Main.KeymapCatalog()...)
+	mainCatalog := s.options.Main.KeymapCatalog()
+	catalog := append([]keymap.Action(nil), mainCatalog...)
 	if s.options.Debug != nil {
 		catalog = append(catalog, s.options.Debug.KeymapCatalog()...)
 	}
@@ -250,6 +251,19 @@ func (s *Surface) catalog() []keymap.Action {
 		catalog = append(catalog, l.picker.KeymapCatalog()...)
 	}
 	tabOwned := make(map[keymap.Context]bool)
+	mainOwnsDebugKey := make(map[keymap.Context]bool)
+	for _, action := range mainCatalog {
+		context := keymap.Context{ID: action.Context, Editing: action.Editing}
+		for _, sequence := range action.Defaults {
+			if len(sequence) != 1 {
+				continue
+			}
+			key, err := keymap.Normalize(sequence[0])
+			if err == nil && key == "d" {
+				mainOwnsDebugKey[context] = true
+			}
+		}
+	}
 	for _, child := range []MappedSurface{s.options.Main, s.options.Debug} {
 		if child == nil {
 			continue
@@ -363,7 +377,7 @@ func (s *Surface) catalog() []keymap.Action {
 		add("keymap.help", "Help and effective shortcuts", context, editing, true, helpKeys...)
 		if s.options.Debug != nil {
 			keys = []string{"alt+d"}
-			if !editing {
+			if !editing && !mainOwnsDebugKey[keymap.Context{ID: context, Editing: editing}] {
 				keys = append(keys, "d")
 			}
 			add("keymap.debug", "Debug UI", context, editing, true, keys...)
