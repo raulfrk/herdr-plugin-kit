@@ -395,6 +395,50 @@ func TestDiscoverManagedIdentityUsesExactNamedPaneStatusAndStableReadback(t *tes
 	}
 }
 
+func TestDiscoverManagedIdentityPrefixRechecksFinalPaneAndProcess(t *testing.T) {
+	target := sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	unbound := managedAgent(target, "/tmp/project", "unused", false)
+	unbound.Session = nil
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	withTitle := func(agent Agent) command.Result {
+		wire := wireFromAgent(agent)
+		wire.TerminalTitleStripped = prefix + "..."
+		var response agentInfoResponse
+		response.ID, response.Result.Type, response.Result.Agent = "cli:agent:get", "agent_info", wire
+		return jsonResult(t, response)
+	}
+	status := strings.Replace(observedManagedStatus(), managedNewID, prefix, 1)
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("header")},
+		paneScrollResult(t, target, 10),
+		{Stdout: []byte("old output")},
+		withTitle(unbound),
+		{Stdout: managedEmptyComposer("header")},
+		{},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		{},
+		paneScrollResult(t, target, 40),
+		{Stdout: []byte("old output\n› " + status)},
+		{Stdout: managedEmptyComposer("status block")},
+		withTitle(unbound),
+	}}
+	topology := &fakeManagedTopology{}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.topology = topology
+	argv := []string{"codex", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock"}
+	agent, observed, err := launcher.discoverManagedIdentityObservation(managedIdentityTestContext(t), target, "/tmp/project", argv, managedServiceSnapshot(), managedPolicy(), true)
+	if err != nil || observed.identity != prefix || agent.Session != nil {
+		t.Fatalf("agent=%+v observation=%+v error=%v", agent, observed, err)
+	}
+	if len(runner.calls) != 16 || len(topology.verifications) != 5 {
+		t.Fatalf("calls=%d verifications=%d", len(runner.calls), len(topology.verifications))
+	}
+}
+
 func TestDiscoverManagedIdentityNeverSendsInputWhileDraftPresent(t *testing.T) {
 	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
 	agent := managedAgent(target, "/tmp/project", "unused", false)
