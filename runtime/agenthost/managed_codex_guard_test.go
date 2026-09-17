@@ -29,6 +29,69 @@ func TestAwaitSafeSessionChangeAcceptsStableDonePaneWithoutInput(t *testing.T) {
 	}
 }
 
+func TestAwaitSafeOverlaySessionChangeAcceptsStableFocusedPaneWithoutInput(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, true)
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+	}}
+	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
+	topology := &fakeManagedTopology{inspected: sessionProcess(source.CWD)}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.service, launcher.topology = service, topology
+	snapshot, err := launcher.AwaitSafeOverlaySessionChange(context.Background(), source, 0)
+	if err != nil || !snapshot.Agent.Focused || snapshot.Process.PID != 77 || snapshot.Service != service.snapshot {
+		t.Fatalf("snapshot=%+v error=%v", snapshot, err)
+	}
+	if service.callCount() != 1 || len(runner.calls) != 4 || hasPaneInput(runner.calls) {
+		t.Fatalf("service=%d calls=%#v", service.callCount(), runner.calls)
+	}
+}
+
+func TestAwaitSafeOverlaySessionChangeRejectsDraftWithoutInput(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, true)
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, source), {Stdout: []byte("answer\n› user draft\n status")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	launcher.topology = &fakeManagedTopology{inspected: sessionProcess(source.CWD)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := launcher.AwaitSafeOverlaySessionChange(ctx, source, 0); !errors.Is(err, ErrManagedPaneBusy) || hasPaneInput(runner.calls) {
+		t.Fatalf("error=%v calls=%#v", err, runner.calls)
+	}
+}
+
+func TestAwaitSafeOverlaySessionChangeRejectsUnfocusedPaneWithoutInput(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	runner := &scriptedRunner{results: []command.Result{managedAgentResult(t, source)}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	launcher.topology = &fakeManagedTopology{inspected: sessionProcess(source.CWD)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := launcher.AwaitSafeOverlaySessionChange(ctx, source, 0); !errors.Is(err, ErrManagedPaneBusy) || hasPaneInput(runner.calls) {
+		t.Fatalf("error=%v calls=%#v", err, runner.calls)
+	}
+}
+
+func TestAwaitSafeOverlaySessionChangeRejectsFocusDriftWithoutInput(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, true)
+	unfocused := source
+	unfocused.Focused = false
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+		managedAgentResult(t, unfocused),
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	launcher.topology = &fakeManagedTopology{inspected: sessionProcess(source.CWD)}
+	if _, err := launcher.AwaitSafeOverlaySessionChange(context.Background(), source, 0); !errors.Is(err, ErrManagedStale) || hasPaneInput(runner.calls) {
+		t.Fatalf("error=%v calls=%#v", err, runner.calls)
+	}
+}
+
 func TestAwaitSafeSessionChangeWaitsForDraftToClear(t *testing.T) {
 	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
 	runner := &scriptedRunner{results: []command.Result{
@@ -99,6 +162,8 @@ func TestAwaitSafeSessionChangeRejectsEachStableReadDriftWithoutInput(t *testing
 	otherSession.Session = &SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: managedSecondID}
 	changedStatus := source
 	changedStatus.Status = "done"
+	changedIdentity := source
+	changedIdentity.TabID = "w:other"
 	tests := []struct {
 		name     string
 		results  []command.Result
@@ -106,7 +171,8 @@ func TestAwaitSafeSessionChangeRejectsEachStableReadDriftWithoutInput(t *testing
 	}{
 		{"immutable agent", []command.Result{managedAgentResult(t, otherSession)}, &fakeManagedTopology{inspected: process}},
 		{"invalid process", []command.Result{managedAgentResult(t, source)}, &fakeManagedTopology{inspected: sessionhost.ForegroundProcess{PID: 77, Name: "other", CWD: source.CWD, Argv: []string{"other"}}}},
-		{"second agent", []command.Result{managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")}, managedAgentResult(t, changedStatus)}, &fakeManagedTopology{inspected: process}},
+		{"second identity", []command.Result{managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")}, managedAgentResult(t, changedIdentity), {Stdout: managedEmptyComposer("answer")}}, &fakeManagedTopology{inspected: process}},
+		{"second status", []command.Result{managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")}, managedAgentResult(t, changedStatus), {Stdout: managedEmptyComposer("answer")}}, &fakeManagedTopology{inspected: process}},
 		{"second process", []command.Result{managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")}, managedAgentResult(t, source)}, &fakeManagedTopology{inspectedSeq: []sessionhost.ForegroundProcess{process, {PID: 88, Name: process.Name, CWD: process.CWD, Argv: process.Argv}}}},
 		{"second composer", []command.Result{managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")}, managedAgentResult(t, source), {Stdout: []byte("\x1b[1m›\x1b[0m user draft")}}, &fakeManagedTopology{inspected: process}},
 	}

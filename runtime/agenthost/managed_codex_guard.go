@@ -24,6 +24,19 @@ type ManagedCodexPaneSnapshot struct {
 // managed Codex pane is unfocused, quiescent, and has an empty composer on two
 // consecutive stable reads.
 func (l ManagedCodexLauncher) AwaitSafeSessionChange(ctx context.Context, source Agent, readyTimeout time.Duration) (ManagedCodexPaneSnapshot, error) {
+	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, false)
+}
+
+// AwaitSafeOverlaySessionChange applies the managed Codex session-change
+// guard while an active Herdr modal owns input over the exact source pane.
+// Unlike AwaitSafeSessionChange, it requires the pane to remain focused on
+// both stable reads. The caller must independently prove and retain ownership
+// of that modal; this method performs no input or focus side effect.
+func (l ManagedCodexLauncher) AwaitSafeOverlaySessionChange(ctx context.Context, source Agent, readyTimeout time.Duration) (ManagedCodexPaneSnapshot, error) {
+	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, true)
+}
+
+func (l ManagedCodexLauncher) awaitSafeSessionChangeWithFocus(ctx context.Context, source Agent, readyTimeout time.Duration, focused bool) (ManagedCodexPaneSnapshot, error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -39,7 +52,7 @@ func (l ManagedCodexLauncher) AwaitSafeSessionChange(ctx context.Context, source
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, managedReadyTimeout(readyTimeout))
 	defer cancel()
-	return l.awaitSafeSessionChange(waitCtx, source, service)
+	return l.awaitSafeSessionChangeFocus(waitCtx, source, service, focused)
 }
 
 // StopForSessionChange performs the same non-disruptive guard and then stops
@@ -59,6 +72,10 @@ func (l ManagedCodexLauncher) StopForSessionChange(ctx context.Context, source A
 }
 
 func (l ManagedCodexLauncher) awaitSafeSessionChange(ctx context.Context, source Agent, service CodexServiceSnapshot) (ManagedCodexPaneSnapshot, error) {
+	return l.awaitSafeSessionChangeFocus(ctx, source, service, false)
+}
+
+func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, source Agent, service CodexServiceSnapshot, focused bool) (ManagedCodexPaneSnapshot, error) {
 	target := sessionhost.Origin{SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID}
 	for {
 		wire, current, err := l.readManagedAgent(ctx, target, source.CWD)
@@ -68,7 +85,7 @@ func (l ManagedCodexLauncher) awaitSafeSessionChange(ctx context.Context, source
 			}
 			return ManagedCodexPaneSnapshot{}, err
 		}
-		if !managedPaneQuiescent(wire) {
+		if !managedPaneReadyForSessionChange(wire, focused) {
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
 				return ManagedCodexPaneSnapshot{}, errors.Join(ErrManagedPaneBusy, err)
 			}
@@ -92,11 +109,11 @@ func (l ManagedCodexLauncher) awaitSafeSessionChange(ctx context.Context, source
 			continue
 		}
 		secondWire, second, err := l.readManagedAgent(ctx, target, source.CWD)
-		if err != nil || !sameImmutable(current, second) || current.Status != second.Status || !managedPaneQuiescent(secondWire) {
-			if err == nil {
-				err = ErrManagedStale
-			}
+		if err != nil {
 			return ManagedCodexPaneSnapshot{}, err
+		}
+		if !sameImmutable(current, second) || current.Status != second.Status || !managedPaneReadyForSessionChange(secondWire, focused) {
+			return ManagedCodexPaneSnapshot{}, ErrManagedStale
 		}
 		secondProcess, err := l.topologyHost().InspectForegroundProcess(ctx, target)
 		if err != nil || !sameForegroundProcess(process, secondProcess) {
@@ -130,7 +147,11 @@ func (l ManagedCodexLauncher) validateSafeSource(source Agent, readyTimeout time
 }
 
 func managedPaneQuiescent(agent wireAgent) bool {
-	return !agent.Focused && !agent.LaunchPending && (agent.AgentStatus == "idle" || agent.AgentStatus == "done")
+	return managedPaneReadyForSessionChange(agent, false)
+}
+
+func managedPaneReadyForSessionChange(agent wireAgent, focused bool) bool {
+	return agent.Focused == focused && !agent.LaunchPending && (agent.AgentStatus == "idle" || agent.AgentStatus == "done")
 }
 
 func validManagedServiceSnapshot(service CodexServiceSnapshot) bool {

@@ -14,6 +14,18 @@ var ErrUnsafeSessionChange = errors.New("agent source is not safe to leave")
 // unchanged, authoritatively idle, and has an empty supported-version
 // composer. It performs no input or focus side effect.
 func (p Probe) VerifyNativeSessionChange(ctx context.Context, target Agent) (Agent, error) {
+	return p.verifyNativeSessionChange(ctx, target, false)
+}
+
+// VerifyNativeOverlaySessionChange applies the native OMP/OpenCode guard while
+// an active Herdr modal owns input over the exact source pane. It requires the
+// pane to remain focused across the stable identity reads. The caller must
+// independently prove and retain ownership of that modal.
+func (p Probe) VerifyNativeOverlaySessionChange(ctx context.Context, target Agent) (Agent, error) {
+	return p.verifyNativeSessionChange(ctx, target, true)
+}
+
+func (p Probe) verifyNativeSessionChange(ctx context.Context, target Agent, focused bool) (Agent, error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -21,7 +33,7 @@ func (p Probe) VerifyNativeSessionChange(ctx context.Context, target Agent) (Age
 	if err != nil || !sameImmutable(target, before) || target.CWD != before.CWD {
 		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
 	}
-	if before.Focused || before.Status != "idle" && before.Status != "done" {
+	if before.Focused != focused || before.Status != "idle" && before.Status != "done" {
 		return Agent{}, ErrUnsafeSessionChange
 	}
 	assessment, err := p.Assess(ctx, before)
@@ -32,7 +44,7 @@ func (p Probe) VerifyNativeSessionChange(ctx context.Context, target Agent) (Age
 		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
 	}
 	after, err := p.Host.find(ctx, target.PaneID)
-	if err != nil || !sameImmutable(before, after) || before.CWD != after.CWD || before.Status != after.Status || before.Revision != after.Revision || before.StateChangeSeq != after.StateChangeSeq || after.Focused {
+	if err != nil || !sameImmutable(before, after) || before.CWD != after.CWD || before.Status != after.Status || before.Revision != after.Revision || before.StateChangeSeq != after.StateChangeSeq || after.Focused != focused {
 		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
 	}
 	return after, nil
