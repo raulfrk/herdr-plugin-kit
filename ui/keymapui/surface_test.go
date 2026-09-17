@@ -32,6 +32,7 @@ type probe struct {
 	extraActions                                    int
 	name                                            string
 	ownDebugKey                                     bool
+	ownHelp                                         bool
 	editing                                         bool
 	revision, invocations, resizes, results, timers int
 	text                                            string
@@ -51,6 +52,9 @@ func (p *probe) KeymapCatalog() []keymap.Action {
 	}
 	if p.ownDebugKey {
 		actions = append(actions, keymap.Action{ID: "probe.d", Label: "Consumer D", Context: p.name + ".results", Defaults: []keymap.Sequence{{"d"}}})
+	}
+	if p.ownHelp {
+		actions = append(actions, keymap.Action{ID: "picker.help", Label: "Help", Context: p.name + ".results", Defaults: []keymap.Sequence{{"?"}}})
 	}
 	for index := range p.extraActions {
 		actions = append(actions, keymap.Action{
@@ -965,6 +969,10 @@ func TestHelpOverviewValidatesCatalogReferences(t *testing.T) {
 		{name: "missing action", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "Missing", Context: "example.results", Action: "probe.missing"}}}, want: "catalog action"},
 		{name: "duplicate reference", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "One", Context: "example.results", Action: "probe.edit"}, {Label: "Two", Context: "example.results", Action: "probe.edit"}}}, want: "duplicate"},
 		{name: "multiline label", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "bad\nlabel", Context: "example.results", Action: "probe.edit"}}}, want: "single-line"},
+		{name: "initial row outside rows", overview: HelpOverview{Title: "Keys", InitialRow: 1, Rows: valid.Rows}, want: "initial row"},
+		{name: "view without current", overview: HelpOverview{Title: "Keys", Views: []HelpOverviewView{{Label: "Search", Context: "example.results", Action: "probe.edit"}}, Rows: valid.Rows}, want: "exactly one current"},
+		{name: "current view references action", overview: HelpOverview{Title: "Keys", Views: []HelpOverviewView{{Label: "Keys", Context: "example.results", Action: "probe.edit", Current: true}}, Rows: valid.Rows}, want: "must not reference"},
+		{name: "aside without title", overview: HelpOverview{Title: "Keys", Aside: &HelpOverviewAside{Steps: []HelpOverviewAsideLine{{Label: "1", Text: "open"}}}, Rows: valid.Rows}, want: "aside title is required"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: test.name != "interactive required", HelpOverview: &test.overview})
@@ -1161,6 +1169,343 @@ func TestHelpOverviewApprovedGeometry(t *testing.T) {
 	}
 }
 
+func TestComposedHelpOverviewMatchesResponsiveHierarchyAndThemeGeometry(t *testing.T) {
+	p := &probe{name: "example", extraActions: 7, ownHelp: true}
+	const description = "Herdr opener arms a page letter; inside the plugin use g + page letter, then a local action."
+	rows := []HelpOverviewRow{
+		{Label: "Attention queue", Context: "example.results", Action: "probe.refresh", Summary: "enter switch · x exclude"},
+		{Label: "Agent search", Context: "example.results", Action: "probe.edit", Summary: "type query · enter switch"},
+	}
+	for index := range 7 {
+		rows = append(rows, HelpOverviewRow{Label: fmt.Sprintf("Workflow %d", index+1), Context: "example.results", Action: fmt.Sprintf("probe.extra.%02d", index), Summary: "run configured action"})
+	}
+	rows[5].Label = "Fork agent"
+	rows[len(rows)-1] = HelpOverviewRow{Label: "Keys & workflow", Context: "example.results", Action: "picker.help", Summary: "this reference"}
+	overview := HelpOverview{
+		Title: "ACTIONS ◈ SHORTCUTS", Current: "? · Keys", ViewMenu: "g views",
+		Description: description,
+		Footer:      "? keys · enter edit · ctrl+s save · k key checker · r reset", CompactFooter: "? keys · enter edit · ctrl+s save", InitialRow: 5,
+		Status: func(int) HelpOverviewStatus {
+			return HelpOverviewStatus{Text: "Codex ● ready", Tone: HelpStatusSuccess}
+		},
+		Views: []HelpOverviewView{
+			{Label: "Queue", Context: "example.results", Action: "probe.refresh"},
+			{Label: "Search", Context: "example.results", Action: "probe.edit"},
+			{Label: "Keys", Current: true},
+		},
+		Rows: rows,
+		Aside: &HelpOverviewAside{
+			Title: "Fast path · Fork with letter",
+			Steps: []HelpOverviewAsideLine{{Label: "1", Text: "prefix+a · arm pages"}, {Label: "2", Text: "f · Fork page"}, {Label: "3", Text: "s · Sonnet preset"}},
+			Details: []HelpOverviewAsideLine{
+				{Label: "one opener", Text: "opens or focuses the plugin and arms one page key"},
+				{Label: "open mode", Text: "Custom Herdr key"},
+				{Label: "Herdr key", Text: "prefix+a"},
+				{Label: "switch page", Text: "g then the page key; ? opens help directly"},
+			},
+		},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.action(shell.EventContext{}, "keymap.help")
+	if s.view != helpScreen || s.helpSelected != overview.InitialRow {
+		t.Fatalf("opened composed Help at view=%v row=%d want row=%d", s.view, s.helpSelected, overview.InitialRow)
+	}
+
+	palettes := []theme.Palette{}
+	for _, id := range []string{"terminal", "catppuccin", "catppuccin-latte"} {
+		palette, paletteErr := theme.Builtin(id)
+		if paletteErr != nil {
+			t.Fatal(paletteErr)
+		}
+		palettes = append(palettes, palette)
+	}
+	custom := palettes[1]
+	custom.ID = "custom-composed-proof"
+	custom.Background, custom.PanelBackground, custom.ActiveRowBackground = theme.Color("#010101"), theme.Color("#020202"), theme.Color("#030303")
+	custom.SelectionBackground, custom.Surface, custom.Border = theme.Color("#040404"), theme.Color("#050505"), theme.Color("#060606")
+	custom.Text, custom.Muted, custom.Accent = theme.Color("#070707"), theme.Color("#080808"), theme.Color("#090909")
+	custom.Red, custom.Green, custom.Yellow = theme.Color("#100001"), theme.Color("#100002"), theme.Color("#100003")
+	palettes = append(palettes, custom)
+
+	tests := []struct {
+		name string
+		size responsive.Size
+		want string
+	}{
+		{name: "wide", size: responsive.Size{Columns: 110, Rows: 24}, want: "0879209278882e6dbebcee5d54b9755c2aa57461952eba542019c174c1e397ef"},
+		{name: "standard", size: responsive.Size{Columns: 80, Rows: 18}, want: "191f6a12f545d9cb8024fbc237bd377553269abfdafe9b31b982982627c18692"},
+		{name: "compact", size: responsive.Size{Columns: 48, Rows: 18}, want: "5fbadcfd118d9fb2dfecddd460db63bb08a61e86121b8a29389bf3ba3a628b7e"},
+		{name: "minimum", size: responsive.Size{Columns: 40, Rows: 10}, want: "c2028695658d33a0f327e61d443f2995e087e5cdb5cbd37d5ef6d3c6eafc8a1a"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			geometry := ""
+			for paletteIndex, palette := range palettes {
+				frame, renderErr := s.Render(shell.RenderContext{Layout: responsive.Resolve(test.size), Theme: palette})
+				if renderErr != nil {
+					t.Fatal(renderErr)
+				}
+				text := view.ANSI(frame)
+				for _, want := range []string{"ACTIONS ◈ SHORTCUTS", "Fork", "? keys", "ctrl+s save"} {
+					if !strings.Contains(text, want) {
+						t.Fatalf("theme=%s missing %q from %q", palette.ID, want, text)
+					}
+				}
+				if test.size.Columns >= 100 {
+					for _, want := range []string{"Queue", "Search", "Fast path", "prefix+a", description, "one page key", "directly"} {
+						if !strings.Contains(text, want) {
+							t.Fatalf("wide theme=%s missing %q from %q", palette.ID, want, text)
+						}
+					}
+				} else if strings.Contains(text, "Fast path") {
+					t.Fatalf("theme=%s size=%+v retained wide aside", palette.ID, test.size)
+				}
+				gotGeometry := helpFrameGeometry(frame)
+				if geometry == "" {
+					geometry = gotGeometry
+				} else if gotGeometry != geometry {
+					t.Fatalf("theme=%s size=%+v changed composed geometry", palette.ID, test.size)
+				}
+				assertHelpFrameUsesPalette(t, frame, palette)
+				if paletteIndex == 0 {
+					got := fmt.Sprintf("%x", sha256.Sum256([]byte(helpFrameVisualSignature(frame))))
+					if got != test.want {
+						t.Fatalf("visual digest=%s want=%s\n%s", got, test.want, text)
+					}
+				}
+			}
+		})
+	}
+
+	s.helpSelected = len(rows) - 1
+	s.action(shell.EventContext{}, "keymap.help.edit")
+	if s.view != entryScreen || s.selected.Context != "example.results" || s.selected.ID != "keymap.help" {
+		t.Fatalf("Help reference edit target=%+v view=%v", s.selected, s.view)
+	}
+}
+
+func TestComposedHelpOverviewLayoutValues(t *testing.T) {
+	p := &probe{name: "example", extraActions: 7, ownHelp: true}
+	rows := []HelpOverviewRow{
+		{Label: "Queue", Context: "example.results", Action: "probe.refresh"},
+		{Label: "Search", Context: "example.results", Action: "probe.edit"},
+	}
+	for index := range 7 {
+		rows = append(rows, HelpOverviewRow{Label: fmt.Sprintf("Row %d", index+3), Context: "example.results", Action: fmt.Sprintf("probe.extra.%02d", index)})
+	}
+	overview := HelpOverview{
+		Title: "Keys", Description: "Workflow", InitialRow: 5, Rows: rows,
+		Views: []HelpOverviewView{
+			{Label: "Queue", Context: "example.results", Action: "probe.refresh"},
+			{Label: "Search", Context: "example.results", Action: "probe.edit"},
+			{Label: "Keys", Current: true},
+		},
+		Aside: &HelpOverviewAside{Title: "Fast path"},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.helpContext, s.helpSelected = keymap.Context{ID: "example.results"}, overview.InitialRow
+
+	tests := []struct {
+		width, height int
+		want          helpCompositionLayout
+	}{
+		{width: 110, height: 24, want: helpCompositionLayout{mainWidth: 79, asideX: 80, asideWidth: 30, contentTop: 3, visible: 20, selected: 5, start: 0, keyX: 44, keyWidth: 10, showSummary: true}},
+		{width: 100, height: 18, want: helpCompositionLayout{mainWidth: 71, asideX: 72, asideWidth: 28, contentTop: 3, visible: 14, selected: 5, start: 0, keyX: 39, keyWidth: 10, showSummary: true}},
+		{width: 80, height: 18, want: helpCompositionLayout{mainWidth: 80, contentTop: 3, visible: 14, selected: 5, start: 0, keyX: 44, keyWidth: 10, showSummary: true}},
+		{width: 64, height: 18, want: helpCompositionLayout{mainWidth: 64, contentTop: 3, visible: 14, selected: 5, start: 0, keyX: 35, keyWidth: 10, showSummary: true}},
+		{width: 48, height: 18, want: helpCompositionLayout{mainWidth: 48, contentTop: 3, visible: 14, selected: 5, start: 0, keyX: 26, keyWidth: 22}},
+		{width: 40, height: 10, want: helpCompositionLayout{mainWidth: 40, contentTop: 3, visible: 6, selected: 5, start: 0, keyX: 22, keyWidth: 18}},
+	}
+	for _, test := range tests {
+		if got := s.composedHelpLayout(test.width, test.height); !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("layout %dx%d=%+v want=%+v", test.width, test.height, got, test.want)
+		}
+	}
+	s.helpSelected = 8
+	wantScrolled := helpCompositionLayout{mainWidth: 40, contentTop: 3, visible: 6, selected: 8, start: 3, keyX: 22, keyWidth: 18}
+	if got := s.composedHelpLayout(40, 10); !reflect.DeepEqual(got, wantScrolled) {
+		t.Fatalf("scrolled minimum layout=%+v want=%+v", got, wantScrolled)
+	}
+
+	wantPlacements := []helpOverviewViewPlacement{
+		{x: 1, width: 16, label: " g r / f5 Queue "},
+		{x: 17, width: 10, label: " / Search "},
+		{x: 27, width: 8, label: " ? Keys ", current: true},
+	}
+	if got := s.helpOverviewViewPlacements(110); !reflect.DeepEqual(got, wantPlacements) {
+		t.Fatalf("view placements=%+v want=%+v", got, wantPlacements)
+	}
+	if got := s.helpOverviewViewPlacements(20); len(got) != 1 || !reflect.DeepEqual(got[0], wantPlacements[0]) {
+		t.Fatalf("bounded view placements=%+v", got)
+	}
+	if got := s.helpOverviewViewPlacements(17); len(got) != 1 || !reflect.DeepEqual(got[0], wantPlacements[0]) {
+		t.Fatalf("exact-boundary view placements=%+v", got)
+	}
+	if label, textWidth, rows := helpAsideDetailSize(30, 20, "opens or focuses the plugin and arms one page key"); label != 10 || textWidth != 17 || rows != 3 {
+		t.Fatalf("aside detail size=(%d,%d,%d)", label, textWidth, rows)
+	}
+	if label, textWidth, rows := helpAsideDetailSize(28, 20, "opens or focuses the plugin and arms one page key"); label != 9 || textWidth != 16 || rows != 4 {
+		t.Fatalf("100-column aside detail size=(%d,%d,%d)", label, textWidth, rows)
+	}
+	if _, _, rows := helpAsideDetailSize(30, 2, "opens or focuses the plugin and arms one page key"); rows != 2 {
+		t.Fatalf("bounded aside detail rows=%d", rows)
+	}
+	s.options.HelpOverview.Description = ""
+	if got := s.composedHelpLayout(80, 18); got.contentTop != 2 || got.visible != 15 {
+		t.Fatalf("description-free layout=%+v", got)
+	}
+}
+
+func TestComposedHelpOverviewReachableAllocationBoundaries(t *testing.T) {
+	p := &probe{name: "example", ownHelp: true}
+	overview := HelpOverview{
+		Title: strings.Repeat("T", 80), Current: strings.Repeat("C", 60), ViewMenu: "g views",
+		Status: func(int) HelpOverviewStatus { return HelpOverviewStatus{Text: "ready", Tone: HelpStatusSuccess} },
+		Views:  []HelpOverviewView{{Label: "Keys", Current: true}},
+		Rows:   []HelpOverviewRow{{Label: strings.Repeat("L", 64), Context: "example.results", Action: "probe.refresh", Summary: strings.Repeat("S", 80)}},
+		Aside: &HelpOverviewAside{
+			Title:   strings.Repeat("A", 64),
+			Steps:   []HelpOverviewAsideLine{{Label: "1", Text: strings.Repeat("P", 64)}},
+			Details: []HelpOverviewAsideLine{{Label: "Herdr key", Text: strings.Repeat("D", 64)}},
+		},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.runtime.Apply(keymap.Document{Version: 1, Bindings: []keymap.Binding{{
+		Context: "example.results", Action: "probe.refresh",
+		Sequences: []keymap.Sequence{{"ctrl+page-up"}, {"ctrl+page-down"}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	s.action(shell.EventContext{}, "keymap.help")
+	palette, _ := theme.Builtin("terminal")
+
+	render := func(width, height int) *view.Frame {
+		t.Helper()
+		frame, renderErr := s.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: width, Rows: height}), Theme: palette})
+		if renderErr != nil {
+			t.Fatal(renderErr)
+		}
+		return frame
+	}
+
+	wide := render(100, 24)
+	for element, want := range map[string]struct{ original, columns int }{
+		"keymap-overview-title":              {original: 80, columns: 94},
+		"keymap-overview-aside-title":        {original: 64, columns: 26},
+		"keymap-overview-aside-step-text":    {original: 64, columns: 23},
+		"keymap-overview-aside-detail-label": {original: 9, columns: 9},
+		"keymap-overview-aside-detail-text":  {original: 64, columns: 16},
+		"keymap-footer":                      {original: 10, columns: 100},
+	} {
+		got := helpTextFitObservation(t, wide, element)
+		if got.OriginalColumns != want.original || got.AvailableColumns != want.columns {
+			t.Fatalf("%s fit=(original %d, available %d) want=(%d,%d)", element, got.OriginalColumns, got.AvailableColumns, want.original, want.columns)
+		}
+	}
+	if text := view.ANSI(wide); !strings.Contains(text, "Enter edit") {
+		t.Fatalf("generated Help footer missing: %q", text)
+	}
+	border := helpTextFitObservation(t, wide, "keymap-overview-aside-border")
+	if border.LayoutRows != 21 || border.AvailableRows != 21 || border.Clipped {
+		t.Fatalf("wide aside border fit=%+v", border)
+	}
+
+	standard := render(80, 18)
+	if cell, _ := standard.CellAt(71, 1); cell.Text != "›" {
+		t.Fatalf("long-current next arrow cell=%+v", cell)
+	}
+	if got := helpTextFitObservation(t, standard, "keymap-overview-title"); got.OriginalColumns != 80 || got.AvailableColumns != 74 || !got.Truncated {
+		t.Fatalf("standard title fit=%+v", got)
+	}
+
+	compact := render(40, 10)
+	if got := helpTextFitObservation(t, compact, "keymap-overview-label"); got.OriginalColumns != 64 || got.AvailableColumns != 19 || !got.Truncated {
+		t.Fatalf("compact label fit=%+v", got)
+	}
+	binding := helpTextFitObservation(t, compact, "keymap-overview-binding")
+	if binding.OriginalColumns <= binding.AvailableColumns || binding.AvailableColumns != 16 || !binding.Truncated {
+		t.Fatalf("compact binding fit=%+v", binding)
+	}
+}
+
+func TestComposedHelpOverviewValidationBoundaries(t *testing.T) {
+	base := HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "Search", Context: "example.results", Action: "probe.edit"}}}
+	for name, mutate := range map[string]func(*HelpOverview){
+		"description": func(value *HelpOverview) { value.Description = "workflow" },
+		"footer":      func(value *HelpOverview) { value.Footer = "keys" },
+		"views":       func(value *HelpOverview) { value.Views = []HelpOverviewView{{Label: "Keys", Current: true}} },
+		"aside":       func(value *HelpOverview) { value.Aside = &HelpOverviewAside{Title: "Fast path"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			mutate(&value)
+			if !value.composed() {
+				t.Fatal("composed layout was not activated")
+			}
+		})
+	}
+	if base.composed() || (*HelpOverview)(nil).composed() {
+		t.Fatal("empty overview activated composed layout")
+	}
+
+	catalog := (&probe{name: "example"}).KeymapCatalog()
+	validView := HelpOverviewView{Label: "Search", Context: "example.results", Action: "probe.edit"}
+	tests := []struct {
+		name     string
+		overview HelpOverview
+		want     string
+	}{
+		{name: "second unknown view", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Views: []HelpOverviewView{{Label: "Keys", Current: true}, {Label: "Missing", Context: "example.results", Action: "missing"}}}, want: "Help overview view 2 must reference a catalog action"},
+		{name: "second view label", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Views: []HelpOverviewView{{Label: "Keys", Current: true}, {Context: "example.results", Action: "probe.edit"}}}, want: "Help overview view 2 label is required"},
+		{name: "current context only", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Views: []HelpOverviewView{{Label: "Keys", Context: "example.results", Current: true}}}, want: "Help overview current view 1 must not reference an action"},
+		{name: "current action only", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Views: []HelpOverviewView{{Label: "Keys", Action: "probe.edit", Current: true}}}, want: "Help overview current view 1 must not reference an action"},
+		{name: "second current reference", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Views: []HelpOverviewView{validView, {Label: "Keys", Context: "example.results", Current: true}}}, want: "Help overview current view 2 must not reference an action"},
+		{name: "17 aside lines", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Aside: &HelpOverviewAside{Title: "Aside", Steps: make([]HelpOverviewAsideLine, 17)}}, want: "Help overview aside exceeds 16 lines"},
+		{name: "17 combined aside lines", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Aside: &HelpOverviewAside{Title: "Aside", Steps: make([]HelpOverviewAsideLine, 8), Details: make([]HelpOverviewAsideLine, 9)}}, want: "Help overview aside exceeds 16 lines"},
+		{name: "second aside label", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Aside: &HelpOverviewAside{Title: "Aside", Steps: []HelpOverviewAsideLine{{Label: "1", Text: "one"}, {Text: "two"}}}}, want: "Help overview aside step 2 label is required"},
+		{name: "second aside text", overview: HelpOverview{Title: "Keys", Rows: base.Rows, Aside: &HelpOverviewAside{Title: "Aside", Details: []HelpOverviewAsideLine{{Label: "one", Text: "first"}, {Label: "two"}}}}, want: "Help overview aside detail 2 text is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := validateHelpOverview(&test.overview, catalog)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error=%v want=%q", err, test.want)
+			}
+		})
+	}
+	lines := make([]HelpOverviewAsideLine, 16)
+	for index := range lines {
+		lines[index] = HelpOverviewAsideLine{Label: fmt.Sprintf("%d", index+1), Text: "line"}
+	}
+	valid := base
+	valid.Aside = &HelpOverviewAside{Title: "Aside", Steps: lines}
+	if _, _, err := validateHelpOverview(&valid, catalog); err != nil {
+		t.Fatalf("16-line aside boundary rejected: %v", err)
+	}
+}
+
+func TestFittingFooterMeasuresTerminalCells(t *testing.T) {
+	full := strings.Repeat("界", 30)
+	if got := fittingFooter(40, full, "compact fits"); got != "compact fits" {
+		t.Fatalf("wide-cell full footer selected over fitting compact footer: %q", got)
+	}
+	if got := fittingFooter(3, "界a", "compact"); got != "界a" {
+		t.Fatalf("exact-width full footer=%q", got)
+	}
+}
+
 func TestHelpOverviewRenderingBoundaries(t *testing.T) {
 	p := &probe{name: "example"}
 	overview := HelpOverview{
@@ -1235,6 +1580,17 @@ func helpFrameGeometry(frame *view.Frame) string {
 		}
 	}
 	return result.String()
+}
+
+func helpTextFitObservation(t *testing.T, frame *view.Frame, element string) diagnostics.TextFitObservation {
+	t.Helper()
+	for _, observation := range frame.TextFit().Observations {
+		if observation.Element.String() == element {
+			return observation
+		}
+	}
+	t.Fatalf("missing text-fit observation %q", element)
+	return diagnostics.TextFitObservation{}
 }
 
 func assertHelpFrameUsesPalette(t *testing.T, frame *view.Frame, palette theme.Palette) {

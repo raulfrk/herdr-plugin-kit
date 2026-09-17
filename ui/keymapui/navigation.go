@@ -152,7 +152,19 @@ func (s *Surface) openEditor(events shell.EventContext) []shell.Effect {
 
 func (s *Surface) helpActions() []keymap.Action {
 	if s.options.HelpOverview != nil {
-		return append([]keymap.Action(nil), s.helpOverviewActions...)
+		actions := append([]keymap.Action(nil), s.helpOverviewActions...)
+		for index, action := range actions {
+			if action.ID != "picker.help" && action.ID != "debug.help" {
+				continue
+			}
+			for _, candidate := range s.runtime.Catalog() {
+				if candidate.Context == action.Context && candidate.ID == "keymap.help" {
+					actions[index] = candidate
+					break
+				}
+			}
+		}
+		return actions
 	}
 	var actions []keymap.Action
 	for _, action := range s.runtime.Catalog() {

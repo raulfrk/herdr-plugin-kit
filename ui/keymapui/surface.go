@@ -70,8 +70,13 @@ type HelpCommand struct {
 // Status must be read-only and non-blocking because it runs during rendering.
 type HelpOverview struct {
 	Title, Current, ViewMenu string
+	Description, Footer      string
+	CompactFooter            string
+	InitialRow               int
 	Status                   func(columns int) HelpOverviewStatus
+	Views                    []HelpOverviewView
 	Rows                     []HelpOverviewRow
+	Aside                    *HelpOverviewAside
 }
 
 type HelpOverviewStatus struct {
@@ -92,6 +97,28 @@ const (
 // Context and Action must exactly match the consumer's keymap catalog.
 type HelpOverviewRow struct {
 	Label, Context, Action, Summary string
+}
+
+// HelpOverviewView is one consumer view in the wide navigation rail. Exactly
+// one view is Current; every other view references a configurable action.
+type HelpOverviewView struct {
+	Label, Context, Action string
+	Current                bool
+}
+
+// HelpOverviewAside supplies optional wide-only workflow guidance.
+type HelpOverviewAside struct {
+	Title   string
+	Steps   []HelpOverviewAsideLine
+	Details []HelpOverviewAsideLine
+}
+
+type HelpOverviewAsideLine struct {
+	Label, Text string
+}
+
+func (overview *HelpOverview) composed() bool {
+	return overview != nil && (overview.Description != "" || overview.Footer != "" || len(overview.Views) != 0 || overview.Aside != nil)
 }
 
 type screen uint8
@@ -250,6 +277,28 @@ func validateHelpOverview(overview *HelpOverview, catalog []keymap.Action) (*Hel
 	}
 	clone := *overview
 	clone.Rows = append([]HelpOverviewRow(nil), overview.Rows...)
+	clone.Views = append([]HelpOverviewView(nil), overview.Views...)
+	if overview.Aside != nil {
+		aside := *overview.Aside
+		aside.Steps = append([]HelpOverviewAsideLine(nil), aside.Steps...)
+		aside.Details = append([]HelpOverviewAsideLine(nil), aside.Details...)
+		clone.Aside = &aside
+	}
+	for _, field := range []struct {
+		name, value string
+		limit       int
+	}{
+		{name: "description", value: clone.Description, limit: 240},
+		{name: "footer", value: clone.Footer, limit: 240},
+		{name: "compact footer", value: clone.CompactFooter, limit: 120},
+	} {
+		if err := validateHelpOverviewText(field.name, field.value, field.limit, false); err != nil {
+			return nil, nil, err
+		}
+	}
+	if clone.InitialRow < 0 || clone.InitialRow >= len(clone.Rows) {
+		return nil, nil, errors.New("Help overview initial row is outside its rows")
+	}
 	actions := make([]keymap.Action, 0, len(clone.Rows))
 	seen := make(map[string]bool, len(clone.Rows))
 	for index, row := range clone.Rows {
@@ -269,6 +318,48 @@ func validateHelpOverview(overview *HelpOverview, catalog []keymap.Action) (*Hel
 		}
 		seen[key] = true
 		actions = append(actions, action)
+	}
+	if len(clone.Views) != 0 {
+		current := 0
+		for index, view := range clone.Views {
+			if err := validateHelpOverviewText(fmt.Sprintf("view %d label", index+1), view.Label, 32, true); err != nil {
+				return nil, nil, err
+			}
+			if view.Current {
+				current++
+				if view.Context != "" || view.Action != "" {
+					return nil, nil, fmt.Errorf("Help overview current view %d must not reference an action", index+1)
+				}
+				continue
+			}
+			if _, ok := byKey[view.Context+"\x00"+view.Action]; !ok {
+				return nil, nil, fmt.Errorf("Help overview view %d must reference a catalog action", index+1)
+			}
+		}
+		if current != 1 {
+			return nil, nil, errors.New("Help overview views must contain exactly one current view")
+		}
+	}
+	if clone.Aside != nil {
+		if err := validateHelpOverviewText("aside title", clone.Aside.Title, 64, true); err != nil {
+			return nil, nil, err
+		}
+		if len(clone.Aside.Steps)+len(clone.Aside.Details) > 16 {
+			return nil, nil, errors.New("Help overview aside exceeds 16 lines")
+		}
+		for _, section := range []struct {
+			name  string
+			lines []HelpOverviewAsideLine
+		}{{name: "step", lines: clone.Aside.Steps}, {name: "detail", lines: clone.Aside.Details}} {
+			for index, line := range section.lines {
+				if err := validateHelpOverviewText(fmt.Sprintf("aside %s %d label", section.name, index+1), line.Label, 32, true); err != nil {
+					return nil, nil, err
+				}
+				if err := validateHelpOverviewText(fmt.Sprintf("aside %s %d text", section.name, index+1), line.Text, 160, true); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
 	}
 	return &clone, actions, nil
 }
@@ -633,6 +724,9 @@ func (s *Surface) action(events shell.EventContext, id string) []shell.Effect {
 		}
 		s.helpOffset = 0
 		s.helpSelected = 0
+		if s.options.HelpOverview != nil {
+			s.helpSelected = s.options.HelpOverview.InitialRow
+		}
 		s.view = helpScreen
 		s.actionsFocused = false
 		return effects

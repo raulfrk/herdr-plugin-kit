@@ -5,6 +5,7 @@ import (
 
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
 	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
+	"github.com/raulfrk/herdr-plugin-kit/ui/keymap"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
 	"github.com/rivo/uniseg"
@@ -129,6 +130,13 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 		}
 		footer = strings.Join(parts, " · ")
 		compactFooter = "Enter edit · Help commands active"
+		if overview := s.options.HelpOverview; overview != nil && overview.composed() && overview.Footer != "" {
+			footer = overview.Footer
+			compactFooter = overview.CompactFooter
+			if compactFooter == "" {
+				compactFooter = footer
+			}
+		}
 	}
 	footer = fittingFooter(w, footer, compactFooter)
 	frame.Fill(0, h-1, w, 1, muted)
@@ -139,6 +147,10 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 func (s *Surface) renderHelpOverview(frame *view.Frame, context shell.RenderContext, width, height int) {
 	overview := s.options.HelpOverview
 	if overview == nil || width <= 0 || height <= 0 {
+		return
+	}
+	if overview.composed() {
+		s.renderComposedHelpOverview(frame, context, width, height)
 		return
 	}
 	header := view.Style{Foreground: context.Theme.Accent, Background: context.Theme.PanelBackground, Bold: true}
@@ -207,15 +219,216 @@ func (s *Surface) renderHelpOverview(frame *view.Frame, context shell.RenderCont
 	}
 }
 
+func (s *Surface) renderComposedHelpOverview(frame *view.Frame, context shell.RenderContext, width, height int) {
+	overview := s.options.HelpOverview
+	header := view.Style{Foreground: context.Theme.Accent, Background: context.Theme.PanelBackground, Bold: true}
+	frame.Fill(0, 0, width, min(2, height), header)
+	status := HelpOverviewStatus{}
+	if overview.Status != nil {
+		status = overview.Status(width)
+	}
+	status.Text = strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(status.Text))
+	statusStyle := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground, Bold: true}
+	switch status.Tone {
+	case HelpStatusSuccess:
+		statusStyle.Foreground = context.Theme.Green
+	case HelpStatusWarning:
+		statusStyle.Foreground = context.Theme.Yellow
+	case HelpStatusError:
+		statusStyle.Foreground = context.Theme.Red
+	}
+	statusWidth := min(width, uniseg.StringWidth(status.Text))
+	put(frame, "keymap-overview-title", 0, 0, max(0, width-statusWidth-1), 1, []string{overview.Title}, header, false)
+	if statusWidth > 0 {
+		put(frame, "keymap-overview-status", width-statusWidth, 0, statusWidth, 1, []string{status.Text}, statusStyle, false)
+	}
+	if height > 1 {
+		if width >= 100 && len(overview.Views) != 0 {
+			s.renderHelpOverviewViews(frame, context, width)
+		} else {
+			navigation := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground}
+			current := navigation
+			current.Foreground, current.Bold = context.Theme.Accent, true
+			put(frame, "keymap-overview-previous", 1, 1, 1, 1, []string{"‹"}, navigation, false)
+			currentWidth := uniseg.StringWidth(overview.Current)
+			currentX := max(3, (width-currentWidth)/2)
+			put(frame, "keymap-overview-current", currentX, 1, currentWidth, 1, []string{overview.Current}, current, false)
+			menuWidth := uniseg.StringWidth(overview.ViewMenu)
+			if menuWidth > 0 {
+				put(frame, "keymap-overview-next", max(currentX+currentWidth+1, width-menuWidth-3), 1, 1, 1, []string{"›"}, navigation, false)
+				put(frame, "keymap-overview-menu", max(0, width-menuWidth), 1, menuWidth, 1, []string{overview.ViewMenu}, navigation, false)
+			}
+		}
+	}
+
+	layout := s.composedHelpLayout(width, height)
+	if overview.Description != "" && height > 2 {
+		description := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.Background}
+		put(frame, "keymap-overview-description", 1, 2, max(0, width-2), 1, []string{overview.Description}, description, false)
+	}
+	if layout.asideWidth > 0 {
+		s.renderHelpOverviewAside(frame, context, layout.asideX, layout.contentTop, layout.asideWidth, height-layout.contentTop-1)
+	}
+	for offset, index := 0, layout.start; offset < layout.visible && index < len(overview.Rows); offset, index = offset+1, index+1 {
+		y := layout.contentTop + offset
+		row := overview.Rows[index]
+		rowStyle := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Background}
+		marker := " "
+		if index == layout.selected {
+			marker = "▏"
+			rowStyle.Background, rowStyle.Bold = context.Theme.ActiveRowBackground, true
+			frame.Fill(0, y, layout.mainWidth, 1, rowStyle)
+		}
+		put(frame, "keymap-overview-marker", 0, y, 1, 1, []string{marker}, view.Style{Foreground: context.Theme.Accent, Background: rowStyle.Background, Bold: rowStyle.Bold}, false)
+		put(frame, "keymap-overview-label", 2, y, max(0, layout.keyX-3), 1, []string{row.Label}, rowStyle, false)
+		keyStyle := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Surface}
+		if index == layout.selected {
+			keyStyle.Foreground, keyStyle.Background, keyStyle.Bold = context.Theme.Accent, context.Theme.SelectionBackground, true
+		}
+		frame.Fill(layout.keyX, y, min(layout.keyWidth, max(0, layout.mainWidth-layout.keyX)), 1, keyStyle)
+		sequences := sequenceLabel(s.helpOverviewEffective(row.Context, row.Action))
+		put(frame, "keymap-overview-binding", layout.keyX+1, y, max(0, min(layout.keyWidth-2, layout.mainWidth-layout.keyX-1)), 1, []string{sequences}, keyStyle, false)
+		if layout.showSummary {
+			summaryX := layout.keyX + layout.keyWidth + 1
+			put(frame, "keymap-overview-summary", summaryX, y, max(0, layout.mainWidth-summaryX), 1, []string{row.Summary}, view.Style{Foreground: context.Theme.Muted, Background: rowStyle.Background}, false)
+		}
+	}
+}
+
+type helpCompositionLayout struct {
+	mainWidth, asideX, asideWidth int
+	contentTop, visible           int
+	selected, start               int
+	keyX, keyWidth                int
+	showSummary                   bool
+}
+
+func (s *Surface) composedHelpLayout(width, height int) helpCompositionLayout {
+	overview := s.options.HelpOverview
+	layout := helpCompositionLayout{mainWidth: width, contentTop: 2}
+	if overview.Aside != nil && width >= 100 {
+		layout.asideWidth = min(30, max(24, width*28/100))
+		layout.asideX = width - layout.asideWidth
+		layout.mainWidth = max(1, layout.asideX-1)
+	}
+	if overview.Description != "" && height > layout.contentTop {
+		layout.contentTop++
+	}
+	layout.visible = max(1, height-layout.contentTop-1)
+	layout.selected = min(max(0, s.helpSelected), len(overview.Rows)-1)
+	layout.start = max(0, layout.selected-layout.visible+1)
+	layout.start = min(layout.start, max(0, len(overview.Rows)-layout.visible))
+	layout.keyX = min(max(3, layout.mainWidth*56/100), max(3, layout.mainWidth-1))
+	layout.showSummary = layout.mainWidth >= 64
+	layout.keyWidth = max(0, layout.mainWidth-layout.keyX)
+	if layout.showSummary {
+		layout.keyWidth = 5
+		for _, row := range overview.Rows {
+			layout.keyWidth = max(layout.keyWidth, uniseg.StringWidth(sequenceLabel(s.helpOverviewEffective(row.Context, row.Action)))+2)
+		}
+		layout.keyWidth = min(14, layout.keyWidth)
+	}
+	return layout
+}
+
+func (s *Surface) renderHelpOverviewViews(frame *view.Frame, context shell.RenderContext, width int) {
+	inactive := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground}
+	active := view.Style{Foreground: context.Theme.Accent, Background: context.Theme.SelectionBackground, Bold: true}
+	frame.Fill(0, 1, width, 1, inactive)
+	for _, item := range s.helpOverviewViewPlacements(width) {
+		style := inactive
+		if item.current {
+			style = active
+		}
+		frame.Fill(item.x, 1, item.width, 1, style)
+		put(frame, "keymap-overview-view", item.x, 1, item.width, 1, []string{item.label}, style, false)
+	}
+}
+
+type helpOverviewViewPlacement struct {
+	x, width int
+	label    string
+	current  bool
+}
+
+func (s *Surface) helpOverviewViewPlacements(width int) []helpOverviewViewPlacement {
+	x := 1
+	var placements []helpOverviewViewPlacement
+	for _, item := range s.options.HelpOverview.Views {
+		binding := sequenceLabel(s.helpOverviewEffective(item.Context, item.Action))
+		if item.Current {
+			binding = sequenceLabel(s.runtime.Effective(s.helpContext.ID, "keymap.help"))
+		}
+		label := " " + binding + " " + item.Label + " "
+		itemWidth := uniseg.StringWidth(label)
+		if itemWidth == 0 || x+itemWidth > width {
+			break
+		}
+		placements = append(placements, helpOverviewViewPlacement{x: x, width: itemWidth, label: label, current: item.Current})
+		x += itemWidth
+	}
+	return placements
+}
+
+func (s *Surface) renderHelpOverviewAside(frame *view.Frame, context shell.RenderContext, x, y, width, height int) {
+	if width <= 1 || height <= 0 {
+		return
+	}
+	border := view.Style{Foreground: context.Theme.Border, Background: context.Theme.Background}
+	borderLines := make([]string, height)
+	for index := range borderLines {
+		borderLines[index] = "│"
+	}
+	put(frame, "keymap-overview-aside-border", x-1, y, 1, height, borderLines, border, false)
+	aside := s.options.HelpOverview.Aside
+	header := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Background, Bold: true}
+	put(frame, "keymap-overview-aside-title", x+1, y, width-2, 1, []string{aside.Title}, header, false)
+	row := y + 2
+	for _, step := range aside.Steps {
+		if row >= y+height {
+			return
+		}
+		stepStyle := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Surface}
+		frame.Fill(x+1, row, width-2, 1, stepStyle)
+		put(frame, "keymap-overview-aside-step-label", x+2, row, 2, 1, []string{step.Label}, view.Style{Foreground: context.Theme.Accent, Background: stepStyle.Background, Bold: true}, false)
+		put(frame, "keymap-overview-aside-step-text", x+4, row, width-5, 1, []string{step.Text}, stepStyle, false)
+		row += 2
+	}
+	row++
+	for _, detail := range aside.Details {
+		if row >= y+height {
+			return
+		}
+		labelWidth, textWidth, textHeight := helpAsideDetailSize(width, y+height-row, detail.Text)
+		put(frame, "keymap-overview-aside-detail-label", x+1, row, labelWidth, 1, []string{detail.Label}, view.Style{Foreground: context.Theme.Muted, Background: context.Theme.Background}, false)
+		put(frame, "keymap-overview-aside-detail-text", x+2+labelWidth, row, textWidth, textHeight, []string{detail.Text}, view.Style{Foreground: context.Theme.Text, Background: context.Theme.Background}, true)
+		row += max(1, textHeight)
+	}
+}
+
+func helpAsideDetailSize(width, remaining int, text string) (labelWidth, textWidth, textHeight int) {
+	labelWidth = min(10, max(4, width/3))
+	textWidth = width - labelWidth - 3
+	textHeight = min(len(view.Wrap(text, textWidth)), remaining)
+	return labelWidth, textWidth, textHeight
+}
+
+func (s *Surface) helpOverviewEffective(context, action string) []keymap.Sequence {
+	if action == "picker.help" || action == "debug.help" {
+		action = "keymap.help"
+	}
+	return s.runtime.Effective(context, action)
+}
+
 func fittingFooter(width int, full, compact string) string {
-	if len([]rune(full)) <= width {
+	if uniseg.StringWidth(full) <= width {
 		return full
 	}
-	if len([]rune(compact)) <= width {
+	if uniseg.StringWidth(compact) <= width {
 		return compact
 	}
 	const fallback = "Keys active · Ctrl-C quit"
-	if len([]rune(fallback)) <= width {
+	if uniseg.StringWidth(fallback) <= width {
 		return fallback
 	}
 	return ""
