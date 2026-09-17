@@ -46,6 +46,7 @@ func (f *fakeManagedService) callCount() int {
 type fakeManagedVerifier struct {
 	preflight    codexPreflight
 	preflightErr error
+	policies     []ManagedCodexPolicy
 	constraints  codexConstraintSnapshot
 	history      [32]byte
 	historyErr   error
@@ -71,7 +72,8 @@ type fakeManagedVerifier struct {
 	confirmID    string
 }
 
-func (f *fakeManagedVerifier) Preflight(context.Context, string, ManagedCodexPolicy) (codexPreflight, error) {
+func (f *fakeManagedVerifier) Preflight(_ context.Context, _ string, policy ManagedCodexPolicy) (codexPreflight, error) {
+	f.policies = append(f.policies, policy)
 	return f.preflight, f.preflightErr
 }
 func (f *fakeManagedVerifier) ReadConstraints(context.Context, string) (codexConstraintSnapshot, error) {
@@ -313,6 +315,20 @@ func TestManagedCodexNewUsesSharedServiceAndLiteralBackgroundLaunch(t *testing.T
 	}
 }
 
+func TestManagedCodexNewIncludesOnlyValidatedLiteralExtraArgv(t *testing.T) {
+	launcher, service, topology, _, runner, request := newManagedHarness(t, ManagedNew, managedNewID)
+	request.ExtraArgv = []string{"--search", "--enable", "responses_websockets", "--no-alt-screen"}
+	runner.results = []command.Result{{}, managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedNewID, false)), managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedNewID, false)), managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedNewID, false))}
+	managed, err := launcher.Launch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{"codex", "--search", "--enable", "responses_websockets", "--no-alt-screen", "-m"}
+	if service.callCount() != 1 || len(topology.launches) != 1 || len(managed.Argv) < len(wantPrefix) || !reflect.DeepEqual(managed.Argv[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("managed argv=%q launches=%+v service=%d", managed.Argv, topology.launches, service.callCount())
+	}
+}
+
 func TestManagedCodexFocusesOnlyAfterFinalIdentityVerification(t *testing.T) {
 	launcher, _, topology, _, runner, request := newManagedHarness(t, ManagedNew, managedNewID)
 	request.Focus = true
@@ -534,6 +550,65 @@ func TestManagedCodexForkOmitsPermissionOverridesAndPreservesSource(t *testing.T
 	want := []string{"codex", "fork", "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="medium"`, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
 	if !reflect.DeepEqual(managed.Argv, want) || verifier.confirmSrc != managedSourceID || verifier.confirmOp != ManagedFork || managed.SourceThreadID != managedSourceID {
 		t.Fatalf("managed=%+v verifier=%+v", managed, verifier)
+	}
+}
+
+func TestManagedCodexForkCanInheritAuthoritativeSourcePolicy(t *testing.T) {
+	launcher, _, topology, verifier, runner, request := newManagedHarness(t, ManagedFork, managedChildID)
+	source := managedAgent(request.Origin, request.Directory, managedSourceID, false)
+	request.Source, request.Policy, request.InheritSourcePolicy = source, ManagedCodexPolicy{}, true
+	request.ExtraArgv = []string{"--search"}
+	sourcePolicy := managedPreflight(request.Directory).EffectiveCodexPolicy
+	sourcePolicy.Model, sourcePolicy.ReasoningEffort = "gpt-5.6-terra", "high"
+	sourcePolicy.ApprovalPolicy, sourcePolicy.SandboxMode = "on-request", "workspace-write"
+	verifier.preflight = codexPreflight{EffectiveCodexPolicy: sourcePolicy}
+	verifier.audits = []EffectiveCodexPolicy{sourcePolicy, sourcePolicy}
+	verifier.confirm.ForkedFromID = managedSourceID
+	verifier.recheck.ForkedFromID = managedSourceID
+	verifier.read = []codexThreadIdentity{{ID: managedSourceID, CWD: request.Directory, ModelProvider: "openai"}, {ID: managedSourceID, CWD: request.Directory, ModelProvider: "openai"}}
+	runner.results = []command.Result{
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")}, {},
+		managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedChildID, false)),
+		managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedChildID, false)),
+		jsonResult(t, listResponse(wireFromAgent(source))),
+		managedAgentResult(t, managedAgent(topology.target.Origin, request.Directory, managedChildID, false)),
+	}
+	managed, err := launcher.Launch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPolicy := ManagedCodexPolicy{Model: "gpt-5.6-terra", ReasoningEffort: "high", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"}
+	wantArgv := []string{"codex", "fork", "--search", "-m", "gpt-5.6-terra", "-c", `model_reasoning_effort="high"`, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
+	if !reflect.DeepEqual(verifier.policies, []ManagedCodexPolicy{wantPolicy}) || !reflect.DeepEqual(managed.Argv, wantArgv) || managed.SourceThreadID != managedSourceID {
+		t.Fatalf("preflight=%+v managed=%+v", verifier.policies, managed)
+	}
+}
+
+func TestManagedCodexRejectsUnsafeExtraArgvAndInvalidInheritanceBeforeEnsure(t *testing.T) {
+	unsafe := [][]string{
+		{"--remote", "unix:///tmp/other"}, {"--cd", "/tmp/other"}, {"-m", "other"},
+		{"--sandbox", "read-only"}, {"fork"}, {"--enable"}, {"--search", "--search"},
+		{"--enable", "feature", "--enable", "feature"}, {"--enable", "bad value"}, {"--", "prompt"},
+		{"--enable", "feature", "--disable", "feature"},
+	}
+	for _, argv := range unsafe {
+		launcher, service, _, _, _, request := newManagedHarness(t, ManagedNew, managedNewID)
+		request.ExtraArgv = argv
+		if _, err := launcher.Launch(context.Background(), request); err == nil || service.callCount() != 0 {
+			t.Fatalf("argv=%q error=%v ensure=%d", argv, err, service.callCount())
+		}
+	}
+	for _, request := range []ManagedCodexRequest{
+		{Operation: ManagedNew, Origin: managedOrigin(), Directory: "/tmp/project", Placement: sessionhost.NewTab, InheritSourcePolicy: true},
+		{Operation: ManagedFork, Origin: managedOrigin(), Directory: "/tmp/project", Placement: sessionhost.NewTab, InheritSourcePolicy: true, Policy: managedPolicy()},
+	} {
+		service := &fakeManagedService{snapshot: managedServiceSnapshot()}
+		launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+		launcher.service = service
+		if _, err := launcher.Launch(context.Background(), request); err == nil || service.callCount() != 0 {
+			t.Fatalf("request=%+v error=%v ensure=%d", request, err, service.callCount())
+		}
 	}
 }
 

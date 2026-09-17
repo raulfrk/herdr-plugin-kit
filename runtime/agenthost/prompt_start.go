@@ -22,7 +22,11 @@ type PromptStartRequest struct {
 	ReadyTimeout    time.Duration
 	OMPStatusSocket string
 	OpenCodeServer  OpenCodeServer
-	CodexPolicy     ManagedCodexPolicy
+	// StartOpenCodeServer creates one short-lived loopback OpenCode 1.18.30
+	// server for session creation and prompt verification, then stops it while
+	// preserving the launched TUI conversation.
+	StartOpenCodeServer bool
+	CodexPolicy         ManagedCodexPolicy
 }
 
 type PromptStarter struct {
@@ -32,6 +36,7 @@ type PromptStarter struct {
 	wait             func(context.Context, time.Duration) error
 	deliver          func(context.Context, Prompt, PromptTarget) (PromptResult, error)
 	managed          ManagedCodexLauncher
+	openCodeServer   openCodePromptServerLauncher
 }
 
 func NewPromptStarter(host Host) PromptStarter {
@@ -40,7 +45,7 @@ func NewPromptStarter(host Host) PromptStarter {
 
 // Start validates transient input before creating one background native target,
 // binds its exact immutable identity, and submits the prompt exactly once.
-func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptStartRequest) (PromptResult, error) {
+func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptStartRequest) (result PromptResult, returnErr error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -56,6 +61,22 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	}
 	if s.wait == nil {
 		return PromptResult{State: PromptNotAttempted}, errors.New("prompt starter must be created with NewPromptStarter")
+	}
+	if kind == "opencode" && request.StartOpenCodeServer {
+		launcher := s.openCodeServer
+		if launcher == nil {
+			launcher = nativeOpenCodePromptServerLauncher{runner: s.Host.Runner}
+		}
+		server, stop, startErr := launcher.Start(ctx, request.Argv[0], request.Directory)
+		if startErr != nil {
+			return PromptResult{State: PromptNotAttempted}, startErr
+		}
+		request.OpenCodeServer = server
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
+			defer cancel()
+			returnErr = errors.Join(returnErr, stop(stopCtx))
+		}()
 	}
 
 	var (
@@ -128,7 +149,7 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	if deliver == nil {
 		deliver = NewPromptHost(s.Host).Deliver
 	}
-	result, err := deliver(ctx, prompt, base.Target)
+	result, err = deliver(ctx, prompt, base.Target)
 	if err != nil {
 		if result.State == PromptNotAttempted {
 			return failBeforeSend(err)
@@ -196,6 +217,9 @@ func validatePromptStart(request PromptStartRequest) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	if request.StartOpenCodeServer && kind != "opencode" {
+		return nil, "", ErrPromptInvalid
+	}
 	if request.Directory == "" || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory || strings.ContainsRune(request.Directory, 0) {
 		return nil, "", ErrPromptInvalid
 	}
@@ -212,10 +236,15 @@ func validatePromptStart(request PromptStartRequest) ([]string, string, error) {
 			return nil, "", ErrPromptInvalid
 		}
 	case "opencode":
-		if err := validateOpenCodeServer(request.OpenCodeServer); err != nil {
-			return nil, "", err
+		if request.StartOpenCodeServer && request.OpenCodeServer != (OpenCodeServer{}) {
+			return nil, "", ErrPromptInvalid
 		}
-		if request.OpenCodeServer.Directory != request.Directory {
+		if !request.StartOpenCodeServer {
+			if err := validateOpenCodeServer(request.OpenCodeServer); err != nil {
+				return nil, "", err
+			}
+		}
+		if request.OpenCodeServer != (OpenCodeServer{}) && request.OpenCodeServer.Directory != request.Directory {
 			return nil, "", ErrPromptInvalid
 		}
 	}

@@ -104,7 +104,7 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedServiceAndExactPaneIdentity(t 
 
 	managed, err := launcher.Launch(ctx, ManagedCodexRequest{
 		Operation: ManagedNew, Origin: origin, Directory: directory,
-		Placement: sessionhost.NewTab, TabLabel: "managed-live", Policy: managedPolicy(),
+		Placement: sessionhost.NewTab, TabLabel: "managed-live", Policy: managedPolicy(), ExtraArgv: []string{"--search"},
 	})
 	if errors.Is(err, ErrManagedNarrow) {
 		t.Skip("live Herdr terminal is too narrow for Codex to render a complete session UUID; widen it and rerun")
@@ -113,7 +113,7 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedServiceAndExactPaneIdentity(t 
 		t.Fatal(err)
 	}
 	operations = append(operations, managed)
-	if !validCodexThreadID(managed.ThreadID) || managed.Agent.Session == nil || managed.Agent.Session.Value != managed.ThreadID || managed.Target.SessionName != sessionName || managed.Target.WorkspaceID != origin.WorkspaceID || managed.Service.State != CodexServiceReady {
+	if !validCodexThreadID(managed.ThreadID) || managed.Agent.Session == nil || managed.Agent.Session.Value != managed.ThreadID || managed.Target.SessionName != sessionName || managed.Target.WorkspaceID != origin.WorkspaceID || managed.Service.State != CodexServiceReady || len(managed.Argv) < 2 || managed.Argv[1] != "--search" {
 		t.Fatalf("managed=%+v", managed)
 	}
 	if err := makeLiveCodexSourcePersistent(ctx, launcher, managed); err != nil {
@@ -121,7 +121,7 @@ func TestManagedCodexLiveNewForkAndResumeUseSharedServiceAndExactPaneIdentity(t 
 	}
 	forked, err := launcher.Launch(ctx, ManagedCodexRequest{
 		Operation: ManagedFork, Origin: managed.Target.Origin, Source: managed.Agent, Directory: directory,
-		Placement: sessionhost.NewPane, Direction: "down", Policy: managedPolicy(),
+		Placement: sessionhost.NewPane, Direction: "down", InheritSourcePolicy: true,
 	})
 	if errors.Is(err, ErrManagedNarrow) {
 		t.Skip("live Herdr terminal is too narrow for Codex to render a complete fork session UUID; widen it and rerun")

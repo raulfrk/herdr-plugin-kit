@@ -177,6 +177,89 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 	}
 }
 
+func TestPromptLiveOwnedOpenCodeServerStopsAndConversationContinues(t *testing.T) {
+	if os.Getenv("HERDR_PLUGIN_KIT_PROMPT_LIVE") != "1" {
+		t.Skip("set HERDR_PLUGIN_KIT_PROMPT_LIVE=1 for the Herdr 0.8.2 supported-harness integration")
+	}
+	executable := os.Getenv("HERDR_PLUGIN_KIT_OPENCODE_BIN")
+	version, err := command.ExecRunner{}.Run(context.Background(), executable, []string{"--version"})
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable || err != nil || strings.TrimSpace(string(version.Stdout)) != SupportedOpenCodeVersion {
+		t.Fatalf("HERDR_PLUGIN_KIT_OPENCODE_BIN must name OpenCode %s: stdout=%q error=%v", SupportedOpenCodeVersion, version.Stdout, err)
+	}
+	configDirectory := os.Getenv("OPENCODE_CONFIG_DIR")
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if !filepath.IsAbs(configDirectory) || filepath.Clean(configDirectory) != configDirectory || !filepath.IsAbs(dataHome) || filepath.Clean(dataHome) != dataHome || os.Getenv("OPENCODE_TUI_CONFIG") != filepath.Join(configDirectory, "tui.jsonc") {
+		t.Fatal("owned OpenCode live test requires isolated absolute config/data paths and exact TUI config")
+	}
+	for _, relative := range []string{"herdr-tui-session.js", "tui.jsonc"} {
+		if info, statErr := os.Stat(filepath.Join(configDirectory, relative)); statErr != nil || !info.Mode().IsRegular() {
+			t.Fatalf("missing task OpenCode identity integration %s: %v", relative, statErr)
+		}
+	}
+	sessionName := os.Getenv("HERDR_PLUGIN_KIT_LIVE_SESSION")
+	if sessionName == "" {
+		t.Fatal("HERDR_PLUGIN_KIT_LIVE_SESSION must name the task-owned session")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	runner := command.ExecRunner{}
+	liveRunner := liveSessionRunner{Runner: runner, Session: sessionName}
+	directory := t.TempDir()
+	origin := createPromptLiveWorkspace(t, ctx, liveRunner, directory)
+	origin.SessionName = sessionName
+	host := Host{Runner: runner, Session: sessionName}
+	topology := sessionhost.Host{Runner: runner, Session: sessionName}
+	var createdSession string
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		_, workspaceErr := liveRunner.Run(cleanupCtx, "herdr", []string{"workspace", "close", origin.WorkspaceID})
+		if workspaceErr != nil {
+			t.Errorf("close owned-server workspace: %v", workspaceErr)
+		}
+		if createdSession == "" {
+			return
+		}
+		launcher := nativeOpenCodePromptServerLauncher{runner: runner}
+		server, stop, startErr := launcher.Start(cleanupCtx, executable, directory)
+		if startErr != nil {
+			t.Errorf("restart cleanup OpenCode server: %v", startErr)
+			return
+		}
+		if deleteErr := (nativeOpenCodePromptSessions{}).Delete(cleanupCtx, server, createdSession); deleteErr != nil {
+			t.Errorf("delete owned-server OpenCode session: %v", deleteErr)
+		}
+		if stopErr := stop(cleanupCtx); stopErr != nil {
+			t.Errorf("stop cleanup OpenCode server: %v", stopErr)
+		}
+	})
+	prompt, _ := PreparePrompt("Reply exactly HPK-API15-OWNED-SERVER")
+	started, err := NewPromptStarter(host).Start(ctx, prompt, PromptStartRequest{
+		Origin: origin, Argv: []string{executable}, Directory: directory,
+		Placement: sessionhost.NewTab, TabLabel: "api15-owned-opencode", ReadyTimeout: 45 * time.Second,
+		StartOpenCodeServer: true,
+	})
+	if err != nil || started.State != PromptAcknowledged || started.Agent.Session == nil {
+		t.Fatalf("owned-server start=%+v error=%v", started, err)
+	}
+	createdSession = started.Agent.Session.Value
+	before := awaitLivePromptResult(t, ctx, host, topology, started, "HPK-API15-OWNED-SERVER")
+	if err := readOpenCodePromptServerHealth(ctx, started.Target.OpenCodeServer.URL); err == nil {
+		t.Fatal("task-owned OpenCode server remained reachable after prompt")
+	}
+	second := "Reply exactly HPK-API15-AFTER-SERVER-STOP"
+	if result, promptErr := liveRunner.Run(ctx, "herdr", []string{"agent", "prompt", before.PaneID, second, "--wait", "--timeout", "45000"}); promptErr != nil {
+		t.Fatalf("prompt after owned server stop: %v: %s", promptErr, result.Stderr)
+	}
+	after, err := host.find(ctx, before.PaneID)
+	if err != nil || !sameImmutable(before, after) || after.Session == nil || after.Session.Value != createdSession {
+		t.Fatalf("conversation changed after owned server stop: before=%+v after=%+v error=%v", before, after, err)
+	}
+	if _, err := topology.VerifyForegroundProcess(ctx, started.Target.Created.Origin, directory, started.Target.Argv); err != nil {
+		t.Fatalf("OpenCode process drift after owned server stop: %v", err)
+	}
+}
+
 func createPromptLiveWorkspace(t *testing.T, ctx context.Context, runner command.Runner, directory string) sessionhost.Origin {
 	t.Helper()
 	created, err := runner.Run(ctx, "herdr", []string{"workspace", "create", "--cwd", directory, "--label", "hpk-api5-prompt-live", "--no-focus"})

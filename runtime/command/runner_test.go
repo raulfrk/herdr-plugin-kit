@@ -134,6 +134,16 @@ func TestRunnerSpecUsesLiteralCWDAndStdin(t *testing.T) {
 	}
 }
 
+func TestRunnerSpecObservesAndRetainsStdout(t *testing.T) {
+	var observed strings.Builder
+	result, err := (ExecRunner{}).RunSpec(context.Background(), Spec{
+		Executable: "/usr/bin/printf", Args: []string{"owned-listener\n"}, StdoutObserver: &observed,
+	})
+	if err != nil || string(result.Stdout) != "owned-listener\n" || observed.String() != "owned-listener\n" {
+		t.Fatalf("result=%+v observed=%q error=%v", result, observed.String(), err)
+	}
+}
+
 func TestPropertyBoundedBuffer(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		limit := rapid.IntRange(1, 256).Draw(t, "limit")

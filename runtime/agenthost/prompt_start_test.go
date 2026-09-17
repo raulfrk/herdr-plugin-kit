@@ -22,6 +22,28 @@ type fakeOpenCodePromptSessions struct {
 	deleteWait  time.Duration
 }
 
+type fakeOpenCodePromptServerLauncher struct {
+	server     OpenCodeServer
+	startErr   error
+	stopErr    error
+	starts     int
+	stops      int
+	executable string
+	directory  string
+}
+
+func (f *fakeOpenCodePromptServerLauncher) Start(_ context.Context, executable, directory string) (OpenCodeServer, func(context.Context) error, error) {
+	f.starts++
+	f.executable, f.directory = executable, directory
+	if f.startErr != nil {
+		return OpenCodeServer{}, nil, f.startErr
+	}
+	return f.server, func(context.Context) error {
+		f.stops++
+		return f.stopErr
+	}, nil
+}
+
 func (f *fakeOpenCodePromptSessions) Create(_ context.Context, server OpenCodeServer) (string, error) {
 	f.creates++
 	f.lastCreated = server
@@ -93,6 +115,74 @@ func TestPromptStarterOpenCodePrecreatesOwnedSessionAndInjectsOnlyItsID(t *testi
 	want := []string{"opencode", "--mini", "--session", "ses_created"}
 	if len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, want) {
 		t.Fatalf("launches=%+v", topology.requests)
+	}
+}
+
+func TestPromptStarterOwnsShortLivedOpenCodeServerButPreservesStartedTarget(t *testing.T) {
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	topology := &fakeTopology{created: created}
+	wire := validWireAgent(created.PaneID)
+	wire.Agent, wire.AgentStatus, wire.CWD, wire.Focused, wire.TabID = "opencode", "idle", "/tmp/project", false, created.TabID
+	wire.AgentSession = &wireSession{Source: "herdr:opencode", Agent: "opencode", Kind: "id", Value: "ses_created"}
+	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
+	server := &fakeOpenCodePromptServerLauncher{server: OpenCodeServer{URL: "http://127.0.0.1:49152", Directory: "/tmp/project"}}
+	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
+	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
+	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
+	}
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"/opt/opencode", "--mini"}, Directory: "/tmp/project", Placement: sessionhost.NewTab,
+		StartOpenCodeServer: true,
+	})
+	if err != nil || result.State != PromptAcknowledged || server.starts != 1 || server.stops != 1 || server.executable != "/opt/opencode" || server.directory != "/tmp/project" {
+		t.Fatalf("result=%+v server=%+v error=%v", result, server, err)
+	}
+	if sessions.lastCreated != server.server || sessions.deletes != 0 || len(topology.cleanupCalls) != 0 || result.Target.OpenCodeServer != server.server {
+		t.Fatalf("sessions=%+v cleanup=%+v target=%+v", sessions, topology.cleanupCalls, result.Target)
+	}
+}
+
+func TestPromptStarterOwnedOpenCodeServerFailureCreatesNothing(t *testing.T) {
+	topology := &fakeTopology{}
+	server := &fakeOpenCodePromptServerLauncher{startErr: errors.New("server unavailable")}
+	starter := NewPromptStarter(Host{Runner: &promptRunner{}})
+	starter.launcher, starter.openCodeServer = topology, server
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"opencode"}, Directory: "/tmp/project", Placement: sessionhost.NewTab,
+		StartOpenCodeServer: true,
+	})
+	if err == nil || result.State != PromptNotAttempted || server.starts != 1 || server.stops != 0 || len(topology.requests) != 0 {
+		t.Fatalf("result=%+v server=%+v launches=%+v error=%v", result, server, topology.requests, err)
+	}
+}
+
+func TestPromptStarterOwnedOpenCodeStopFailureKeepsAcknowledgedTarget(t *testing.T) {
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	topology := &fakeTopology{created: created}
+	wire := validWireAgent(created.PaneID)
+	wire.Agent, wire.AgentStatus, wire.CWD, wire.Focused, wire.TabID = "opencode", "idle", "/tmp/project", false, created.TabID
+	wire.AgentSession = &wireSession{Source: "herdr:opencode", Agent: "opencode", Kind: "id", Value: "ses_created"}
+	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
+	server := &fakeOpenCodePromptServerLauncher{server: OpenCodeServer{URL: "http://127.0.0.1:49152", Directory: "/tmp/project"}, stopErr: errors.New("stop failed")}
+	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
+	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
+	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
+	}
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"opencode"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, StartOpenCodeServer: true,
+	})
+	if err == nil || result.State != PromptAcknowledged || server.stops != 1 || sessions.deletes != 0 || len(topology.cleanupCalls) != 0 {
+		t.Fatalf("result=%+v server=%+v sessions=%+v cleanup=%+v error=%v", result, server, sessions, topology.cleanupCalls, err)
 	}
 }
 
@@ -211,6 +301,8 @@ func TestPromptStartRejectsOwnedSelectorsAndPromptArgumentsBeforeCreation(t *tes
 		{"OMP positional prompt", PromptStartRequest{Argv: []string{"omp", "hello"}, Directory: "/tmp/project", OMPStatusSocket: "/tmp/omp.sock"}},
 		{"OpenCode session", PromptStartRequest{Argv: []string{"opencode", "--session", "ses_other"}, Directory: "/tmp/project", OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"}}},
 		{"OpenCode prompt", PromptStartRequest{Argv: []string{"opencode", "--prompt", "hello"}, Directory: "/tmp/project", OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"}}},
+		{"owned server for OMP", PromptStartRequest{Argv: []string{"omp"}, Directory: "/tmp/project", StartOpenCodeServer: true}},
+		{"owned and external server", PromptStartRequest{Argv: []string{"opencode"}, Directory: "/tmp/project", StartOpenCodeServer: true, OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			topology := &fakeTopology{}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"time"
@@ -35,10 +36,11 @@ type Runner interface {
 // Spec is a literal process invocation with optional working directory and
 // standard input. It deliberately has no shell or environment override.
 type Spec struct {
-	Executable string
-	Args       []string
-	Dir        string
-	Stdin      []byte
+	Executable     string
+	Args           []string
+	Dir            string
+	Stdin          []byte
+	StdoutObserver io.Writer
 }
 
 type SpecRunner interface {
@@ -98,6 +100,9 @@ func (r ExecRunner) RunSpec(ctx context.Context, spec Spec) (Result, error) {
 	}
 	configureProcessGroup(cmd)
 	cmd.Stdout, cmd.Stderr = out, errOut
+	if spec.StdoutObserver != nil {
+		cmd.Stdout = io.MultiWriter(out, spec.StdoutObserver)
+	}
 	result := Result{ExitCode: -1}
 	if err := cmd.Start(); err != nil {
 		return result, &RunError{Kind: ErrorStart, Cause: err}

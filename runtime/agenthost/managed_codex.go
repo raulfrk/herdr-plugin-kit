@@ -44,17 +44,23 @@ type ManagedCodexPolicy struct {
 }
 
 type ManagedCodexRequest struct {
-	Operation          ManagedOperation
-	Origin             sessionhost.Origin
-	Directory          string
-	Placement          sessionhost.Placement
-	Direction          string
-	TabLabel           string
-	Focus              bool
-	Source             Agent
-	ThreadID           string
-	SourceArgv         []string
-	Policy             ManagedCodexPolicy
+	Operation  ManagedOperation
+	Origin     sessionhost.Origin
+	Directory  string
+	Placement  sessionhost.Placement
+	Direction  string
+	TabLabel   string
+	Focus      bool
+	Source     Agent
+	ThreadID   string
+	SourceArgv []string
+	Policy     ManagedCodexPolicy
+	// InheritSourcePolicy makes ManagedFork read and preserve the exact
+	// authoritative source policy instead of requiring a consumer to infer it.
+	InheritSourcePolicy bool
+	// ExtraArgv contains only validated, non-lifecycle Codex global options.
+	// Identity, endpoint, directory, selector, and policy options remain Kit-owned.
+	ExtraArgv          []string
 	ReadyTimeout       time.Duration
 	Prompt             *Prompt
 	resumeSourcePolicy *EffectiveCodexPolicy
@@ -151,13 +157,15 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	if err != nil {
 		return fail(fmt.Errorf("managed Codex verifier: %w", err), nil)
 	}
-	preflightCtx, preflightCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
-	preflight, err := verifier.Preflight(preflightCtx, request.Directory, request.Policy)
-	preflightCancel()
-	if err != nil {
-		return fail(fmt.Errorf("managed Codex preflight: %w", classifyManagedPolicyError(err)), verifier)
+	var preflight codexPreflight
+	if !request.InheritSourcePolicy {
+		preflightCtx, preflightCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
+		preflight, err = verifier.Preflight(preflightCtx, request.Directory, request.Policy)
+		preflightCancel()
+		if err != nil {
+			return fail(fmt.Errorf("managed Codex preflight: %w", classifyManagedPolicyError(err)), verifier)
+		}
 	}
-
 	var sourceBefore codexThreadIdentity
 	var sourceEffective EffectiveCodexPolicy
 	var sourceProcess sessionhost.ForegroundProcess
@@ -182,6 +190,12 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 		if err != nil {
 			return fail(fmt.Errorf("managed Codex source policy: %w", errors.Join(ErrManagedPolicyDrift, err)), verifier)
 		}
+		if request.InheritSourcePolicy {
+			request.Policy = ManagedCodexPolicy{
+				Model: sourceEffective.Model, ReasoningEffort: sourceEffective.ReasoningEffort,
+				ApprovalPolicy: sourceEffective.ApprovalPolicy, SandboxMode: sourceEffective.SandboxMode,
+			}
+		}
 		if sourceEffective.CWD != request.Source.CWD || sourceEffective.ApprovalPolicy != request.Policy.ApprovalPolicy || sourceEffective.SandboxMode != request.Policy.SandboxMode {
 			return fail(fmt.Errorf("managed Codex source policy: %w", ErrManagedPolicyDrift), verifier)
 		}
@@ -205,6 +219,14 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 		}
 		if sourceEffective.CWD != request.Directory || policyDrift {
 			return fail(fmt.Errorf("managed Codex resume policy: %w", ErrManagedPolicyDrift), verifier)
+		}
+	}
+	if request.InheritSourcePolicy {
+		preflightCtx, preflightCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
+		preflight, err = verifier.Preflight(preflightCtx, request.Directory, request.Policy)
+		preflightCancel()
+		if err != nil {
+			return fail(fmt.Errorf("managed Codex preflight: %w", classifyManagedPolicyError(err)), verifier)
 		}
 	}
 	if err := verifier.Arm(); err != nil {
@@ -476,7 +498,14 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 	if len(request.Directory) > maxPathBytes || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory || strings.ContainsRune(request.Directory, 0) {
 		return errors.New("managed Codex directory must be clean, absolute, and NUL-free")
 	}
-	if err := validateManagedPolicy(request.Policy); err != nil {
+	if request.InheritSourcePolicy {
+		if request.Operation != ManagedFork || request.Policy != (ManagedCodexPolicy{}) {
+			return errors.New("managed Codex source-policy inheritance is invalid")
+		}
+	} else if err := validateManagedPolicy(request.Policy); err != nil {
+		return err
+	}
+	if err := validateManagedExtraArgv(request.ExtraArgv); err != nil {
 		return err
 	}
 	if (request.resumeSourcePolicy == nil) != (request.resumeTargetPolicy == nil) {
@@ -514,7 +543,7 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 		}
 		return validateManagedPlacement(request)
 	case ManagedResume:
-		if !validManagedThreadID(request.ThreadID) || request.Source.PaneID != "" || request.Placement != "" || request.Direction != "" || request.TabLabel != "" || request.Focus {
+		if !validManagedThreadID(request.ThreadID) || request.Source.PaneID != "" || request.Placement != "" || request.Direction != "" || request.TabLabel != "" || request.Focus || len(request.ExtraArgv) != 0 {
 			return errors.New("managed Resume accepts only an existing shell pane and exact thread")
 		}
 		if err := validateManagedSourceArgv(request.SourceArgv); err != nil {
@@ -581,6 +610,43 @@ func validateManagedPolicy(policy ManagedCodexPolicy) error {
 	return nil
 }
 
+func validateManagedExtraArgv(argv []string) error {
+	if len(argv) > sessionhost.MaxArgv-16 {
+		return errors.New("managed Codex extra argv exceeds the argument limit")
+	}
+	seen := make(map[string]struct{}, len(argv))
+	for index := 0; index < len(argv); index++ {
+		name := argv[index]
+		if len(name) > sessionhost.MaxArgBytes || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+			return errors.New("managed Codex extra argv is invalid")
+		}
+		switch name {
+		case "--search", "--no-alt-screen":
+			if _, duplicate := seen[name]; duplicate {
+				return fmt.Errorf("managed Codex extra option %q is duplicated", name)
+			}
+			seen[name] = struct{}{}
+		case "--enable", "--disable":
+			if index+1 >= len(argv) {
+				return fmt.Errorf("managed Codex extra option %q requires a value", name)
+			}
+			value := argv[index+1]
+			if len(value) > sessionhost.MaxArgBytes || !managedToken.MatchString(value) {
+				return fmt.Errorf("managed Codex extra option %q has an invalid value", name)
+			}
+			key := "feature\x00" + value
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("managed Codex extra option %q is duplicated", name)
+			}
+			seen[key] = struct{}{}
+			index++
+		default:
+			return fmt.Errorf("managed Codex extra option %q is unsupported", name)
+		}
+	}
+	return nil
+}
+
 func composeManagedTUIArgv(request ManagedCodexRequest, socket, sourceID string) []string {
 	remote := "unix://" + socket
 	if request.Operation == ManagedResume {
@@ -591,6 +657,7 @@ func composeManagedTUIArgv(request ManagedCodexRequest, socket, sourceID string)
 	if request.Operation == ManagedFork {
 		args = append(args, "fork")
 	}
+	args = append(args, request.ExtraArgv...)
 	args = append(args,
 		"-m", policy.Model,
 		"-c", "model_reasoning_effort="+strconv.Quote(policy.ReasoningEffort),
