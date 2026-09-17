@@ -27,6 +27,10 @@ type PromptStartRequest struct {
 	// preserving the launched TUI conversation.
 	StartOpenCodeServer bool
 	CodexPolicy         ManagedCodexPolicy
+	// ObserveCodexPolicy allows an ordinary Codex launch to discover its
+	// model, reasoning effort, and missing conversation ID from one guarded
+	// /status response instead of requiring the consumer to predict them.
+	ObserveCodexPolicy bool
 }
 
 type PromptStarter struct {
@@ -105,7 +109,7 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 		if managed.Host.Runner == nil {
 			managed = NewManagedCodexLauncher(s.Host)
 		}
-		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedNew, Agent{}, request.Directory, request.CodexPolicy, request.ReadyTimeout)
+		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedNew, Agent{}, request.Directory, request.CodexPolicy, request.ObserveCodexPolicy, request.ReadyTimeout)
 		if err != nil {
 			return PromptResult{State: PromptNotAttempted}, err
 		}
@@ -135,8 +139,10 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	}
 
 	var agent Agent
+	var prepared ordinaryCodexPreparation
 	if binding != nil {
-		agent, err = binding.Finish(ctx, created, request.Directory, argv)
+		prepared, err = binding.Prepare(ctx, created, request.Directory, argv)
+		agent = prepared.Agent
 	} else {
 		agent, err = s.waitForAgent(ctx, created, kind, openCodeID, request.Directory, readyTimeout(request.ReadyTimeout))
 	}
@@ -145,6 +151,7 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	}
 	base.Agent = agent
 	base.Target.Agent = agent
+	base.Target.codexSessionPrefix = prepared.Prefix
 	deliver := s.deliver
 	if deliver == nil {
 		deliver = NewPromptHost(s.Host).Deliver
@@ -155,6 +162,15 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 			return failBeforeSend(err)
 		}
 		return result, err
+	}
+	if prepared.Prefix != "" {
+		bound, bindErr := binding.BindAfterPrompt(ctx, created, request.Directory, argv, prepared)
+		if bindErr != nil {
+			return result, fmt.Errorf("prompt Codex identity: %w", bindErr)
+		}
+		result.Agent = bound
+		result.Target.Agent = bound
+		result.Target.codexSessionPrefix = ""
 	}
 	if request.Focus {
 		focused, focusErr := s.Host.Focus(ctx, result.Agent)
@@ -213,7 +229,7 @@ func validatePromptStart(request PromptStartRequest) ([]string, string, error) {
 	if kind != "codex" && kind != "omp" && kind != "opencode" {
 		return nil, "", ErrUnsupportedFork
 	}
-	options, err := validateForkOptions(kind, request.Argv[1:])
+	options, err := validatePromptStartOptions(kind, request.Argv[1:], request.ObserveCodexPolicy)
 	if err != nil {
 		return nil, "", err
 	}
@@ -228,14 +244,24 @@ func validatePromptStart(request PromptStartRequest) ([]string, string, error) {
 	}
 	switch kind {
 	case "codex":
-		if err := validateManagedPolicy(request.CodexPolicy); err != nil {
+		if request.ObserveCodexPolicy {
+			if request.CodexPolicy != (ManagedCodexPolicy{}) {
+				return nil, "", ErrPromptInvalid
+			}
+		} else if err := validateManagedPolicy(request.CodexPolicy); err != nil {
 			return nil, "", err
 		}
 	case "omp":
+		if request.ObserveCodexPolicy {
+			return nil, "", ErrPromptInvalid
+		}
 		if request.OMPStatusSocket != "" && (!filepath.IsAbs(request.OMPStatusSocket) || filepath.Clean(request.OMPStatusSocket) != request.OMPStatusSocket || strings.ContainsRune(request.OMPStatusSocket, 0)) {
 			return nil, "", ErrPromptInvalid
 		}
 	case "opencode":
+		if request.ObserveCodexPolicy {
+			return nil, "", ErrPromptInvalid
+		}
 		if request.StartOpenCodeServer && request.OpenCodeServer != (OpenCodeServer{}) {
 			return nil, "", ErrPromptInvalid
 		}
@@ -249,4 +275,26 @@ func validatePromptStart(request PromptStartRequest) ([]string, string, error) {
 		}
 	}
 	return append([]string{request.Argv[0]}, options...), kind, nil
+}
+
+func validatePromptStartOptions(kind string, options []string, observeCodexPolicy bool) ([]string, error) {
+	if kind != "codex" {
+		return validateForkOptions(kind, options)
+	}
+	filtered := make([]string, 0, len(options))
+	yolo := false
+	for _, option := range options {
+		if option != "--yolo" {
+			filtered = append(filtered, option)
+			continue
+		}
+		if yolo || !observeCodexPolicy {
+			return nil, fmt.Errorf("prompt-start option %q is unsupported", option)
+		}
+		yolo = true
+	}
+	if _, err := validateForkOptions(kind, filtered); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), options...), nil
 }

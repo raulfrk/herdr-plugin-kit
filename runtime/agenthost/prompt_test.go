@@ -210,6 +210,30 @@ func TestDeliverPromptAcknowledgedExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestDeliverPromptAcceptsGuardedOrdinaryCodexPrefixExactlyOnce(t *testing.T) {
+	target, wire := validPromptTarget(t)
+	wire.AgentSession = nil
+	target.Agent = mustPublic(t, wire)
+	target.Argv = []string{"codex", "--yolo"}
+	target.CodexService = CodexServiceSnapshot{}
+	target.codexSessionPrefix = "01a09f5c-37cc-77f1-9409-e9aa070a"
+	caller := &recordedPromptCall{receipt: herdrapi.Receipt{State: herdrapi.RequestAcknowledged}, agent: wire}
+	host := NewPromptHost(Host{Runner: &promptRunner{agent: wire, argv: target.Argv}})
+	host.caller = caller
+	prompt, _ := PreparePrompt("hello")
+	result, err := host.Deliver(context.Background(), prompt, target)
+	if err != nil || result.State != PromptAcknowledged || result.Agent.Session != nil || caller.calls != 1 {
+		t.Fatalf("result=%+v calls=%d error=%v", result, caller.calls, err)
+	}
+	for _, prefix := range []string{"", "01a09f5c-37cc-77f1-9409-e9a", managedNewID} {
+		bad := target
+		bad.codexSessionPrefix = prefix
+		if validPromptCodexTarget(bad) {
+			t.Fatalf("accepted invalid unbound prefix %q", prefix)
+		}
+	}
+}
+
 func TestDeliverPromptUsesOneDirectSocketRequestWithExactBytes(t *testing.T) {
 	target, wire := validPromptTarget(t)
 	socket := filepath.Join(t.TempDir(), "herdr.sock")

@@ -268,7 +268,10 @@ func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
 	}}
 	managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
 	managed.service, managed.topology, managed.verifiers = service, topology, fakeManagedVerifierFactory{verifier}
-	managed.discover = func(_ context.Context, target sessionhost.Origin, cwd string, _ []string, _ CodexServiceSnapshot, _ ManagedCodexPolicy) (Agent, string, error) {
+	managed.discover = func(_ context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
+		if !reflect.DeepEqual(argv, []string{"codex", "--yolo"}) || service != (CodexServiceSnapshot{}) || policy != (ManagedCodexPolicy{}) {
+			t.Fatalf("argv=%q service=%+v policy=%+v", argv, service, policy)
+		}
 		agent := managedAgent(target, cwd, managedNewID, false)
 		agent.Session = nil
 		return agent, managedNewID, nil
@@ -281,13 +284,91 @@ func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
 	prompt, _ := PreparePrompt("hello")
 	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
 		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
-		Argv:   []string{"codex"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, CodexPolicy: managedPolicy(),
+		Argv:   []string{"codex", "--yolo"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, ObserveCodexPolicy: true,
 	})
 	if err != nil || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || service.callCount() != 0 || verifier.confirmID != "" || result.Target.CodexService != (CodexServiceSnapshot{}) {
 		t.Fatalf("result=%+v service=%d verifier=%+v error=%v", result, service.callCount(), verifier, err)
 	}
-	if len(topology.launches) != 1 || !reflect.DeepEqual(topology.launches[0].Argv, []string{"codex"}) || len(topology.cleanups) != 0 || len(verifier.deleted) != 0 {
+	if len(topology.launches) != 1 || !reflect.DeepEqual(topology.launches[0].Argv, []string{"codex", "--yolo"}) || len(topology.cleanups) != 0 || len(verifier.deleted) != 0 {
 		t.Fatalf("launches=%v cleanup=%v deleted=%v", topology.launches, topology.cleanups, verifier.deleted)
+	}
+}
+
+func TestPromptStarterResolvesObservedCodexPrefixAfterOnePrompt(t *testing.T) {
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(created.Origin, "/tmp/project", "unused", false)
+	unbound.Session = nil
+	bound := managedAgent(created.Origin, "/tmp/project", managedNewID, false)
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, unbound), managedAgentResult(t, unbound), {},
+		managedAgentResult(t, bound), managedAgentResult(t, bound),
+	}}
+	topology := &fakeManagedTopology{target: created}
+	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
+	resolved := codexThreadIdentity{
+		ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+	}
+	verifier := &fakeManagedVerifier{listed: []codexThreadIdentity{resolved}, read: []codexThreadIdentity{resolved}}
+	managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	managed.topology, managed.service, managed.verifiers = topology, service, fakeManagedVerifierFactory{verifier}
+	managed.discoverObserved = func(_ context.Context, target sessionhost.Origin, cwd string, argv []string, _ CodexServiceSnapshot, _ ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+		if target != created.Origin || cwd != "/tmp/project" || !reflect.DeepEqual(argv, []string{"codex", "--yolo"}) {
+			t.Fatalf("target=%+v cwd=%q argv=%q", target, cwd, argv)
+		}
+		return unbound, managedStatusObservation{
+			identity: "01a09f5c-37cc-77f1-9409-e9aa070a",
+			policy:   ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium"},
+		}, nil
+	}
+	deliveries := 0
+	starter := NewPromptStarter(Host{Runner: runner, Session: "named"})
+	starter.launcher, starter.managed = topology, managed
+	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+		deliveries++
+		if target.Agent.Session != nil || target.codexSessionPrefix != "01a09f5c-37cc-77f1-9409-e9aa070a" {
+			t.Fatalf("prompt target=%+v", target)
+		}
+		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
+	}
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"codex", "--yolo"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, ObserveCodexPolicy: true,
+	})
+	if err != nil || deliveries != 1 || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || result.Target.codexSessionPrefix != "" {
+		t.Fatalf("result=%+v deliveries=%d error=%v", result, deliveries, err)
+	}
+	if service.callCount() != 1 || verifier.closed != 1 || len(topology.cleanups) != 0 {
+		t.Fatalf("service=%d closed=%d cleanup=%v", service.callCount(), verifier.closed, topology.cleanups)
+	}
+}
+
+func TestPromptStarterKeepsAcknowledgedTargetWhenPrefixResolutionFails(t *testing.T) {
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(created.Origin, "/tmp/project", "unused", false)
+	unbound.Session = nil
+	runner := &scriptedRunner{results: []command.Result{managedAgentResult(t, unbound)}}
+	topology := &fakeManagedTopology{target: created}
+	verifier := &fakeManagedVerifier{listErr: errors.New("list failed")}
+	managed := NewManagedCodexLauncher(Host{Runner: runner})
+	managed.topology = topology
+	managed.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	managed.verifiers = fakeManagedVerifierFactory{verifier}
+	managed.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+		return unbound, managedStatusObservation{identity: "01a09f5c-37cc-77f1-9409-e9aa070a", policy: ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}}, nil
+	}
+	starter := NewPromptStarter(Host{Runner: runner})
+	starter.launcher, starter.managed = topology, managed
+	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
+	}
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"codex", "--yolo"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, ObserveCodexPolicy: true,
+	})
+	if err == nil || result.State != PromptAcknowledged || len(topology.cleanups) != 0 || verifier.closed != 1 {
+		t.Fatalf("result=%+v cleanup=%v closed=%d error=%v", result, topology.cleanups, verifier.closed, err)
 	}
 }
 
@@ -298,7 +379,11 @@ func TestPromptStartRejectsOwnedSelectorsAndPromptArgumentsBeforeCreation(t *tes
 	}{
 		{"Codex remote", PromptStartRequest{Argv: []string{"codex", "--remote", "unix:///tmp/socket"}, Directory: "/tmp/project", CodexPolicy: managedPolicy()}},
 		{"Codex subcommand", PromptStartRequest{Argv: []string{"codex", "resume", managedNewID}, Directory: "/tmp/project", CodexPolicy: managedPolicy()}},
+		{"Codex observed plus explicit policy", PromptStartRequest{Argv: []string{"codex"}, Directory: "/tmp/project", ObserveCodexPolicy: true, CodexPolicy: managedPolicy()}},
+		{"Codex yolo without observed policy", PromptStartRequest{Argv: []string{"codex", "--yolo"}, Directory: "/tmp/project", CodexPolicy: managedPolicy()}},
+		{"Codex duplicate yolo", PromptStartRequest{Argv: []string{"codex", "--yolo", "--yolo"}, Directory: "/tmp/project", ObserveCodexPolicy: true}},
 		{"OMP positional prompt", PromptStartRequest{Argv: []string{"omp", "hello"}, Directory: "/tmp/project", OMPStatusSocket: "/tmp/omp.sock"}},
+		{"observed policy for OMP", PromptStartRequest{Argv: []string{"omp"}, Directory: "/tmp/project", OMPStatusSocket: "/tmp/omp.sock", ObserveCodexPolicy: true}},
 		{"OpenCode session", PromptStartRequest{Argv: []string{"opencode", "--session", "ses_other"}, Directory: "/tmp/project", OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"}}},
 		{"OpenCode prompt", PromptStartRequest{Argv: []string{"opencode", "--prompt", "hello"}, Directory: "/tmp/project", OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"}}},
 		{"owned server for OMP", PromptStartRequest{Argv: []string{"omp"}, Directory: "/tmp/project", StartOpenCodeServer: true}},

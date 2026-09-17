@@ -26,10 +26,21 @@ var (
 	ErrManagedNarrow   = errors.New("managed Codex status is incomplete; widen the pane and retry")
 	managedUUID        = regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 	managedSessionID   = regexp.MustCompile(`(?m)Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
+	managedSessionPart = regexp.MustCompile(`(?m)^\s*│?\s*Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
 	managedForkedID    = regexp.MustCompile(`(?m)Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
+	managedForkedPart  = regexp.MustCompile(`(?m)^\s*│?\s*Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
 	managedANSI        = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	managedStatusCmd   = regexp.MustCompile(`(?m)^(?:›[ \t]+)?/status[ \t]*$`)
+	managedStatusModel = regexp.MustCompile(`Model:([A-Za-z0-9][A-Za-z0-9._:/-]*)\(reasoning([A-Za-z0-9][A-Za-z0-9._-]*)(?:,|\))`)
+	managedTitlePart   = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})(?:\.\.\.)?$`)
 )
+
+type managedStatusObservation struct {
+	identity         string
+	forkedFromPrefix string
+	policy           ManagedCodexPolicy
+	fromStatus       bool
+}
 
 func (l ManagedCodexLauncher) waitForProcess(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, timeout time.Duration) (sessionhost.ForegroundProcess, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -49,6 +60,11 @@ func (l ManagedCodexLauncher) waitForProcess(ctx context.Context, target session
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
+	agent, observed, err := l.discoverManagedIdentityObservation(ctx, target, cwd, argv, service, policy, false)
+	return agent, observed.identity, err
+}
+
+func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
 	for {
 		wire, agent, err := l.readManagedAgent(ctx, target, cwd)
 		if err != nil {
@@ -57,33 +73,33 @@ func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, targe
 			// pane-bound interval as unsettled; process or target drift still
 			// fails immediately and no terminal input is sent.
 			if _, processErr := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); processErr != nil {
-				return Agent{}, "", processErr
+				return Agent{}, managedStatusObservation{}, processErr
 			}
 			if waitErr := waitManaged(ctx, 25*time.Millisecond); waitErr != nil {
-				return Agent{}, "", errors.Join(ErrManagedStale, err, waitErr)
+				return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedStale, err, waitErr)
 			}
 			continue
 		}
 		if wire.Focused || wire.LaunchPending || !managedPaneQuiescent(wire) {
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-				return Agent{}, "", errors.Join(ErrManagedPaneBusy, err)
+				return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 			}
 			continue
 		}
 		if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if agent.Session != nil {
 			if !validManagedSession(agent.Session) {
-				return Agent{}, "", ErrManagedStale
+				return Agent{}, managedStatusObservation{}, ErrManagedStale
 			}
 			visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
 			if err != nil {
-				return Agent{}, "", err
+				return Agent{}, managedStatusObservation{}, err
 			}
 			if !emptyCodexComposer(visible) {
 				if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-					return Agent{}, "", errors.Join(ErrManagedPaneBusy, err)
+					return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 				}
 				continue
 			}
@@ -92,33 +108,33 @@ func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, targe
 				if err == nil {
 					err = ErrManagedPaneBusy
 				}
-				return Agent{}, "", err
+				return Agent{}, managedStatusObservation{}, err
 			}
 			if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
-				return Agent{}, "", err
+				return Agent{}, managedStatusObservation{}, err
 			}
 			visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
 			if err != nil || !emptyCodexComposer(visible) {
 				if err == nil {
 					err = ErrManagedPaneBusy
 				}
-				return Agent{}, "", err
+				return Agent{}, managedStatusObservation{}, err
 			}
-			return check, check.Session.Value, nil
+			return check, managedStatusObservation{identity: check.Session.Value, policy: policy}, nil
 		}
 		visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
 		if err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if !emptyCodexComposer(visible) {
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-				return Agent{}, "", errors.Join(ErrManagedPaneBusy, err)
+				return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 			}
 			continue
 		}
 		before, err := l.readFullPaneHistory(ctx, target)
 		if err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		// Re-read every guard immediately before the first byte of input.
 		check, checkedAgent, err := l.readManagedAgent(ctx, target, cwd)
@@ -126,37 +142,54 @@ func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, targe
 			if err == nil {
 				err = ErrManagedPaneBusy
 			}
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if !sameImmutable(agent, checkedAgent) || agent.Status != checkedAgent.Status || agent.Revision != checkedAgent.Revision || agent.StateChangeSeq != checkedAgent.StateChangeSeq {
-			return Agent{}, "", ErrManagedStale
+			return Agent{}, managedStatusObservation{}, ErrManagedStale
 		}
 		if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
 		if err != nil || !emptyCodexComposer(visible) {
 			if err == nil {
 				err = ErrManagedPaneBusy
 			}
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if err := l.runHerdr(ctx, "pane", "send-text", target.PaneID, "/status"); err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if err := l.awaitStatusDraft(ctx, target, cwd, argv, checkedAgent); err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
 		if err := l.runHerdr(ctx, "pane", "send-keys", target.PaneID, "enter"); err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
 		}
-		threadID, err := l.awaitFreshStatus(ctx, target, before, cwd, service, policy)
+		titlePrefix := ""
+		if allowPrefix {
+			titlePrefix = managedWireThreadPrefix(check)
+		}
+		observed, err := l.awaitFreshStatusObservation(ctx, target, before, cwd, service, policy, allowPrefix, titlePrefix)
 		if err != nil {
-			return Agent{}, "", err
+			return Agent{}, managedStatusObservation{}, err
+		}
+		if allowPrefix && validManagedThreadPrefix(observed.identity) {
+			finalWire, finalAgent, err := l.readManagedAgent(ctx, target, cwd)
+			finalPrefix := managedWireThreadPrefix(finalWire)
+			if err != nil || finalWire.Focused || finalWire.LaunchPending || !managedPaneQuiescent(finalWire) || finalAgent.Session != nil || !sameImmutable(checkedAgent, finalAgent) || finalPrefix == "" || !(strings.HasPrefix(finalPrefix, observed.identity) || strings.HasPrefix(observed.identity, finalPrefix)) {
+				if err == nil {
+					err = ErrManagedStale
+				}
+				return Agent{}, managedStatusObservation{}, err
+			}
+			if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
+				return Agent{}, managedStatusObservation{}, err
+			}
 		}
 		// The App Server must validate this observed ID before Launch reports it
 		// to Herdr. Return the still-unregistered pane observation here.
-		return checkedAgent, threadID, nil
+		return checkedAgent, observed, nil
 	}
 }
 
@@ -248,11 +281,16 @@ func exactCodexSingleLineDraft(text, want string) bool {
 		// remains ambiguous and therefore fails closed.
 		menu := strings.Join(strings.Fields(strings.Join(plainTail, " ")), " ")
 		rawMenu := strings.Join(rawTail, "\n")
-		if want != "/status" || menu != "/status show current session configuration and token usage /statusline configure which items appear in the status line" {
+		fullMenu := "/status show current session configuration and token usage /statusline configure which items appear in the status line"
+		compactMenu := "/status show current session configuration and token usage"
+		if want != "/status" || menu != fullMenu && menu != compactMenu {
 			return false
 		}
 		if strings.Contains(rawMenu, "\x1b[1m\x1b[38;5;6m/status") {
 			return true
+		}
+		if menu == compactMenu {
+			return false
 		}
 		return len(rawTail) == 2 &&
 			!strings.ContainsRune(rawTail[0], '\x1b') &&
@@ -288,6 +326,22 @@ func validManagedSession(session *SessionRef) bool {
 
 func validManagedThreadID(id string) bool {
 	return id != "" && managedUUID.FindString(id) == id
+}
+
+func validManagedThreadPrefix(prefix string) bool {
+	if prefix == "" || validManagedThreadID(prefix) || managedSessionPart.FindStringSubmatch("Session: "+prefix) == nil {
+		return false
+	}
+	hex := strings.ReplaceAll(prefix, "-", "")
+	return len(hex) >= 24 && len(hex) < 32
+}
+
+func managedWireThreadPrefix(wire wireAgent) string {
+	match := managedTitlePart.FindStringSubmatch(wire.TerminalTitleStripped)
+	if len(match) != 2 || !validManagedThreadPrefix(match[1]) {
+		return ""
+	}
+	return match[1]
 }
 
 func (l ManagedCodexLauncher) readPaneExtent(ctx context.Context, target sessionhost.Origin) (int, error) {
@@ -365,34 +419,50 @@ func (l ManagedCodexLauncher) runHerdr(ctx context.Context, args ...string) erro
 }
 
 func (l ManagedCodexLauncher) awaitFreshStatus(ctx context.Context, target sessionhost.Origin, before string, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (string, error) {
+	observed, err := l.awaitFreshStatusObservation(ctx, target, before, cwd, service, policy, false, "")
+	return observed.identity, err
+}
+
+func (l ManagedCodexLauncher) awaitFreshStatusObservation(ctx context.Context, target sessionhost.Origin, before string, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string) (managedStatusObservation, error) {
 	beforeCommands := managedStatusCmd.FindAllStringIndex(strings.ReplaceAll(before, "\r\n", "\n"), -1)
+	incomplete := false
 	for {
 		text, err := l.readFullPaneHistory(ctx, target)
 		if err != nil {
-			return "", err
+			return managedStatusObservation{}, err
 		}
 		normalized := strings.ReplaceAll(text, "\r\n", "\n")
 		commands := managedStatusCmd.FindAllStringIndex(normalized, -1)
 		if len(commands) > len(beforeCommands)+1 {
-			return "", ErrManagedAmbiguous
+			return managedStatusObservation{}, ErrManagedAmbiguous
 		}
 		if len(commands) == len(beforeCommands)+1 {
 			fresh := "/status" + normalized[commands[len(commands)-1][1]:]
-			threadID, err := parseManagedStatus(fresh, cwd, service, policy)
+			observed, err := parseManagedStatusObservation(fresh, cwd, service, policy, allowPrefix, fallbackPrefix)
 			if err != nil {
-				return "", err
-			}
-			visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-			if err != nil || !emptyCodexComposer(visible) {
-				if err == nil {
-					err = ErrManagedStale
+				// The submitted command is visible before Codex finishes drawing
+				// the status block. Wait only while no Session field has appeared;
+				// once it appears, malformed or ambiguous content fails closed.
+				if !errors.Is(err, ErrManagedNarrow) || strings.Contains(fresh, "Session:") {
+					return managedStatusObservation{}, err
 				}
-				return "", err
+				incomplete = true
+			} else {
+				visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+				if err != nil || !emptyCodexComposer(visible) {
+					if err == nil {
+						err = ErrManagedStale
+					}
+					return managedStatusObservation{}, err
+				}
+				return observed, nil
 			}
-			return threadID, nil
 		}
 		if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-			return "", errors.Join(ErrManagedStale, err)
+			if incomplete {
+				return managedStatusObservation{}, errors.Join(ErrManagedNarrow, err)
+			}
+			return managedStatusObservation{}, errors.Join(ErrManagedStale, err)
 		}
 	}
 }
@@ -455,26 +525,53 @@ func codexComposer(text string) (string, bool) {
 }
 
 func parseManagedStatus(text, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (string, error) {
+	observed, err := parseManagedStatusObservation(text, cwd, service, policy, false, "")
+	return observed.identity, err
+}
+
+func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string) (managedStatusObservation, error) {
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
 	marker := strings.LastIndex(normalized, "\n/status\n")
 	if marker < 0 && strings.HasPrefix(normalized, "/status\n") {
 		marker = 0
 	}
 	if marker < 0 {
-		return "", ErrManagedNarrow
+		return managedStatusObservation{}, ErrManagedNarrow
 	}
 	block := normalized[marker:]
 	sessions := managedSessionID.FindAllStringSubmatch(block, -1)
+	partialSessions := managedSessionPart.FindAllStringSubmatch(block, -1)
 	if len(sessions) > 1 {
-		return "", ErrManagedAmbiguous
+		return managedStatusObservation{}, ErrManagedAmbiguous
 	}
-	if len(sessions) != 1 || !validCodexThreadID(sessions[0][1]) {
-		return "", ErrManagedNarrow
+	identity := ""
+	if len(sessions) == 1 && validCodexThreadID(sessions[0][1]) {
+		identity = sessions[0][1]
+	} else if allowPrefix && len(partialSessions) == 1 && len(strings.ReplaceAll(partialSessions[0][1], "-", "")) >= 24 {
+		identity = partialSessions[0][1]
+	} else if allowPrefix && len(partialSessions) == 0 && validManagedThreadPrefix(fallbackPrefix) && strings.Contains(block, "╰") && strings.Contains(block, "╯") {
+		identity = fallbackPrefix
+	} else {
+		return managedStatusObservation{}, ErrManagedNarrow
 	}
-	threadID := sessions[0][1]
 	forked := managedForkedID.FindAllStringSubmatch(block, -1)
-	if len(forked) > 1 || len(managedUUID.FindAllString(block, -1)) != 1+len(forked) {
-		return "", ErrManagedAmbiguous
+	partialForked := managedForkedPart.FindAllStringSubmatch(block, -1)
+	if len(partialForked) > 1 {
+		return managedStatusObservation{}, ErrManagedAmbiguous
+	}
+	forkedFromPrefix := ""
+	if len(partialForked) == 1 {
+		forkedFromPrefix = partialForked[0][1]
+	}
+	wantUUIDs := len(forked)
+	if validManagedThreadID(identity) {
+		wantUUIDs++
+	}
+	if len(partialSessions) > 1 || len(partialSessions) == 0 && identity != fallbackPrefix || len(forked) > 1 || len(managedUUID.FindAllString(block, -1)) != wantUUIDs {
+		return managedStatusObservation{}, ErrManagedAmbiguous
+	}
+	if fallbackPrefix != "" && !(strings.HasPrefix(identity, fallbackPrefix) || strings.HasPrefix(fallbackPrefix, identity)) {
+		return managedStatusObservation{}, ErrManagedStale
 	}
 	compact := strings.Map(func(r rune) rune {
 		if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '│' || r == '╭' || r == '╮' || r == '╰' || r == '╯' || r == '─' {
@@ -484,20 +581,47 @@ func parseManagedStatus(text, cwd string, service CodexServiceSnapshot, policy M
 	}, block)
 	if service == (CodexServiceSnapshot{}) {
 		if strings.Contains(compact, "Remote:") {
-			return "", ErrManagedStale
+			return managedStatusObservation{}, ErrManagedStale
 		}
 	} else if !validManagedServiceSnapshot(service) || !strings.Contains(compact, "Remote:unix://"+service.SocketPath+"(v"+SupportedCodexVersion+")") {
-		return "", ErrManagedNarrow
+		return managedStatusObservation{}, ErrManagedNarrow
 	}
 	displayCWD := cwd
 	if home, err := os.UserHomeDir(); err == nil && (cwd == home || strings.HasPrefix(cwd, home+string(filepath.Separator))) {
 		displayCWD = "~" + strings.TrimPrefix(cwd, home)
 	}
 	if !strings.Contains(compact, "OpenAICodex(v"+SupportedCodexVersion+")") ||
-		!strings.Contains(compact, "Model:"+policy.Model+"(reasoning"+policy.ReasoningEffort) ||
-		!strings.Contains(compact, "Directory:"+displayCWD) ||
-		!strings.Contains(compact, "Session:"+threadID) {
-		return "", ErrManagedNarrow
+		managedStatusField(block, "Directory") != displayCWD {
+		return managedStatusObservation{}, ErrManagedNarrow
 	}
-	return threadID, nil
+	if len(partialSessions) == 1 && !strings.Contains(compact, "Session:"+identity) {
+		return managedStatusObservation{}, ErrManagedNarrow
+	}
+	models := managedStatusModel.FindAllStringSubmatch(compact, -1)
+	if len(models) != 1 {
+		return managedStatusObservation{}, ErrManagedNarrow
+	}
+	observedPolicy := ManagedCodexPolicy{Model: models[0][1], ReasoningEffort: models[0][2]}
+	if policy != (ManagedCodexPolicy{}) && (observedPolicy.Model != policy.Model || observedPolicy.ReasoningEffort != policy.ReasoningEffort) {
+		return managedStatusObservation{}, ErrManagedNarrow
+	}
+	return managedStatusObservation{identity: identity, forkedFromPrefix: forkedFromPrefix, policy: observedPolicy, fromStatus: true}, nil
+}
+
+func managedStatusField(block, label string) string {
+	prefix := label + ":"
+	value := ""
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(managedANSI.ReplaceAllString(line, ""))
+		line = strings.TrimSpace(strings.TrimPrefix(line, "│"))
+		line = strings.TrimSpace(strings.TrimSuffix(line, "│"))
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if value != "" {
+			return ""
+		}
+		value = strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	}
+	return value
 }

@@ -18,14 +18,26 @@ daemon must be retired at an explicit maintenance checkpoint before migration
 is complete; installing a second socket alone does not prevent native automatic
 attachment. The Kit does not silently stop that daemon or migrate active clients.
 
-For prompt delivery, an ordinary `PromptTarget` has a zero `CodexService`
-snapshot. Its exact pane/process, full hook or guarded-status conversation ID,
-and empty composer authorize one submission. A remote target requires a validated
-service snapshot matching its explicit socket as well as those pane guards.
-An ordinary zero-turn conversation need not already exist in shared-server
-storage; cleanup closes only the created topology, never deletes the conversation
-through an unrelated server. Native Fork uses the exact source ID in literal
-argv and requires a distinct child ID and unchanged source pane/process.
+For prompt delivery, an ordinary target has a zero `CodexService` snapshot.
+Its exact pane/process, empty composer, and full Herdr hook identity authorize
+one submission without `/status`. When a new zero-turn Codex has no full ID,
+the Kit may capture a guarded UUID prefix containing at least 96 bits from the
+same pane, submit the requested prompt exactly once, and then query this shared
+App Server for CLI conversations. It registers an identity only when exactly
+one full UUID matches that prefix, CWD, model, reasoning effort, and expected
+parent. Zero or multiple matches fail without retrying the prompt or replacing
+the conversation. The temporary prefix is internal and cannot be supplied by a
+consumer.
+
+A remote target requires a validated service snapshot matching its explicit
+socket as well as those pane guards. An ordinary zero-turn conversation need
+not already exist in shared-server storage before its first prompt; cleanup
+closes only the created topology, never deletes the conversation through an
+unrelated server. Native Fork uses the exact source ID in literal argv and
+requires the persisted child to have that exact parent: before prompt delivery
+when the full child ID is available, or after the one requested prompt when
+only a clipped child prefix is available. The source pane/process must remain
+unchanged before delivery and after binding.
 
 ## Installation and health
 

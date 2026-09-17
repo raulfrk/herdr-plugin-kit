@@ -125,7 +125,7 @@ func TestManagedCodexPromptLiveNewAndForkUseSharedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := beginOrdinaryCodexBinding(ctx, launcher, ManagedNew, Agent{}, directory, managedPolicy(), 30*time.Second)
+	binding, err := beginOrdinaryCodexBinding(ctx, launcher, ManagedNew, Agent{}, directory, managedPolicy(), false, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

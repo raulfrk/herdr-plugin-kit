@@ -104,7 +104,7 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		if managed.Host.Runner == nil {
 			managed = NewManagedCodexLauncher(f.Host)
 		}
-		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedFork, request.Source, request.Source.CWD, request.CodexPolicy, request.ReadyTimeout)
+		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedFork, request.Source, request.Source.CWD, request.CodexPolicy, false, request.ReadyTimeout)
 		if err != nil {
 			return ForkResult{}, fmt.Errorf("fork Codex identity: %w", err)
 		}
@@ -135,9 +135,13 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			return fail(fmt.Errorf("fork OMP status address: %w", err))
 		}
 	}
-	var child Agent
+	var (
+		child         Agent
+		codexPrepared ordinaryCodexPreparation
+	)
 	if binding != nil {
-		child, err = binding.Finish(ctx, created, request.Source.CWD, argv)
+		codexPrepared, err = binding.Prepare(ctx, created, request.Source.CWD, argv)
+		child = codexPrepared.Agent
 	} else {
 		child, err = f.waitForChild(ctx, created, request.Source, kind, readyTimeout(request.ReadyTimeout))
 	}
@@ -157,6 +161,7 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		promptTarget := PromptTarget{
 			Created: created, Agent: child, Directory: request.Source.CWD, Argv: argv,
 			Source: &after, OMPStatusSocket: ompStatusSocket, OpenCodeServer: request.OpenCodeServer,
+			codexSessionPrefix: codexPrepared.Prefix,
 		}
 		promptResult, promptErr := deliver(ctx, *request.Prompt, promptTarget)
 		result.Prompt = promptResult
@@ -167,6 +172,16 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			return result, promptErr
 		}
 		child, result.Child = promptResult.Agent, promptResult.Agent
+		if binding != nil && codexPrepared.Prefix != "" {
+			child, err = binding.BindAfterPrompt(ctx, created, request.Source.CWD, argv, codexPrepared)
+			if err != nil {
+				return result, fmt.Errorf("fork Codex identity: %w", err)
+			}
+			result.Child = child
+			result.Prompt.Agent = child
+			result.Prompt.Target.Agent = child
+			result.Prompt.Target.codexSessionPrefix = ""
+		}
 	}
 	if request.Focus {
 		child, err = f.Host.Focus(ctx, child)

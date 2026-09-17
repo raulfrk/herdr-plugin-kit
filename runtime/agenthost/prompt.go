@@ -58,6 +58,9 @@ type PromptTarget struct {
 	Source          *Agent
 	OMPStatusSocket string
 	OpenCodeServer  OpenCodeServer
+	// codexSessionPrefix is a pane-observed UUID prefix used only while an
+	// ordinary first turn is being delivered before the full ID is persisted.
+	codexSessionPrefix string
 	// CodexService is required for explicit --remote Codex argv and must be
 	// zero for an ordinary embedded Codex target.
 	CodexService CodexServiceSnapshot
@@ -173,7 +176,7 @@ func (h PromptHost) Deliver(ctx context.Context, prompt Prompt, target PromptTar
 		return result, ErrPromptOutcomeUnknown
 	}
 	acknowledged.SessionName = h.Host.Session
-	if !sameImmutable(final, acknowledged) || acknowledged.CWD != final.CWD || acknowledged.Focused {
+	if !samePromptAcknowledgement(final, acknowledged, target.codexSessionPrefix) || acknowledged.CWD != final.CWD || acknowledged.Focused {
 		result.State = CreatedPromptOutcomeUnknown
 		return result, ErrPromptOutcomeUnknown
 	}
@@ -183,7 +186,7 @@ func (h PromptHost) Deliver(ctx context.Context, prompt Prompt, target PromptTar
 }
 
 func (h PromptHost) validateTarget(target PromptTarget) error {
-	if h.Host.Runner == nil || validateTarget(target.Agent) != nil || target.Agent.Session == nil || target.Agent.SessionName != h.Host.Session || target.Agent.Focused || !promptReadyStatus(target.Agent.Status) {
+	if h.Host.Runner == nil || validateTarget(target.Agent) != nil || target.Agent.SessionName != h.Host.Session || target.Agent.Focused || !promptReadyStatus(target.Agent.Status) {
 		return ErrPromptStale
 	}
 	if target.Created.Origin != (sessionhost.Origin{
@@ -311,7 +314,10 @@ func codexRemoteArgv(argv []string) bool {
 }
 
 func validPromptCodexTarget(target PromptTarget) bool {
-	if !validManagedSession(target.Agent.Session) {
+	if target.Agent.Session == nil {
+		return validManagedThreadPrefix(target.codexSessionPrefix) && !codexRemoteArgv(target.Argv) && target.CodexService == (CodexServiceSnapshot{})
+	}
+	if target.codexSessionPrefix != "" || !validManagedSession(target.Agent.Session) {
 		return false
 	}
 	if codexRemoteArgv(target.Argv) {
@@ -339,6 +345,18 @@ func validPromptCodexTarget(target PromptTarget) bool {
 		return count == 1
 	}
 	return target.CodexService == (CodexServiceSnapshot{})
+}
+
+func samePromptAcknowledgement(before, after Agent, prefix string) bool {
+	if prefix == "" {
+		return sameImmutable(before, after)
+	}
+	expected := before
+	expected.Session = after.Session
+	if !sameImmutable(expected, after) {
+		return false
+	}
+	return after.Session == nil || validManagedSession(after.Session) && strings.HasPrefix(after.Session.Value, prefix)
 }
 
 func emptyOMPComposer(text string) bool {

@@ -53,6 +53,9 @@ type fakeManagedVerifier struct {
 	confirm      codexThreadIdentity
 	confirmErr   error
 	read         []codexThreadIdentity
+	listed       []codexThreadIdentity
+	listErr      error
+	listCalls    int
 	recheck      codexThreadIdentity
 	audit        EffectiveCodexPolicy
 	audits       []EffectiveCodexPolicy
@@ -91,6 +94,10 @@ func (f *fakeManagedVerifier) ReadThread(context.Context, string) (codexThreadId
 	value := f.read[0]
 	f.read = f.read[1:]
 	return value, nil
+}
+func (f *fakeManagedVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
+	f.listCalls++
+	return append([]codexThreadIdentity(nil), f.listed...), f.listErr
 }
 func (f *fakeManagedVerifier) RecheckIdentity(context.Context, string) (codexThreadIdentity, error) {
 	if len(f.rechecks) != 0 {

@@ -105,12 +105,13 @@ type managedCodexService interface {
 }
 
 type ManagedCodexLauncher struct {
-	Host      Host
-	topology  managedTopology
-	service   managedCodexService
-	verifiers managedVerifierFactory
-	discover  func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, string, error)
-	deliver   func(context.Context, Prompt, PromptTarget) (PromptResult, error)
+	Host             Host
+	topology         managedTopology
+	service          managedCodexService
+	verifiers        managedVerifierFactory
+	discover         func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, string, error)
+	discoverObserved func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error)
+	deliver          func(context.Context, Prompt, PromptTarget) (PromptResult, error)
 }
 
 func NewManagedCodexLauncher(host Host) ManagedCodexLauncher {

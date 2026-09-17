@@ -182,18 +182,23 @@ func TestForkPostPromptSourceDriftPreservesAcknowledgedChild(t *testing.T) {
 	}
 }
 
-func TestOrdinaryCodexForkPromptUsesPaneBindingWithoutService(t *testing.T) {
+func TestOrdinaryCodexForkPromptVerifiesPersistedParent(t *testing.T) {
 	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
 	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
 	process := sessionhost.ForegroundProcess{PID: 101, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}
 	topology := &fakeManagedTopology{target: created, inspected: process}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
-	verifier := &fakeManagedVerifier{}
+	resolved := codexThreadIdentity{
+		ID: managedChildID, CWD: source.CWD, ForkedFromID: managedSourceID,
+		ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+	}
+	verifier := &fakeManagedVerifier{read: []codexThreadIdentity{resolved}}
 	runner := &scriptedRunner{results: []command.Result{
 		listForkResult(t, source),
 		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
 		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
-		{},
+		managedAgentResult(t, managedAgent(created.Origin, source.CWD, managedChildID, false)),
+		managedAgentResult(t, managedAgent(created.Origin, source.CWD, managedChildID, false)),
 		managedAgentResult(t, managedAgent(created.Origin, source.CWD, managedChildID, false)),
 		managedAgentResult(t, managedAgent(created.Origin, source.CWD, managedChildID, false)),
 		listForkResult(t, source), listForkResult(t, source),
@@ -216,10 +221,115 @@ func TestOrdinaryCodexForkPromptUsesPaneBindingWithoutService(t *testing.T) {
 		Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
 		CodexPolicy: managedPolicy(), Prompt: &prompt,
 	})
-	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 0 || verifier.confirmID != "" {
-		t.Fatalf("result=%+v service=%d verifier=%+v error=%v", result, service.callCount(), verifier, err)
+	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 1 || verifier.listCalls != 0 || verifier.confirmID != "" {
+		t.Fatalf("result=%+v service=%d verifier=%+v calls=%q error=%v", result, service.callCount(), verifier, runner.calls, err)
 	}
-	if len(topology.cleanups) != 0 || len(verifier.deleted) != 0 || verifier.closed != 0 {
+	if len(topology.cleanups) != 0 || len(verifier.deleted) != 0 || verifier.closed != 1 {
 		t.Fatalf("cleanup=%v deleted=%v closed=%d", topology.cleanups, verifier.deleted, verifier.closed)
+	}
+}
+
+func TestOrdinaryCodexForkPrefixResolvesAfterOnePrompt(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	process := sessionhost.ForegroundProcess{PID: 101, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}
+	unbound := managedAgent(created.Origin, source.CWD, managedChildID, false)
+	unbound.Session = nil
+	bound := managedAgent(created.Origin, source.CWD, managedChildID, false)
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	for _, test := range []struct {
+		name, parent string
+		wantErr      bool
+	}{
+		{"matching parent", managedSourceID, false},
+		{"wrong parent", managedOriginalID, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			results := []command.Result{
+				listForkResult(t, source),
+				managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+				managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+				listForkResult(t, source), listForkResult(t, source), managedAgentResult(t, bound),
+			}
+			if !test.wantErr {
+				results = append(results, managedAgentResult(t, bound), managedAgentResult(t, bound), managedAgentResult(t, bound), listForkResult(t, source))
+			}
+			runner := &scriptedRunner{results: results}
+			topology := &fakeManagedTopology{target: created, inspected: process}
+			resolved := codexThreadIdentity{
+				ID: managedChildID, CWD: source.CWD, ForkedFromID: test.parent,
+				ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+			}
+			verifier := &fakeManagedVerifier{listed: []codexThreadIdentity{resolved}, read: []codexThreadIdentity{resolved}}
+			managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+			managed.service, managed.topology, managed.verifiers = &fakeManagedService{snapshot: managedServiceSnapshot()}, topology, fakeManagedVerifierFactory{verifier}
+			managed.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+				return unbound, managedStatusObservation{
+					identity: prefix, forkedFromPrefix: managedSourceID[:len(prefix)], policy: managedPolicy(), fromStatus: true,
+				}, nil
+			}
+			forker := NewForker(Host{Runner: runner, Session: "named"})
+			forker.launcher, forker.managed = topology, managed
+			forker.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+				if target.Agent.Session != nil || target.codexSessionPrefix != prefix {
+					t.Fatalf("prompt target=%+v", target)
+				}
+				return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
+			}
+			prompt, _ := PreparePrompt("hello")
+			result, err := forker.Fork(context.Background(), ForkRequest{
+				Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
+				CodexPolicy: managedPolicy(), Prompt: &prompt,
+			})
+			if test.wantErr {
+				if !errors.Is(err, ErrManagedStale) || result.Prompt.State != PromptAcknowledged || len(topology.cleanups) != 0 || verifier.listCalls != 1 {
+					t.Fatalf("result=%+v cleanup=%v listCalls=%d error=%v", result, topology.cleanups, verifier.listCalls, err)
+				}
+				return
+			}
+			if err != nil || result.Prompt.State != PromptAcknowledged || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.Target.codexSessionPrefix != "" || verifier.listCalls != 1 || verifier.closed != 1 || len(topology.cleanups) != 0 {
+				t.Fatalf("result=%+v cleanup=%v verifier=%+v error=%v", result, topology.cleanups, verifier, err)
+			}
+		})
+	}
+}
+
+func TestOrdinaryCodexForkPrefixRejectsSourceProcessDriftBeforePrompt(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	process := sessionhost.ForegroundProcess{PID: 101, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}
+	drifted := process
+	drifted.PID++
+	topology := &fakeManagedTopology{target: created, inspectedSeq: []sessionhost.ForegroundProcess{process, process, drifted}}
+	runner := &scriptedRunner{results: []command.Result{
+		listForkResult(t, source),
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+		listForkResult(t, source),
+	}}
+	unbound := managedAgent(created.Origin, source.CWD, managedChildID, false)
+	unbound.Session = nil
+	managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	managed.topology = topology
+	managed.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+		return unbound, managedStatusObservation{
+			identity: "01a09f5c-37cc-77f1-9409-e9aa070a", forkedFromPrefix: "01a09f5c-37cc-77f1-9409-e9aa070a",
+			policy: managedPolicy(), fromStatus: true,
+		}, nil
+	}
+	forker := NewForker(Host{Runner: runner, Session: "named"})
+	forker.launcher, forker.managed = topology, managed
+	deliveries := 0
+	forker.deliver = func(context.Context, Prompt, PromptTarget) (PromptResult, error) {
+		deliveries++
+		return PromptResult{}, nil
+	}
+	prompt, _ := PreparePrompt("hello")
+	_, err := forker.Fork(context.Background(), ForkRequest{
+		Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
+		CodexPolicy: managedPolicy(), Prompt: &prompt,
+	})
+	if !errors.Is(err, ErrManagedStale) || deliveries != 0 || len(topology.cleanups) != 1 || topology.cleanups[0] != created {
+		t.Fatalf("deliveries=%d cleanup=%v error=%v", deliveries, topology.cleanups, err)
 	}
 }

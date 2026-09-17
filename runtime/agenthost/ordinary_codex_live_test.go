@@ -14,16 +14,7 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
-func TestOrdinaryCodexLiveBindsZeroTurnNewAndForkWithoutSharedService(t *testing.T) {
-	runOrdinaryCodexLive(t, true)
-}
-
-func TestOrdinaryCodexLiveZeroTurnStatusDiscovery(t *testing.T) {
-	runOrdinaryCodexLive(t, false)
-}
-
-func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
-	t.Helper()
+func TestOrdinaryCodexLiveBindsPromptedNewAndForkThroughSharedService(t *testing.T) {
 	if os.Getenv("HERDR_PLUGIN_KIT_MANAGED_CODEX_LIVE") != "1" {
 		t.Skip("set HERDR_PLUGIN_KIT_MANAGED_CODEX_LIVE=1 for the Herdr 0.8.2/Codex 0.154.0 integration")
 	}
@@ -47,7 +38,7 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createdWorkspace, err := runner.Run(ctx, "herdr", []string{"workspace", "create", "--cwd", directory, "--label", fmt.Sprintf("hpk-api5-zero-turn-%d", time.Now().UnixNano()), "--no-focus"})
+	createdWorkspace, err := runner.Run(ctx, "herdr", []string{"workspace", "create", "--cwd", directory, "--label", fmt.Sprintf("hpk-ordinary-prompt-%d", time.Now().UnixNano()), "--no-focus"})
 	if err != nil {
 		t.Fatalf("create isolated workspace: %v: %s", err, createdWorkspace.Stderr)
 	}
@@ -81,10 +72,6 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 		PaneID:      workspace.Result.RootPane.PaneID,
 	}
 	launcher := NewManagedCodexLauncher(Host{Runner: rawRunner, Session: sessionName})
-	binding, err := beginOrdinaryCodexBinding(ctx, launcher, ManagedNew, Agent{}, directory, managedPolicy(), 30*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var created sessionhost.CreatedTarget
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -95,14 +82,19 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 			}
 		}
 	})
-	created, err = (sessionhost.Host{Runner: rawRunner, Session: sessionName}).Launch(ctx, sessionhost.LaunchRequest{
-		Origin: origin, Argv: []string{"codex"}, Directory: directory,
-		Placement: sessionhost.NewTab, TabLabel: "ordinary-zero-turn", Focus: false,
-	})
-	if err != nil {
-		t.Fatal(err)
+	prompt, prepareErr := PreparePrompt("Reply exactly OK.")
+	if prepareErr != nil {
+		t.Fatal(prepareErr)
 	}
-	agent, err := binding.Finish(ctx, created, directory, []string{"codex"})
+	result, startErr := NewPromptStarter(Host{Runner: rawRunner, Session: sessionName}).Start(ctx, prompt, PromptStartRequest{
+		Origin: origin, Argv: []string{"codex", "--yolo"}, Directory: directory,
+		Placement: sessionhost.NewTab, TabLabel: "ordinary-prompted", Focus: false,
+		ObserveCodexPolicy: true, ReadyTimeout: 30 * time.Second,
+	})
+	created, agent, err := result.Target.Created, result.Agent, startErr
+	if err == nil && result.State != PromptAcknowledged {
+		err = fmt.Errorf("ordinary prompt state=%s", result.State)
+	}
 	if err != nil {
 		t.Logf("last initial binding observations:\n%s", strings.Join(trace, "\n"))
 		diagnosticCtx, diagnosticCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -118,20 +110,7 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 		t.Fatal(err)
 	}
 	if agent.Session == nil || !validManagedSession(agent.Session) || agent.CWD != directory || agent.Focused {
-		t.Fatalf("zero-turn agent=%+v", agent)
-	}
-	if !exercisePrompts {
-		return
-	}
-	prompt, err := PreparePrompt("Reply exactly OK.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := NewPromptHost(Host{Runner: rawRunner, Session: sessionName}).Deliver(ctx, prompt, PromptTarget{
-		Created: created, Agent: agent, Directory: directory, Argv: []string{"codex"},
-	})
-	if err != nil || result.State != PromptAcknowledged {
-		t.Fatalf("ordinary prompt state=%s error=%v", result.State, err)
+		t.Fatalf("prompted agent=%+v", agent)
 	}
 	settle := func(pane, answer string) {
 		for {
@@ -157,8 +136,8 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 	}
 	forkPrompt, _ := PreparePrompt("Reply exactly ORDINARY-FORK-OK.")
 	forker := NewForker(host)
-	forker.managed.discover = func(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
-		agent, id, err := launcher.discoverManagedIdentity(ctx, target, cwd, argv, service, policy)
+	forker.managed.discoverObserved = func(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+		agent, observed, err := launcher.discoverManagedIdentityObservation(ctx, target, cwd, argv, service, policy, true)
 		if err != nil {
 			t.Logf("last discovery observations:\n%s", strings.Join(trace, "\n"))
 			t.Logf("fork discovery expected argv=%q: %v", argv, err)
@@ -171,7 +150,7 @@ func runOrdinaryCodexLive(t *testing.T, exercisePrompts bool) {
 				t.Logf("fork diagnostic %v: %s %s error=%v", args, observed.Stdout, observed.Stderr, diagnosticErr)
 			}
 		}
-		return agent, id, err
+		return agent, observed, err
 	}
 	forked, err := forker.Fork(ctx, ForkRequest{
 		Source: source, Profile: ForkProfile{Executable: "codex"},

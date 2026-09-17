@@ -39,6 +39,9 @@ func (f *conversionVerifier) ConfirmIdentity(context.Context, ManagedOperation, 
 func (f *conversionVerifier) ReadThread(context.Context, string) (codexThreadIdentity, error) {
 	return popConversion(&f.identities, &f.identityErrs)
 }
+func (f *conversionVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
+	return nil, errors.New("unexpected list")
+}
 func (f *conversionVerifier) RecheckIdentity(context.Context, string) (codexThreadIdentity, error) {
 	return codexThreadIdentity{}, errors.New("unexpected recheck")
 }

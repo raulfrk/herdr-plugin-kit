@@ -15,16 +15,18 @@ func TestOrdinaryCodexBindingRejectsOperationAndPolicyIndependently(t *testing.T
 		name      string
 		operation ManagedOperation
 		policy    ManagedCodexPolicy
+		observe   bool
 	}{
-		{"unsupported operation", ManagedOperation("invalid"), managedPolicy()},
-		{"invalid policy", ManagedNew, ManagedCodexPolicy{}},
+		{"unsupported operation", ManagedOperation("invalid"), managedPolicy(), false},
+		{"invalid policy", ManagedNew, ManagedCodexPolicy{}, false},
+		{"observed with explicit policy", ManagedNew, managedPolicy(), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &scriptedRunner{}
 			service := &fakeManagedService{}
 			launcher := NewManagedCodexLauncher(Host{Runner: runner})
 			launcher.service = service
-			binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, tc.operation, Agent{}, "/tmp/project", tc.policy, 0)
+			binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, tc.operation, Agent{}, "/tmp/project", tc.policy, tc.observe, 0)
 			if binding != nil || !errors.Is(err, ErrManagedUnsupported) {
 				t.Fatalf("binding=%+v error=%v", binding, err)
 			}
@@ -32,6 +34,14 @@ func TestOrdinaryCodexBindingRejectsOperationAndPolicyIndependently(t *testing.T
 				t.Fatal("invalid launch caused external calls")
 			}
 		})
+	}
+}
+
+func TestOrdinaryCodexBindingAcceptsObservedPolicyWithoutExternalCalls(t *testing.T) {
+	launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}})
+	binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, ManagedNew, Agent{}, "/tmp/project", ManagedCodexPolicy{}, true, 0)
+	if err != nil || binding == nil || binding.policy != (ManagedCodexPolicy{}) {
+		t.Fatalf("binding=%+v error=%v", binding, err)
 	}
 }
 
@@ -76,7 +86,7 @@ func TestOrdinaryCodexBindingUsesPaneDiscoveryWithoutService(t *testing.T) {
 		agent.Session = nil
 		return agent, managedNewID, nil
 	}
-	binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, ManagedNew, Agent{}, "/tmp/project", managedPolicy(), 0)
+	binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, ManagedNew, Agent{}, "/tmp/project", managedPolicy(), false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,4 +101,107 @@ func TestOrdinaryCodexBindingUsesPaneDiscoveryWithoutService(t *testing.T) {
 	if verifier.closed != 0 || service.callCount() != 0 {
 		t.Fatalf("closed=%d service=%d error=%v", verifier.closed, service.callCount(), err)
 	}
+}
+
+func TestOrdinaryCodexBindingVerifiesExactForkParentBeforePrompt(t *testing.T) {
+	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	source := managedAgent(sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"}, "/tmp/project", managedSourceID, false)
+	child := managedAgent(target.Origin, "/tmp/project", managedChildID, false)
+	process := sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: "/tmp/project", Argv: []string{"codex"}}
+	for _, test := range []struct {
+		name, parent string
+		wantErr      error
+	}{
+		{"matching parent", managedSourceID, nil},
+		{"wrong parent", managedOriginalID, ErrManagedStale},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			results := []command.Result{managedAgentResult(t, child)}
+			if test.wantErr == nil {
+				results = append(results, managedAgentResult(t, child), managedAgentResult(t, child), managedAgentResult(t, child), jsonResult(t, listResponse(wireFromAgent(source))))
+			}
+			runner := &scriptedRunner{results: results}
+			topology := &fakeManagedTopology{inspected: process}
+			resolved := codexThreadIdentity{
+				ID: managedChildID, CWD: "/tmp/project", ForkedFromID: test.parent,
+				ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+			}
+			verifier := &fakeManagedVerifier{read: []codexThreadIdentity{resolved}}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+			launcher.topology = topology
+			launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher.verifiers = fakeManagedVerifierFactory{verifier}
+			launcher.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+				return child, managedStatusObservation{identity: managedChildID, policy: managedPolicy()}, nil
+			}
+			binding := &ordinaryCodexBinding{
+				launcher: launcher, operation: ManagedFork, policy: managedPolicy(), source: source,
+				sourceID: managedSourceID, sourceProcess: process, readyTimeout: DefaultPromptReadyTimeout,
+			}
+			prepared, err := binding.Prepare(context.Background(), target, "/tmp/project", []string{"codex", "fork", managedSourceID})
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) || prepared.Agent.PaneID != "" || verifier.listCalls != 0 || hasAgentSessionReport(runner.calls) {
+					t.Fatalf("prepared=%+v listCalls=%d calls=%q error=%v", prepared, verifier.listCalls, runner.calls, err)
+				}
+				return
+			}
+			if err != nil || prepared.Agent.Session == nil || prepared.Agent.Session.Value != managedChildID || verifier.listCalls != 0 {
+				t.Fatalf("prepared=%+v listCalls=%d calls=%q verifications=%q error=%v", prepared, verifier.listCalls, runner.calls, topology.verifications, err)
+			}
+		})
+	}
+}
+
+func TestOrdinaryCodexBindingRejectsAmbiguousDriftedAndCancelledPrefixResolution(t *testing.T) {
+	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	unbound.Session = nil
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	base := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	for _, test := range []struct {
+		name       string
+		candidates []codexThreadIdentity
+		cancel     bool
+		wantErr    error
+	}{
+		{"ambiguous", []codexThreadIdentity{base, {ID: managedSecondID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}}, false, ErrManagedAmbiguous},
+		{"wrong parent", []codexThreadIdentity{{ID: managedNewID, CWD: "/tmp/project", ForkedFromID: managedSourceID, ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}}, false, ErrManagedStale},
+		{"wrong model", []codexThreadIdentity{{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-terra", ReasoningEffort: "medium"}}, false, ErrManagedPolicyDrift},
+		{"wrong reasoning", []codexThreadIdentity{{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "high"}}, false, ErrManagedPolicyDrift},
+		{"cancelled", nil, true, context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &scriptedRunner{results: []command.Result{managedAgentResult(t, unbound)}}
+			verifier := &fakeManagedVerifier{listed: test.candidates}
+			if len(test.candidates) == 1 {
+				verifier.read = []codexThreadIdentity{test.candidates[0]}
+			}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner})
+			launcher.topology = &fakeManagedTopology{}
+			launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher.verifiers = fakeManagedVerifierFactory{verifier}
+			binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedNew, readyTimeout: DefaultPromptReadyTimeout}
+			ctx := context.Background()
+			if test.cancel {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			_, _, err := binding.resolvePersistedIdentity(ctx, target, "/tmp/project", []string{"codex"}, ordinaryCodexPreparation{Agent: unbound, Prefix: prefix, Policy: managedPolicy()})
+			if !errors.Is(err, test.wantErr) || verifier.listCalls != 1 || hasAgentSessionReport(runner.calls) {
+				t.Fatalf("listCalls=%d calls=%q error=%v", verifier.listCalls, runner.calls, err)
+			}
+		})
+	}
+}
+
+func hasAgentSessionReport(calls [][]string) bool {
+	for _, call := range calls {
+		for _, arg := range call {
+			if arg == "report-agent-session" {
+				return true
+			}
+		}
+	}
+	return false
 }

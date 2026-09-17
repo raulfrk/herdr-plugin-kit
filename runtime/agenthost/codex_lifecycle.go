@@ -50,6 +50,7 @@ type managedVerifier interface {
 	ReadConstraints(context.Context, string) (codexConstraintSnapshot, error)
 	Arm() error
 	ConfirmIdentity(context.Context, ManagedOperation, string, string) (codexThreadIdentity, error)
+	ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error)
 	ReadThread(context.Context, string) (codexThreadIdentity, error)
 	RecheckIdentity(context.Context, string) (codexThreadIdentity, error)
 	ReadEffective(context.Context, string) (EffectiveCodexPolicy, error)
@@ -315,6 +316,58 @@ func (c *codexLifecycle) ReadThread(ctx context.Context, threadID string) (codex
 		return codexThreadIdentity{}, ErrManagedStale
 	}
 	return identity, nil
+}
+
+func (c *codexLifecycle) ListCLIThreads(ctx context.Context, cwd string) ([]codexThreadIdentity, error) {
+	if cwd == "" || !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd || strings.ContainsRune(cwd, 0) {
+		return nil, ErrManagedStale
+	}
+	const maxPages = 10
+	var (
+		cursor *string
+		result []codexThreadIdentity
+	)
+	seen := make(map[string]struct{})
+	seenCursors := make(map[string]struct{})
+	for page := 0; page < maxPages; page++ {
+		params := map[string]any{
+			"cwd": cwd, "limit": 100, "sortKey": "created_at", "sortDirection": "desc",
+			"sourceKinds": []string{"cli"}, "useStateDbOnly": true,
+		}
+		if cursor != nil {
+			params["cursor"] = *cursor
+		}
+		var response struct {
+			Data       []codexThread `json:"data"`
+			NextCursor *string       `json:"nextCursor"`
+		}
+		if err := c.call(ctx, "thread/list", params, &response); err != nil {
+			return nil, err
+		}
+		for _, thread := range response.Data {
+			identity, err := thread.identity()
+			if err != nil || identity.CWD != cwd {
+				return nil, ErrManagedStale
+			}
+			if _, duplicate := seen[identity.ID]; duplicate {
+				return nil, ErrManagedAmbiguous
+			}
+			seen[identity.ID] = struct{}{}
+			result = append(result, identity)
+		}
+		if response.NextCursor == nil {
+			return result, nil
+		}
+		if *response.NextCursor == "" {
+			return nil, ErrManagedAmbiguous
+		}
+		if _, duplicate := seenCursors[*response.NextCursor]; duplicate {
+			return nil, ErrManagedAmbiguous
+		}
+		seenCursors[*response.NextCursor] = struct{}{}
+		cursor = response.NextCursor
+	}
+	return nil, ErrManagedAmbiguous
 }
 
 func (c *codexLifecycle) RecheckIdentity(ctx context.Context, threadID string) (codexThreadIdentity, error) {

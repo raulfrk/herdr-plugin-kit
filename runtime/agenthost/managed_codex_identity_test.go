@@ -69,6 +69,71 @@ func TestParseOrdinaryStatusUsesPaneUUIDWithoutRemoteOrServerInference(t *testin
 	}
 }
 
+func TestParseOrdinaryStatusCanObserveOneExactModelAndReasoning(t *testing.T) {
+	base := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Model: gpt-5.6-sol (reasoning high, summaries auto) │
+│ Directory: /tmp/project │
+│ Session: 01a0a793-5a65-78e1-b56f-ab827c31b2f9 │`
+	id, err := parseManagedStatus(base, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{})
+	if err != nil || id != "01a0a793-5a65-78e1-b56f-ab827c31b2f9" {
+		t.Fatalf("id=%q error=%v", id, err)
+	}
+	for _, text := range []string{
+		strings.Replace(base, " (reasoning high, summaries auto)", "", 1),
+		base + "\n│ Model: gpt-5.6-terra (reasoning medium) │",
+	} {
+		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}); err == nil {
+			t.Fatalf("accepted incomplete or ambiguous observed policy: %q", text)
+		}
+	}
+}
+
+func TestParseObservedOrdinaryStatusAcceptsOnlyOneStrongUUIDPrefix(t *testing.T) {
+	base := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Model: gpt-5.6-sol (reasoning high, summaries auto) │
+│ Directory: /tmp/project │
+│ Session: 01a0980a-280c-72c2-8a90-1baf1239 │`
+	observed, err := parseManagedStatusObservation(base, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, "")
+	if err != nil || observed.identity != "01a0980a-280c-72c2-8a90-1baf1239" || observed.policy.Model != "gpt-5.6-sol" || observed.policy.ReasoningEffort != "high" {
+		t.Fatalf("observation=%+v error=%v", observed, err)
+	}
+	for _, text := range []string{
+		strings.Replace(base, "1baf1239", "1ba", 1),
+		base + "\n│ Session: 01a0980a-280c-72c2-8a90-1baf5678 │",
+	} {
+		if _, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, ""); err == nil {
+			t.Fatalf("accepted weak or ambiguous prefix: %q", text)
+		}
+	}
+	if _, err := parseManagedStatusObservation(base, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, false, ""); !errors.Is(err, ErrManagedNarrow) {
+		t.Fatalf("non-prefix parser error=%v", err)
+	}
+}
+
+func TestParseObservedZeroTurnStatusUsesStrongExactTitlePrefix(t *testing.T) {
+	text := `/status
+╭──────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.154.0)               │
+│ Model: gpt-5.6-sol (reasoning medium)     │
+│ Directory: /tmp/project                  │
+╰──────────────────────────────────────────╯`
+	prefix := "01a0aecc-acb3-7ea1-9224-a643d"
+	observed, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, prefix)
+	if err != nil || observed.identity != prefix || observed.policy.Model != "gpt-5.6-sol" || observed.policy.ReasoningEffort != "medium" {
+		t.Fatalf("observation=%+v error=%v", observed, err)
+	}
+	for _, invalid := range []string{"", "01a0aecc-acb3-7ea1-9224-a64"} {
+		if _, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, invalid); err == nil {
+			t.Fatalf("accepted fallback prefix %q", invalid)
+		}
+	}
+	if _, err := parseManagedStatusObservation(strings.Replace(text, "╰", " ", 1), "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, prefix); err == nil {
+		t.Fatal("accepted incomplete status block")
+	}
+}
+
 func TestParseManagedStatusRejectsTruncationDriftAndAmbiguity(t *testing.T) {
 	base := `/status
 │ >_ OpenAI Codex (v0.154.0) │
@@ -80,6 +145,8 @@ func TestParseManagedStatusRejectsTruncationDriftAndAmbiguity(t *testing.T) {
 		strings.Replace(base, "01a09f5c-37cc-77f1-9409-e9aa070ad8d0", "01a09f5c-37cc-77f1-9409-e9aa0...", 1),
 		strings.Replace(base, "v0.154.0", "v0.155.0", 1),
 		strings.Replace(base, "app-server-control.sock", "other.sock", 1),
+		strings.Replace(base, "Directory: /tmp/project", "Directory: /tmp/project-other", 1),
+		strings.Replace(base, "reasoning medium", "reasoning mediumx", 1),
 		base + "\nSession: 01a09f5c-37cc-77f1-9409-e9aa070ad8d1",
 	}
 	for i, text := range tests {
@@ -140,11 +207,13 @@ func TestEmptyCodexComposerRejectsSingleAndMultilineDrafts(t *testing.T) {
 
 func TestExactCodexStatusDraftAcceptsObserved01540MenuAndRejectsAmbiguity(t *testing.T) {
 	observed := "header\n\x1b[1m›\x1b[0m /status\n\n  /status      show current session configuration and token usage\n  /\x1b[0m\x1b[1mstatus\x1b[0mline  \x1b[0m\x1b[2mconfigure which items appear in the status line\x1b[0m"
-	if !exactCodexSingleLineDraft(observed, "/status") {
+	compact := "header\n\x1b[1m›\x1b[0m /status\n\n  \x1b[1m\x1b[38;5;6m/status      show current session configuration and token\x1b[0m\n  \x1b[1m\x1b[38;5;6m             usage\x1b[0m"
+	if !exactCodexSingleLineDraft(observed, "/status") || !exactCodexSingleLineDraft(compact, "/status") {
 		t.Fatal("Codex 0.154.0 status menu rejected")
 	}
 	for _, text := range []string{
 		strings.ReplaceAll(observed, "\x1b[0m\x1b[1m", ""),
+		managedANSI.ReplaceAllString(compact, ""),
 		observed + "\n  extra menu row",
 		strings.Replace(observed, "token usage", "token totals", 1),
 	} {
@@ -425,6 +494,20 @@ func TestAwaitFreshStatusRejectsValidNewBlockWhenComposerIsNotEmpty(t *testing.T
 	launcher := NewManagedCodexLauncher(Host{Runner: runner})
 	if _, err := launcher.awaitFreshStatus(context.Background(), target, "old", "/tmp/project", managedServiceSnapshot(), managedPolicy()); !errors.Is(err, ErrManagedStale) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestAwaitFreshStatusWaitsForStatusBlockAfterCommandEcho(t *testing.T) {
+	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	runner := &scriptedRunner{results: []command.Result{
+		paneScrollResult(t, target, 10), {Stdout: []byte("old\n› /status\n")},
+		paneScrollResult(t, target, 20), {Stdout: []byte("old\n› " + observedManagedStatus())},
+		{Stdout: managedEmptyComposer("status block")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	id, err := launcher.awaitFreshStatus(context.Background(), target, "old", "/tmp/project", managedServiceSnapshot(), managedPolicy())
+	if err != nil || id != managedNewID || len(runner.calls) != 5 {
+		t.Fatalf("id=%q calls=%#v error=%v", id, runner.calls, err)
 	}
 }
 

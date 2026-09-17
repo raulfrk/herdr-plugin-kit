@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/coder/websocket"
 )
+
+func codexListThreadJSON(id string) string {
+	return fmt.Sprintf(`{"id":%q,"cwd":"/tmp/project","modelProvider":"openai","model":"gpt-5.6-sol","reasoningEffort":"medium"}`, id)
+}
 
 type rpcTestRequest struct {
 	ID     int                        `json:"id"`
@@ -159,6 +164,65 @@ func TestCodexThreadIdentityIncludesModelAndReasoning(t *testing.T) {
 	identity, err := (codexThread{ID: managedOriginalID, CWD: "/tmp/project", ModelProvider: "openai", Model: &model, ReasoningEffort: &reasoning}).identity()
 	if err != nil || identity.Model != model || identity.ReasoningEffort != reasoning {
 		t.Fatalf("identity=%+v error=%v", identity, err)
+	}
+}
+
+func TestCodexLifecycleListCLIThreadsRejectsAmbiguousPagination(t *testing.T) {
+	tests := []struct {
+		name    string
+		respond func(*testing.T, context.Context, *websocket.Conn)
+	}{
+		{
+			name: "cross-page duplicate",
+			respond: func(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+				first := readRPCRequest(t, ctx, conn, "thread/list")
+				if string(first.Params["cwd"]) != `"/tmp/project"` || string(first.Params["limit"]) != "100" || string(first.Params["sourceKinds"]) != `["cli"]` || string(first.Params["useStateDbOnly"]) != "true" {
+					t.Fatalf("first params=%s", mustJSON(first.Params))
+				}
+				sendRPCResult(t, ctx, conn, first.ID, `{"data":[`+codexListThreadJSON(managedNewID)+`],"nextCursor":"c1"}`)
+				second := readRPCRequest(t, ctx, conn, "thread/list")
+				if string(second.Params["cursor"]) != `"c1"` {
+					t.Fatalf("second params=%s", mustJSON(second.Params))
+				}
+				sendRPCResult(t, ctx, conn, second.ID, `{"data":[`+codexListThreadJSON(managedNewID)+`],"nextCursor":null}`)
+			},
+		},
+		{
+			name: "repeated cursor",
+			respond: func(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+				first := readRPCRequest(t, ctx, conn, "thread/list")
+				sendRPCResult(t, ctx, conn, first.ID, `{"data":[],"nextCursor":"c1"}`)
+				second := readRPCRequest(t, ctx, conn, "thread/list")
+				sendRPCResult(t, ctx, conn, second.ID, `{"data":[],"nextCursor":"c2"}`)
+				third := readRPCRequest(t, ctx, conn, "thread/list")
+				sendRPCResult(t, ctx, conn, third.ID, `{"data":[],"nextCursor":"c1"}`)
+			},
+		},
+		{
+			name: "page limit exhausted",
+			respond: func(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+				for page := 0; page < 10; page++ {
+					request := readRPCRequest(t, ctx, conn, "thread/list")
+					sendRPCResult(t, ctx, conn, request.ID, fmt.Sprintf(`{"data":[],"nextCursor":"c%d"}`, page))
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+				lifecycleInitialize(t, ctx, conn)
+				test.respond(t, ctx, conn)
+			})
+			verifier, err := newCodexLifecycle(context.Background(), socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verifier.Close()
+			if _, err := verifier.ListCLIThreads(context.Background(), "/tmp/project"); !errors.Is(err, ErrManagedAmbiguous) {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 
