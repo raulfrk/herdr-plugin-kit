@@ -57,6 +57,9 @@ func TestManagedThreadPrefixRequiresExactStrongPartialUUID(t *testing.T) {
 		{"01a09f5c-37cc-77f1-9409-e9aa", true},
 		{"01a09f5c-37cc-77f1-9409-e9aa070a", true},
 		{"01a09f5c-37cc-77f1-9409-e9aa070ad8d", true},
+		{managedNewID + " ", false},
+		{"01a09f5c-37cc-77f1-9409-e9aa070a ", false},
+		{"01a09f5c-37cc-77f1-9409-e9aa070a\n", false},
 		{"01a09f5c-37cc-77f1-9409-e9aa070ad8dZ", false},
 	} {
 		if got := validManagedThreadPrefix(test.value); got != test.valid {

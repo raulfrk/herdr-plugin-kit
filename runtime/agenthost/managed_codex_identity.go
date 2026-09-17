@@ -31,6 +31,7 @@ var (
 	managedStatusCmd   = regexp.MustCompile(`(?m)^(?:›[ \t]+)?/status[ \t]*$`)
 	managedStatusModel = regexp.MustCompile(`Model:([A-Za-z0-9][A-Za-z0-9._:/-]*)\(reasoning([A-Za-z0-9][A-Za-z0-9._-]*)(?:,|\))`)
 	managedTitlePart   = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})(?:\.\.\.)?$`)
+	managedThreadPart  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,11}$`)
 )
 
 type managedStatusObservation struct {
@@ -340,16 +341,7 @@ func validManagedThreadID(id string) bool {
 }
 
 func validManagedThreadPrefix(prefix string) bool {
-	if prefix == "" {
-		return false
-	}
-	if validManagedThreadID(prefix) {
-		return false
-	}
-	if managedSessionPart.FindStringSubmatch("Session: "+prefix) == nil {
-		return false
-	}
-	return true
+	return managedThreadPart.MatchString(prefix)
 }
 
 func managedWireThreadPrefix(wire wireAgent) string {
