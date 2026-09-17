@@ -43,6 +43,52 @@ type PromptStarter struct {
 	openCodeServer   openCodePromptServerLauncher
 }
 
+type preparedOpenCodeStart struct {
+	server   OpenCodeServer
+	session  string
+	sessions openCodePromptSessions
+	stop     func(context.Context) error
+}
+
+func prepareOpenCodeStart(ctx context.Context, host Host, executable, directory string, server OpenCodeServer, startServer bool, launcher openCodePromptServerLauncher, sessions openCodePromptSessions) (preparedOpenCodeStart, error) {
+	prepared := preparedOpenCodeStart{server: server, sessions: sessions}
+	if prepared.sessions == nil {
+		prepared.sessions = nativeOpenCodePromptSessions{}
+	}
+	if startServer {
+		if launcher == nil {
+			launcher = nativeOpenCodePromptServerLauncher{runner: host.Runner}
+		}
+		var err error
+		prepared.server, prepared.stop, err = launcher.Start(ctx, executable, directory)
+		if err != nil {
+			return preparedOpenCodeStart{}, err
+		}
+	}
+	var err error
+	prepared.session, err = prepared.sessions.Create(ctx, prepared.server)
+	if err == nil {
+		return prepared, nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
+	defer cancel()
+	return preparedOpenCodeStart{}, errors.Join(err, prepared.stopServer(cleanupCtx))
+}
+
+func (prepared preparedOpenCodeStart) deleteSession(ctx context.Context) error {
+	if prepared.session == "" {
+		return nil
+	}
+	return prepared.sessions.Delete(ctx, prepared.server, prepared.session)
+}
+
+func (prepared preparedOpenCodeStart) stopServer(ctx context.Context) error {
+	if prepared.stop == nil {
+		return nil
+	}
+	return prepared.stop(ctx)
+}
+
 func NewPromptStarter(host Host) PromptStarter {
 	return PromptStarter{Host: host, wait: wait, managed: NewManagedCodexLauncher(host)}
 }
@@ -66,43 +112,25 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 	if s.wait == nil {
 		return PromptResult{State: PromptNotAttempted}, errors.New("prompt starter must be created with NewPromptStarter")
 	}
-	if kind == "opencode" && request.StartOpenCodeServer {
-		launcher := s.openCodeServer
-		if launcher == nil {
-			launcher = nativeOpenCodePromptServerLauncher{runner: s.Host.Runner}
-		}
-		server, stop, startErr := launcher.Start(ctx, request.Argv[0], request.Directory)
-		if startErr != nil {
-			return PromptResult{State: PromptNotAttempted}, startErr
-		}
-		request.OpenCodeServer = server
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
-			defer cancel()
-			returnErr = errors.Join(returnErr, stop(stopCtx))
-		}()
-	}
-
 	var (
-		openCodeID string
-		binding    *ordinaryCodexBinding
+		openCode preparedOpenCodeStart
+		binding  *ordinaryCodexBinding
 	)
-	openCodeSessions := s.openCodeSessions
-	if openCodeSessions == nil {
-		openCodeSessions = nativeOpenCodePromptSessions{}
-	}
 	if kind == "opencode" {
-		openCodeID, err = openCodeSessions.Create(ctx, request.OpenCodeServer)
+		openCode, err = prepareOpenCodeStart(ctx, s.Host, request.Argv[0], request.Directory, request.OpenCodeServer, request.StartOpenCodeServer, s.openCodeServer, s.openCodeSessions)
 		if err != nil {
 			return PromptResult{State: PromptNotAttempted}, fmt.Errorf("prompt OpenCode session: %w", err)
 		}
-		argv = append(argv, "--session", openCodeID)
+		request.OpenCodeServer = openCode.server
+		argv = append(argv, "--session", openCode.session)
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
+			defer cancel()
+			returnErr = errors.Join(returnErr, openCode.stopServer(stopCtx))
+		}()
 	}
 	cleanupOpenCode := func(cleanupCtx context.Context) error {
-		if openCodeID == "" {
-			return nil
-		}
-		return openCodeSessions.Delete(cleanupCtx, request.OpenCodeServer, openCodeID)
+		return openCode.deleteSession(cleanupCtx)
 	}
 	if kind == "codex" {
 		managed := s.managed
@@ -144,7 +172,7 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 		prepared, err = binding.Prepare(ctx, created, request.Directory, argv)
 		agent = prepared.Agent
 	} else {
-		agent, err = s.waitForAgent(ctx, created, kind, openCodeID, request.Directory, readyTimeout(request.ReadyTimeout))
+		agent, err = s.waitForAgent(ctx, created, kind, openCode.session, request.Directory, readyTimeout(request.ReadyTimeout))
 	}
 	if err != nil {
 		return failBeforeSend(fmt.Errorf("prompt target identity: %w", err))

@@ -279,6 +279,47 @@ IDs, and prompt flags are rejected before creation. Codex `--config` accepts
 only `model`, `model_reasoning_effort`, and `service_tier`. Aliases share one
 duplicate key, so `-m one --model two` is rejected.
 
+For a prompted ordinary Codex fork, set `ObserveCodexPolicy: true`, leave
+`CodexPolicy` zero, and provide the prepared prompt. The Kit obtains the
+effective model, reasoning effort, approval policy, and sandbox mode from the
+guarded child status flow before prompt delivery. Observation with an explicit
+policy, without a prompt, or for another harness is rejected before reading the
+source or creating topology.
+
+Use `agenthost.NewNativeStarter(host).Start` for an unprompted fresh OMP or
+OpenCode conversation whose exact identity is required:
+
+```go
+started, err := agenthost.NewNativeStarter(host).Start(ctx, agenthost.NativeStartRequest{
+    Origin: origin, Argv: []string{"omp", "--model", "openai/gpt"},
+    Directory: "/absolute/project", Placement: sessionhost.NewPane,
+    Direction: "right",
+})
+```
+
+The starter snapshots existing same-harness identities, launches literal argv
+in the exact default or named session, and requires two reads of the same new
+immutable identity in the created background pane. Normal status or revision
+changes between those reads do not invalidate an otherwise stable identity.
+Lifecycle selectors such as OMP `--resume`/`--fork` and OpenCode
+`--session`/`--fork` are adapter-owned and rejected before observation or
+topology. Arbitrary commands remain `sessionhost.Host.Launch` calls and do not
+claim an agent identity.
+
+Plain OpenCode does not select or report a conversation at zero turns. For an
+unprompted OpenCode New, set `StartOpenCodeServer: true` (or provide a validated
+task-owned `OpenCodeServer`). The Kit creates one fresh root session, adds the
+exact adapter-owned `--session` selector, binds that ID in Herdr, and stops the
+short-lived server while leaving the TUI conversation intact. A failure before
+success deletes that created session and cleans only the recorded target.
+
+Herdr/Codex 0.154.0 exposes only a clipped status identity before the first
+turn, and the shared App Server cannot authoritatively resolve it at that
+point. `NativeStarter` therefore rejects ordinary zero-turn Codex New before
+topology. Use `PromptStarter` for ordinary Codex New with a prompt or
+`ManagedCodexLauncher` for a managed new conversation; neither path invents or
+replaces an identity.
+
 OMP forks require a unique absolute `OMPStatusSocket`. It becomes the sole
 fixed process environment delta,
 `HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET=<path>`; there is no general environment

@@ -155,7 +155,7 @@ func TestOrdinaryCodexLiveBindsPromptedNewAndForkThroughSharedService(t *testing
 	forked, err := forker.Fork(ctx, ForkRequest{
 		Source: source, Profile: ForkProfile{Executable: "codex"},
 		Placement: sessionhost.NewPane, Direction: "down", Prompt: &forkPrompt,
-		CodexPolicy: managedPolicy(),
+		ObserveCodexPolicy: true,
 	})
 	if err != nil || forked.Prompt.State != PromptAcknowledged {
 		t.Fatalf("ordinary fork state=%s error=%v", forked.Prompt.State, err)

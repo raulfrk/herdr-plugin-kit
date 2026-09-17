@@ -34,7 +34,10 @@ type ForkRequest struct {
 	OMPStatusSocket string
 	OpenCodeServer  OpenCodeServer
 	CodexPolicy     ManagedCodexPolicy
-	Prompt          *Prompt
+	// ObserveCodexPolicy discovers the child policy from guarded Codex status
+	// instead of requiring the consumer to predict the source policy.
+	ObserveCodexPolicy bool
+	Prompt             *Prompt
 }
 
 type ForkResult struct {
@@ -94,6 +97,9 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("fork: %w", err)
 	}
+	if request.ObserveCodexPolicy && (kind != "codex" || request.Prompt == nil || request.CodexPolicy != (ManagedCodexPolicy{})) {
+		return ForkResult{}, fmt.Errorf("fork Codex policy: %w", ErrUnsupportedFork)
+	}
 	before, err := f.Host.find(ctx, request.Source.PaneID)
 	if err != nil || !sameForkSource(request.Source, before) {
 		return ForkResult{}, fmt.Errorf("fork source: %w", ErrStaleReport)
@@ -104,7 +110,7 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		if managed.Host.Runner == nil {
 			managed = NewManagedCodexLauncher(f.Host)
 		}
-		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedFork, request.Source, request.Source.CWD, request.CodexPolicy, false, request.ReadyTimeout)
+		binding, err = beginOrdinaryCodexBinding(ctx, managed, ManagedFork, request.Source, request.Source.CWD, request.CodexPolicy, request.ObserveCodexPolicy, request.ReadyTimeout)
 		if err != nil {
 			return ForkResult{}, fmt.Errorf("fork Codex identity: %w", err)
 		}

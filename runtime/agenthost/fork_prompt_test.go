@@ -279,7 +279,7 @@ func TestOrdinaryCodexForkPrefixResolvesAfterOnePrompt(t *testing.T) {
 			prompt, _ := PreparePrompt("hello")
 			result, err := forker.Fork(context.Background(), ForkRequest{
 				Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
-				CodexPolicy: managedPolicy(), Prompt: &prompt,
+				ObserveCodexPolicy: true, Prompt: &prompt,
 			})
 			if test.wantErr {
 				if !errors.Is(err, ErrManagedStale) || result.Prompt.State != PromptAcknowledged || len(topology.cleanups) != 0 || verifier.listCalls != 1 {
@@ -291,6 +291,24 @@ func TestOrdinaryCodexForkPrefixResolvesAfterOnePrompt(t *testing.T) {
 				t.Fatalf("result=%+v cleanup=%v verifier=%+v error=%v", result, topology.cleanups, verifier, err)
 			}
 		})
+	}
+}
+
+func TestOrdinaryCodexForkObservedPolicyConflictsRejectBeforeSourceRead(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	prompt, _ := PreparePrompt("hello")
+	for _, request := range []ForkRequest{
+		{Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab, ObserveCodexPolicy: true},
+		{Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab, ObserveCodexPolicy: true, CodexPolicy: managedPolicy(), Prompt: &prompt},
+		{Source: forkAgent("omp", "w1:p1", "/tmp/source.jsonl", "/tmp/project"), Profile: ForkProfile{Executable: "omp"}, Placement: sessionhost.NewTab, ObserveCodexPolicy: true, Prompt: &prompt},
+	} {
+		topology := &fakeTopology{}
+		runner := &scriptedRunner{}
+		forker := NewForker(Host{Runner: runner, Session: "named"})
+		forker.launcher = topology
+		if _, err := forker.Fork(context.Background(), request); !errors.Is(err, ErrUnsupportedFork) || len(runner.calls) != 0 || len(topology.requests) != 0 {
+			t.Fatalf("request=%+v calls=%v launches=%v error=%v", request, runner.calls, topology.requests, err)
+		}
 	}
 }
 

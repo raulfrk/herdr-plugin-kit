@@ -168,6 +168,24 @@ all shell correctness and concurrency tests.
 - Diagnostics: model seed, synthetic receipt, task-owned pane/process IDs, and
   bounded live evidence without credentials.
 
+## HYP-NATIVE-NEW-03 — Fresh native New never adopts an existing conversation
+
+- Claim: unprompted OMP and OpenCode New returns only a task-created background
+  target with a complete immutable identity absent from the prelaunch snapshot.
+- Fault model: resume/fork/session selectors, an inherited or reused identity,
+  cross-session routing, status changes during binding, stale pane metadata,
+  cancellation, timeout, or failed task-only cleanup.
+- Setup: deterministic default/named fixtures plus supported OMP 18.1.18 and
+  OpenCode 1.18.30 launches in task-owned Herdr workspaces; OpenCode New uses a
+  task-owned loopback server to allocate the exact fresh root session.
+- Independent oracle: exact literal argv and created pane identity, before/after
+  native session references, unchanged existing panes, and no focused target.
+- Falsified when: a lifecycle selector reaches topology, an earlier session is
+  reported as new, ordinary zero-turn Codex creates topology, or cleanup closes
+  anything except the recorded created target.
+- Diagnostics: task-owned session/workspace/tab/pane IDs and bounded agent-list
+  observations; no conversation content or credentials.
+
 ## Scaffold hypotheses
 
 ## HYP-SCAFFOLD-01 — Generation publishes one complete tree without overwrite

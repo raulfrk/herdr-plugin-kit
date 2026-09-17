@@ -94,10 +94,10 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionName := os.Getenv("HERDR_PLUGIN_KIT_LIVE_SESSION")
-	if sessionName == "" {
-		t.Fatal("HERDR_PLUGIN_KIT_LIVE_SESSION must name a task-owned session started with the reviewed OMP extensions")
+	var liveRunner command.Runner = runner
+	if sessionName != "" {
+		liveRunner = liveSessionRunner{Runner: runner, Session: sessionName}
 	}
-	liveRunner := liveSessionRunner{Runner: runner, Session: sessionName}
 	origin := createPromptLiveWorkspace(t, ctx, liveRunner, directory)
 	origin.SessionName = sessionName
 	host := Host{Runner: runner, Session: sessionName}
@@ -139,6 +139,23 @@ func TestPromptLiveOrdinaryNewAndForkUseExactNativeConversations(t *testing.T) {
 		{kind: "omp", argv: []string{"omp", "--model", "openai-codex/gpt-5.6-sol", "--no-skills", "--no-rules", "--no-tools"}, directory: directory},
 		{kind: "opencode", argv: []string{openCodeBinary}, directory: directory, openCode: server},
 		{kind: "codex", argv: []string{"codex"}, directory: repositoryDirectory, codexPolicy: liveCodexPolicy},
+	}
+	for _, test := range tests[:2] {
+		t.Run("native-new-"+test.kind, func(t *testing.T) {
+			started, err := NewNativeStarter(host).Start(ctx, NativeStartRequest{
+				Origin: origin, Argv: test.argv, Directory: test.directory,
+				Placement: sessionhost.NewTab, TabLabel: "api16-" + test.kind + "-native-new",
+				ReadyTimeout:        45 * time.Second,
+				StartOpenCodeServer: test.kind == "opencode",
+			})
+			if err != nil || started.Agent.Session == nil || started.Agent.Focused {
+				t.Fatalf("native New result=%+v error=%v", started, err)
+			}
+			trackPromptLiveSession(t, started.Agent, &ompSessions, &openCodeSessions)
+			if err := topology.Cleanup(ctx, started.Created); err != nil {
+				t.Fatalf("cleanup native New target: %v", err)
+			}
+		})
 	}
 	for _, test := range tests {
 		t.Run(test.kind, func(t *testing.T) {
