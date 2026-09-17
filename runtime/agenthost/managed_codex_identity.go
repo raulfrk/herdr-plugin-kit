@@ -25,9 +25,7 @@ var (
 	ErrManagedPaneBusy = errors.New("managed Codex pane is not safely idle")
 	ErrManagedNarrow   = errors.New("managed Codex status is incomplete; widen the pane and retry")
 	managedUUID        = regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	managedSessionID   = regexp.MustCompile(`(?m)Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
 	managedSessionPart = regexp.MustCompile(`(?m)^\s*│?\s*Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
-	managedForkedID    = regexp.MustCompile(`(?m)Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
 	managedForkedPart  = regexp.MustCompile(`(?m)^\s*│?\s*Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
 	managedANSI        = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	managedStatusCmd   = regexp.MustCompile(`(?m)^(?:›[ \t]+)?/status[ \t]*$`)
@@ -144,7 +142,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 			}
 			return Agent{}, managedStatusObservation{}, err
 		}
-		if !sameImmutable(agent, checkedAgent) || agent.Status != checkedAgent.Status || agent.Revision != checkedAgent.Revision || agent.StateChangeSeq != checkedAgent.StateChangeSeq {
+		if !sameManagedPreInputObservation(agent, checkedAgent) {
 			return Agent{}, managedStatusObservation{}, ErrManagedStale
 		}
 		if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
@@ -191,6 +189,19 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 		// to Herdr. Return the still-unregistered pane observation here.
 		return checkedAgent, observed, nil
 	}
+}
+
+func sameManagedPreInputObservation(before, after Agent) bool {
+	if !sameImmutable(before, after) {
+		return false
+	}
+	if before.Status != after.Status {
+		return false
+	}
+	if before.Revision != after.Revision {
+		return false
+	}
+	return before.StateChangeSeq == after.StateChangeSeq
 }
 
 func (l ManagedCodexLauncher) bindManagedIdentity(ctx context.Context, target sessionhost.Origin, cwd string, observed Agent, threadID string) (Agent, error) {
@@ -329,11 +340,16 @@ func validManagedThreadID(id string) bool {
 }
 
 func validManagedThreadPrefix(prefix string) bool {
-	if prefix == "" || validManagedThreadID(prefix) || managedSessionPart.FindStringSubmatch("Session: "+prefix) == nil {
+	if prefix == "" {
 		return false
 	}
-	hex := strings.ReplaceAll(prefix, "-", "")
-	return len(hex) >= 24 && len(hex) < 32
+	if validManagedThreadID(prefix) {
+		return false
+	}
+	if managedSessionPart.FindStringSubmatch("Session: "+prefix) == nil {
+		return false
+	}
+	return true
 }
 
 func managedWireThreadPrefix(wire wireAgent) string {
@@ -532,30 +548,28 @@ func parseManagedStatus(text, cwd string, service CodexServiceSnapshot, policy M
 func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string) (managedStatusObservation, error) {
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
 	marker := strings.LastIndex(normalized, "\n/status\n")
-	if marker < 0 && strings.HasPrefix(normalized, "/status\n") {
+	if marker == -1 {
+		if !strings.HasPrefix(normalized, "/status\n") {
+			return managedStatusObservation{}, ErrManagedNarrow
+		}
 		marker = 0
 	}
-	if marker < 0 {
-		return managedStatusObservation{}, ErrManagedNarrow
-	}
 	block := normalized[marker:]
-	sessions := managedSessionID.FindAllStringSubmatch(block, -1)
-	partialSessions := managedSessionPart.FindAllStringSubmatch(block, -1)
-	if len(sessions) > 1 {
+	partialSessions := managedSessionPart.FindAllStringSubmatch(block, 2)
+	if len(partialSessions) > 1 {
 		return managedStatusObservation{}, ErrManagedAmbiguous
 	}
 	identity := ""
-	if len(sessions) == 1 && validCodexThreadID(sessions[0][1]) {
-		identity = sessions[0][1]
-	} else if allowPrefix && len(partialSessions) == 1 && len(strings.ReplaceAll(partialSessions[0][1], "-", "")) >= 24 {
+	if len(partialSessions) == 1 && validManagedThreadID(partialSessions[0][1]) {
 		identity = partialSessions[0][1]
-	} else if allowPrefix && len(partialSessions) == 0 && validManagedThreadPrefix(fallbackPrefix) && strings.Contains(block, "╰") && strings.Contains(block, "╯") {
+	} else if allowPrefix && len(partialSessions) == 1 && validManagedThreadPrefix(partialSessions[0][1]) {
+		identity = partialSessions[0][1]
+	} else if allowPrefix && len(partialSessions) == 0 && validManagedStatusFallback(block, fallbackPrefix) {
 		identity = fallbackPrefix
 	} else {
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
-	forked := managedForkedID.FindAllStringSubmatch(block, -1)
-	partialForked := managedForkedPart.FindAllStringSubmatch(block, -1)
+	partialForked := managedForkedPart.FindAllStringSubmatch(block, 2)
 	if len(partialForked) > 1 {
 		return managedStatusObservation{}, ErrManagedAmbiguous
 	}
@@ -563,11 +577,14 @@ func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapsho
 	if len(partialForked) == 1 {
 		forkedFromPrefix = partialForked[0][1]
 	}
-	wantUUIDs := len(forked)
+	wantUUIDs := 0
 	if validManagedThreadID(identity) {
 		wantUUIDs++
 	}
-	if len(partialSessions) > 1 || len(partialSessions) == 0 && identity != fallbackPrefix || len(forked) > 1 || len(managedUUID.FindAllString(block, -1)) != wantUUIDs {
+	if validManagedThreadID(forkedFromPrefix) {
+		wantUUIDs++
+	}
+	if len(managedUUID.FindAllString(block, 3)) != wantUUIDs {
 		return managedStatusObservation{}, ErrManagedAmbiguous
 	}
 	if fallbackPrefix != "" && !(strings.HasPrefix(identity, fallbackPrefix) || strings.HasPrefix(fallbackPrefix, identity)) {
@@ -606,6 +623,16 @@ func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapsho
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
 	return managedStatusObservation{identity: identity, forkedFromPrefix: forkedFromPrefix, policy: observedPolicy, fromStatus: true}, nil
+}
+
+func validManagedStatusFallback(block, prefix string) bool {
+	if !validManagedThreadPrefix(prefix) {
+		return false
+	}
+	if !strings.Contains(block, "╰") {
+		return false
+	}
+	return strings.Contains(block, "╯")
 }
 
 func managedStatusField(block, label string) string {

@@ -235,6 +235,29 @@ func TestCodexLifecycleListCLIThreadsRejectsInvalidDirectoryBeforeRPC(t *testing
 	}
 }
 
+func TestCodexLifecycleListCLIThreadsRejectsInvalidIdentityOrWrongDirectory(t *testing.T) {
+	for name, thread := range map[string]string{
+		"invalid identity": `{"id":"","cwd":"/tmp/project","modelProvider":"openai"}`,
+		"wrong directory":  `{"id":"01a09f5c-37cc-77f1-9409-e9aa070ad8d0","cwd":"/tmp/other","modelProvider":"openai","model":"gpt-5.6-sol","reasoningEffort":"medium"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+				lifecycleInitialize(t, ctx, conn)
+				request := readRPCRequest(t, ctx, conn, "thread/list")
+				sendRPCResult(t, ctx, conn, request.ID, `{"data":[`+thread+`],"nextCursor":null}`)
+			})
+			verifier, err := newCodexLifecycle(context.Background(), socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verifier.Close()
+			if _, err := verifier.ListCLIThreads(context.Background(), "/tmp/project"); !errors.Is(err, ErrManagedStale) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
 func TestCodexLifecycleReadConstraintsPreservesExactValidatedResponses(t *testing.T) {
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 		lifecycleInitialize(t, ctx, conn)

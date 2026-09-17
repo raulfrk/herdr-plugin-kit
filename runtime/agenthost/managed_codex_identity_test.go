@@ -54,6 +54,7 @@ func TestManagedThreadPrefixRequiresExactStrongPartialUUID(t *testing.T) {
 		{"", false},
 		{managedNewID, false},
 		{"01a09f5c-37cc-77f1-9409-e9", false},
+		{"01a09f5c-37cc-77f1-9409-e9aa", true},
 		{"01a09f5c-37cc-77f1-9409-e9aa070a", true},
 		{"01a09f5c-37cc-77f1-9409-e9aa070ad8d", true},
 		{"01a09f5c-37cc-77f1-9409-e9aa070ad8dZ", false},
@@ -73,13 +74,37 @@ func TestManagedThreadPrefixRequiresExactStrongPartialUUID(t *testing.T) {
 	}
 }
 
+func TestManagedPreInputObservationRequiresEveryStableField(t *testing.T) {
+	before := managedAgent(sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}, "/tmp/project", managedNewID, false)
+	before.Session = nil
+	before.Revision = 7
+	before.StateChangeSeq = 9
+	if !sameManagedPreInputObservation(before, before) {
+		t.Fatal("identical observation rejected")
+	}
+	for name, mutate := range map[string]func(*Agent){
+		"immutable":      func(agent *Agent) { agent.PaneID = "w1:p3" },
+		"status":         func(agent *Agent) { agent.Status = "done" },
+		"revision":       func(agent *Agent) { agent.Revision++ },
+		"state sequence": func(agent *Agent) { agent.StateChangeSeq++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			after := before
+			mutate(&after)
+			if sameManagedPreInputObservation(before, after) {
+				t.Fatalf("accepted %+v", after)
+			}
+		})
+	}
+}
+
 func TestParseManagedStatusRequiresExactStatusMarkerAndSessionCardinality(t *testing.T) {
 	base := `/status
 │ >_ OpenAI Codex (v0.154.0) │
 │ Model: gpt-5.6-sol (reasoning medium) │
 │ Directory: /tmp/project │
 │ Session: 01a09f5c-37cc-77f1-9409-e9aa070ad8d0 │`
-	for _, text := range []string{base, "old output\n" + base} {
+	for _, text := range []string{base, "\n" + base, "old output\n" + base} {
 		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, managedPolicy()); err != nil {
 			t.Fatalf("valid marker rejected: %v", err)
 		}
@@ -182,6 +207,12 @@ func TestParseObservedZeroTurnStatusUsesStrongExactTitlePrefix(t *testing.T) {
 	if _, err := parseManagedStatusObservation(strings.Replace(text, "╰", " ", 1), "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, prefix); err == nil {
 		t.Fatal("accepted incomplete status block")
 	}
+	if _, err := parseManagedStatusObservation(strings.Replace(text, "╯", " ", 1), "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, prefix); err == nil {
+		t.Fatal("accepted status block without lower border")
+	}
+	if _, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, false, prefix); err == nil {
+		t.Fatal("accepted fallback prefix when prefix discovery was disabled")
+	}
 }
 
 func TestParseManagedStatusRejectsTruncationDriftAndAmbiguity(t *testing.T) {
@@ -260,6 +291,10 @@ func TestExactCodexStatusDraftAcceptsObserved01540MenuAndRejectsAmbiguity(t *tes
 	compact := "header\n\x1b[1m›\x1b[0m /status\n\n  \x1b[1m\x1b[38;5;6m/status      show current session configuration and token\x1b[0m\n  \x1b[1m\x1b[38;5;6m             usage\x1b[0m"
 	if !exactCodexSingleLineDraft(observed, "/status") || !exactCodexSingleLineDraft(compact, "/status") {
 		t.Fatal("Codex 0.154.0 status menu rejected")
+	}
+	help := strings.Replace(observed, "›\x1b[0m /status\n", "›\x1b[0m /help\n", 1)
+	if exactCodexSingleLineDraft(help, "/help") {
+		t.Fatal("status autocomplete accepted for a different command")
 	}
 	for _, text := range []string{
 		strings.ReplaceAll(observed, "\x1b[0m\x1b[1m", ""),
