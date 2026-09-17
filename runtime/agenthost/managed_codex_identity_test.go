@@ -101,6 +101,53 @@ func TestManagedPreInputObservationRequiresEveryStableField(t *testing.T) {
 	}
 }
 
+func TestManagedPrefixReadbackRequirementAndGuards(t *testing.T) {
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	for _, test := range []struct {
+		allow    bool
+		identity string
+		want     bool
+	}{
+		{true, prefix, true},
+		{false, prefix, false},
+		{true, managedNewID, false},
+		{false, managedNewID, false},
+	} {
+		if got := managedPrefixReadbackRequired(test.allow, test.identity); got != test.want {
+			t.Fatalf("allow=%t identity=%q got=%t want=%t", test.allow, test.identity, got, test.want)
+		}
+	}
+	origin := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	expected := managedAgent(origin, "/tmp/project", managedNewID, false)
+	expected.Session = nil
+	wire := wireFromAgent(expected)
+	longer := prefix + "d8"
+	if !validManagedPrefixReadback(expected, wire, expected, prefix, prefix) ||
+		!validManagedPrefixReadback(expected, wire, expected, prefix, longer) ||
+		!validManagedPrefixReadback(expected, wire, expected, longer, prefix) {
+		t.Fatal("compatible prefix readback rejected")
+	}
+	for name, mutate := range map[string]func(*wireAgent, *Agent, *string){
+		"focused":        func(wire *wireAgent, _ *Agent, _ *string) { wire.Focused = true },
+		"launch pending": func(wire *wireAgent, _ *Agent, _ *string) { wire.LaunchPending = true },
+		"working":        func(wire *wireAgent, _ *Agent, _ *string) { wire.AgentStatus = "working" },
+		"bound session": func(_ *wireAgent, agent *Agent, _ *string) {
+			agent.Session = &SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: managedNewID}
+		},
+		"pane drift":   func(_ *wireAgent, agent *Agent, _ *string) { agent.PaneID = "w1:p3" },
+		"empty title":  func(_ *wireAgent, _ *Agent, title *string) { *title = "" },
+		"wrong prefix": func(_ *wireAgent, _ *Agent, title *string) { *title = "02b19f5c-37cc-77f1-9409-e9aa070a" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedWire, changedAgent, title := wire, expected, prefix
+			mutate(&changedWire, &changedAgent, &title)
+			if validManagedPrefixReadback(expected, changedWire, changedAgent, prefix, title) {
+				t.Fatal("unsafe readback accepted")
+			}
+		})
+	}
+}
+
 func TestParseManagedStatusRequiresExactStatusMarkerAndSessionCardinality(t *testing.T) {
 	base := `/status
 │ >_ OpenAI Codex (v0.154.0) │

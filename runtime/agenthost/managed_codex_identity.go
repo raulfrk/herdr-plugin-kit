@@ -173,14 +173,14 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 		if err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
-		if allowPrefix && validManagedThreadPrefix(observed.identity) {
+		if managedPrefixReadbackRequired(allowPrefix, observed.identity) {
 			finalWire, finalAgent, err := l.readManagedAgent(ctx, target, cwd)
-			finalPrefix := managedWireThreadPrefix(finalWire)
-			if err != nil || finalWire.Focused || finalWire.LaunchPending || !managedPaneQuiescent(finalWire) || finalAgent.Session != nil || !sameImmutable(checkedAgent, finalAgent) || finalPrefix == "" || !(strings.HasPrefix(finalPrefix, observed.identity) || strings.HasPrefix(observed.identity, finalPrefix)) {
-				if err == nil {
-					err = ErrManagedStale
-				}
+			if err != nil {
 				return Agent{}, managedStatusObservation{}, err
+			}
+			finalPrefix := managedWireThreadPrefix(finalWire)
+			if !validManagedPrefixReadback(checkedAgent, finalWire, finalAgent, observed.identity, finalPrefix) {
+				return Agent{}, managedStatusObservation{}, ErrManagedStale
 			}
 			if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
 				return Agent{}, managedStatusObservation{}, err
@@ -190,6 +190,26 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 		// to Herdr. Return the still-unregistered pane observation here.
 		return checkedAgent, observed, nil
 	}
+}
+
+func managedPrefixReadbackRequired(allowPrefix bool, identity string) bool {
+	return allowPrefix && validManagedThreadPrefix(identity)
+}
+
+func validManagedPrefixReadback(expected Agent, wire wireAgent, current Agent, observedPrefix, titlePrefix string) bool {
+	if !managedPaneQuiescent(wire) {
+		return false
+	}
+	if current.Session != nil {
+		return false
+	}
+	if !sameImmutable(expected, current) {
+		return false
+	}
+	if titlePrefix == "" {
+		return false
+	}
+	return strings.HasPrefix(titlePrefix, observedPrefix) || strings.HasPrefix(observedPrefix, titlePrefix)
 }
 
 func sameManagedPreInputObservation(before, after Agent) bool {
