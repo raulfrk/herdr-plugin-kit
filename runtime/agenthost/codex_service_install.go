@@ -280,8 +280,8 @@ func (s *CodexService) Install(ctx context.Context, options CodexServiceInstallO
 	}, nil
 }
 
-// Start enables the owned unit for boot persistence and starts it. It refuses
-// coexistence with the configured home's canonical native daemon.
+// Start enables the owned unit for boot persistence and starts it. Once the
+// shared service is installed, ordinary Codex's native daemon may coexist.
 func (s *CodexService) Start(ctx context.Context) (CodexServiceSnapshot, error) {
 	return s.startOrRestart(ctx, false, false)
 }
@@ -322,7 +322,7 @@ func (s *CodexService) startOrRestart(ctx context.Context, restart, confirmDisco
 		return CodexServiceSnapshot{State: CodexServiceDegraded}, errors.Join(ErrCodexServiceUnavailable, err)
 	}
 	defer lock.Close()
-	paths, descriptor, snapshot, err := s.runtimeConfiguration(bounds)
+	paths, descriptor, snapshot, err := s.runtimeConfiguration()
 	if err != nil {
 		return snapshot, err
 	}

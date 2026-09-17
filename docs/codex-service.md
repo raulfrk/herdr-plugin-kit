@@ -13,10 +13,12 @@ TUI and resumes its existing conversation through that socket, preserving its
 identity, history, directory, and effective settings. It does not replace the
 conversation or move it to a different pane.
 
-The socket is outside Codex's native-daemon discovery location. A running native
-daemon must be retired at an explicit maintenance checkpoint before migration
-is complete; installing a second socket alone does not prevent native automatic
-attachment. The Kit does not silently stop that daemon or migrate active clients.
+The socket is outside Codex's native-daemon discovery location. A native daemon
+that predates initial service installation must be retired at an explicit
+maintenance checkpoint; installing a second socket alone does not migrate its
+active clients. After installation, plain `codex` may start its ordinary native
+daemon alongside the shared service. Runtime health validates the Kit-owned
+systemd process and socket independently and never stops the ordinary daemon.
 
 For prompt delivery, an ordinary target has a zero `CodexService` snapshot.
 Its exact pane/process, empty composer, and full Herdr hook identity authorize

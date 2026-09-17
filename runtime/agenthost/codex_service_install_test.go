@@ -676,14 +676,33 @@ func TestCodexServiceInstallRefusesForeignLoadedUnitBeforeWriting(t *testing.T) 
 	}
 }
 
-func TestCodexServiceStartRejectsNativeDaemonBeforeServiceCommands(t *testing.T) {
+func TestCodexServiceStartAllowsNativeDaemonAfterInstallation(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
-	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
-	if _, err := fixture.service.Start(context.Background()); !errors.Is(err, ErrCodexServiceMigrationRequired) {
-		t.Fatalf("err=%v", err)
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
+		panic("starting an installed shared service must not probe the ordinary Codex daemon")
 	}
-	if calls := fixture.runner.observed(); len(calls) != 0 {
-		t.Fatalf("start touched service despite native daemon: %+v", calls)
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		switch {
+		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
+			return command.Result{}, nil
+		case executable == "loginctl" && reflect.DeepEqual(args, []string{"show-user", "1000", "--property=Linger", "--value"}):
+			return command.Result{Stdout: []byte("yes\n")}, nil
+		case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+			return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "enable", fixture.paths.unitName()}):
+			return command.Result{}, nil
+		default:
+			return command.Result{}, errors.New("unexpected command")
+		}
+	}
+	snapshot, err := fixture.service.Start(context.Background())
+	if err != nil || snapshot.State != CodexServiceReady {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	for _, call := range fixture.runner.observed() {
+		if call.executable == "systemctl" && len(call.args) > 1 && call.args[1] == "start" {
+			t.Fatalf("already-running shared service was restarted: %+v", call)
+		}
 	}
 }
 

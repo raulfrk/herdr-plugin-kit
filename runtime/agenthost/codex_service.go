@@ -142,7 +142,7 @@ func (s *CodexService) Ensure(ctx context.Context) (CodexServiceSnapshot, error)
 	}
 	defer lock.Close()
 
-	paths, descriptor, snapshot, err := s.runtimeConfiguration(bounds)
+	paths, descriptor, snapshot, err := s.runtimeConfiguration()
 	if err != nil {
 		return snapshot, err
 	}
@@ -176,7 +176,7 @@ func (s *CodexService) Inspect(ctx context.Context) (CodexServiceSnapshot, error
 	}
 	bounds, cancel := s.withTimeout(ctx)
 	defer cancel()
-	paths, descriptor, snapshot, err := s.runtimeConfiguration(bounds)
+	paths, descriptor, snapshot, err := s.runtimeConfiguration()
 	if err != nil {
 		return snapshot, err
 	}
@@ -204,7 +204,7 @@ func (s *CodexService) lifecycleLock(ctx context.Context, paths codexServicePath
 	return acquireCodexServiceLifecycleLock(ctx, paths, create, uid, s.pollInterval)
 }
 
-func (s *CodexService) runtimeConfiguration(ctx context.Context) (codexServicePaths, codexServiceDescriptor, CodexServiceSnapshot, error) {
+func (s *CodexService) runtimeConfiguration() (codexServicePaths, codexServiceDescriptor, CodexServiceSnapshot, error) {
 	home, err := s.resolveHome()
 	if err != nil {
 		return codexServicePaths{}, codexServiceDescriptor{}, CodexServiceSnapshot{State: CodexServiceDegraded}, fmt.Errorf("%w: resolve CODEX_HOME: %v", ErrCodexServiceDrift, err)
@@ -220,13 +220,6 @@ func (s *CodexService) runtimeConfiguration(ctx context.Context) (codexServicePa
 	}
 	if descriptor.CodexHome != home {
 		return paths, descriptor, snapshot, fmt.Errorf("%w: requested CODEX_HOME %q differs from configured home", ErrCodexServiceDrift, home)
-	}
-	active, err := s.nativeDaemon(ctx, home)
-	if err != nil {
-		return paths, descriptor, snapshot, errors.Join(ErrCodexServiceUnavailable, err)
-	}
-	if active {
-		return paths, descriptor, snapshot, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
 	}
 	return paths, descriptor, snapshot, nil
 }

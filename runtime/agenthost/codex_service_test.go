@@ -188,8 +188,11 @@ func TestCodexServiceInspectIsReadOnlyWhenStopped(t *testing.T) {
 	}
 }
 
-func TestCodexServiceEnsureStartsOnlyStoppedOwnedUnit(t *testing.T) {
+func TestCodexServiceEnsureStartsStoppedOwnedUnitAlongsideNativeDaemon(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
+		panic("starting an installed shared service must not probe the ordinary Codex daemon")
+	}
 	var shows int
 	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
 		switch {
@@ -288,7 +291,7 @@ func TestCodexServiceEnsureReportsBoundedSocketReadinessTimeout(t *testing.T) {
 	}
 }
 
-func TestCodexServiceRejectsDifferentConsumerHomeAndNativeDaemon(t *testing.T) {
+func TestCodexServiceRejectsDifferentConsumerHomeAndAllowsNativeDaemonCoexistence(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
 	fixture.service.resolveHome = func() (string, error) { return filepath.Join(t.TempDir(), "other"), nil }
 	if snapshot, err := fixture.service.Ensure(context.Background()); snapshot.State != CodexServiceDegraded || !errors.Is(err, ErrCodexServiceDrift) {
@@ -299,12 +302,20 @@ func TestCodexServiceRejectsDifferentConsumerHomeAndNativeDaemon(t *testing.T) {
 	}
 
 	fixture = newCodexServiceFixture(t)
-	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
-	if snapshot, err := fixture.service.Inspect(context.Background()); snapshot.State != CodexServiceDegraded || !errors.Is(err, ErrCodexServiceMigrationRequired) {
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
+		panic("runtime inspection must not probe the ordinary Codex daemon")
+	}
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		if executable != "systemctl" || !reflect.DeepEqual(args, codexSystemdShowArgs(fixture.descriptor.UnitName)) {
+			return command.Result{}, errors.New("unexpected command")
+		}
+		return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+	}
+	if snapshot, err := fixture.service.Inspect(context.Background()); snapshot.State != CodexServiceReady || err != nil {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	if calls := fixture.runner.observed(); len(calls) != 0 {
-		t.Fatalf("native coexistence ran service command: %+v", calls)
+	if calls := fixture.runner.observed(); len(calls) != 1 || calls[0].executable != "systemctl" {
+		t.Fatalf("native coexistence inspection calls=%+v", calls)
 	}
 }
 
