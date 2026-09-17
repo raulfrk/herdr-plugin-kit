@@ -319,7 +319,7 @@ func (c *codexLifecycle) ReadThread(ctx context.Context, threadID string) (codex
 }
 
 func (c *codexLifecycle) ListCLIThreads(ctx context.Context, cwd string) ([]codexThreadIdentity, error) {
-	if cwd == "" || !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd || strings.ContainsRune(cwd, 0) {
+	if !cleanAbsolute(cwd) {
 		return nil, ErrManagedStale
 	}
 	const maxPages = 10

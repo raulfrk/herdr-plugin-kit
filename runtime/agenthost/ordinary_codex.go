@@ -54,11 +54,11 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 			return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
 		}
 		wire, current, err := b.launcher.readManagedAgent(readyCtx, target.Origin, directory)
-		if err != nil || wire.Focused || wire.LaunchPending || !sameOrdinaryPane(prepared.Agent, current) || current.Session != nil && (!validManagedSession(current.Session) || !strings.HasPrefix(current.Session.Value, prepared.Prefix)) {
-			if err == nil {
-				err = ErrManagedStale
-			}
+		if err != nil {
 			return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
+		}
+		if !validOrdinaryBindingObservation(prepared, wire, current) {
+			return Agent{}, ManagedCodexPolicy{}, closeVerifier(ErrManagedStale)
 		}
 		threadID = prepared.Prefix
 		if !validManagedThreadID(threadID) {
@@ -84,15 +84,12 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 			if err != nil {
 				return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
 			}
-			if candidate.ID != threadID || candidate.CWD != directory || candidate.ForkedFromID != b.sourceID || candidate.Model == "" || candidate.ReasoningEffort == "" {
+			if !validResolvedOrdinaryIdentity(candidate, threadID, directory, b.sourceID) {
 				return Agent{}, ManagedCodexPolicy{}, closeVerifier(ErrManagedStale)
 			}
-			observedPolicy := ManagedCodexPolicy{Model: candidate.Model, ReasoningEffort: candidate.ReasoningEffort}
-			if prepared.Policy != (ManagedCodexPolicy{}) && (observedPolicy.Model != prepared.Policy.Model || observedPolicy.ReasoningEffort != prepared.Policy.ReasoningEffort) {
-				return Agent{}, ManagedCodexPolicy{}, closeVerifier(ErrManagedPolicyDrift)
-			}
-			if prepared.Policy == (ManagedCodexPolicy{}) {
-				prepared.Policy = observedPolicy
+			prepared.Policy, err = resolvedOrdinaryPolicy(prepared.Policy, candidate)
+			if err != nil {
+				return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
 			}
 			break
 		}
@@ -107,11 +104,11 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 		return Agent{}, ManagedCodexPolicy{}, err
 	}
 	wire, current, err := b.launcher.readManagedAgent(readyCtx, target.Origin, directory)
-	if err != nil || wire.Focused || wire.LaunchPending || !sameOrdinaryPane(prepared.Agent, current) || current.Session != nil && (!validManagedSession(current.Session) || !strings.HasPrefix(current.Session.Value, prepared.Prefix)) {
-		if err == nil {
-			err = ErrManagedStale
-		}
+	if err != nil {
 		return Agent{}, ManagedCodexPolicy{}, err
+	}
+	if !validOrdinaryBindingObservation(prepared, wire, current) {
+		return Agent{}, ManagedCodexPolicy{}, ErrManagedStale
 	}
 	agent, err := b.launcher.bindManagedIdentity(readyCtx, target.Origin, directory, current, threadID)
 	return agent, prepared.Policy, err
@@ -120,6 +117,28 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 func sameOrdinaryPane(expected, current Agent) bool {
 	expected.Session = current.Session
 	return sameImmutable(expected, current) && expected.CWD == current.CWD
+}
+
+func validOrdinaryBindingObservation(prepared ordinaryCodexPreparation, wire wireAgent, current Agent) bool {
+	if wire.Focused || wire.LaunchPending || !sameOrdinaryPane(prepared.Agent, current) {
+		return false
+	}
+	return current.Session == nil || validManagedSession(current.Session) && strings.HasPrefix(current.Session.Value, prepared.Prefix)
+}
+
+func validResolvedOrdinaryIdentity(candidate codexThreadIdentity, threadID, directory, sourceID string) bool {
+	return candidate.ID == threadID && candidate.CWD == directory && candidate.ForkedFromID == sourceID && candidate.Model != "" && candidate.ReasoningEffort != ""
+}
+
+func resolvedOrdinaryPolicy(expected ManagedCodexPolicy, candidate codexThreadIdentity) (ManagedCodexPolicy, error) {
+	observed := ManagedCodexPolicy{Model: candidate.Model, ReasoningEffort: candidate.ReasoningEffort}
+	if expected == (ManagedCodexPolicy{}) {
+		return observed, nil
+	}
+	if observed.Model != expected.Model || observed.ReasoningEffort != expected.ReasoningEffort {
+		return ManagedCodexPolicy{}, ErrManagedPolicyDrift
+	}
+	return expected, nil
 }
 
 type ordinaryCodexPreparation struct {
@@ -195,10 +214,8 @@ func (b *ordinaryCodexBinding) Prepare(ctx context.Context, target sessionhost.C
 	if err != nil {
 		return ordinaryCodexPreparation{}, err
 	}
-	if observed.fromStatus {
-		if b.operation == ManagedFork && (observed.forkedFromPrefix == "" || !strings.HasPrefix(b.sourceID, observed.forkedFromPrefix)) || b.operation == ManagedNew && observed.forkedFromPrefix != "" {
-			return ordinaryCodexPreparation{}, ErrManagedStale
-		}
+	if observed.fromStatus && !validOrdinaryStatusParent(b.operation, b.sourceID, observed.forkedFromPrefix) {
+		return ordinaryCodexPreparation{}, ErrManagedStale
 	}
 	if validManagedThreadPrefix(observed.identity) && observed.policy.Model != "" && observed.policy.ReasoningEffort != "" {
 		prepared := ordinaryCodexPreparation{Agent: agent, Prefix: observed.identity, Policy: observed.policy}
@@ -229,6 +246,13 @@ func (b *ordinaryCodexBinding) Prepare(ctx context.Context, target sessionhost.C
 		return ordinaryCodexPreparation{}, err
 	}
 	return ordinaryCodexPreparation{Agent: agent, Policy: observed.policy}, nil
+}
+
+func validOrdinaryStatusParent(operation ManagedOperation, sourceID, parentPrefix string) bool {
+	if operation == ManagedNew {
+		return parentPrefix == ""
+	}
+	return operation == ManagedFork && parentPrefix != "" && strings.HasPrefix(sourceID, parentPrefix)
 }
 
 func (b *ordinaryCodexBinding) recheckForkSource(ctx context.Context) error {

@@ -54,6 +54,7 @@ type fakeManagedVerifier struct {
 	confirmErr   error
 	read         []codexThreadIdentity
 	listed       []codexThreadIdentity
+	listedSeq    [][]codexThreadIdentity
 	listErr      error
 	listCalls    int
 	recheck      codexThreadIdentity
@@ -97,6 +98,11 @@ func (f *fakeManagedVerifier) ReadThread(context.Context, string) (codexThreadId
 }
 func (f *fakeManagedVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
 	f.listCalls++
+	if len(f.listedSeq) != 0 {
+		value := f.listedSeq[0]
+		f.listedSeq = f.listedSeq[1:]
+		return append([]codexThreadIdentity(nil), value...), f.listErr
+	}
 	return append([]codexThreadIdentity(nil), f.listed...), f.listErr
 }
 func (f *fakeManagedVerifier) RecheckIdentity(context.Context, string) (codexThreadIdentity, error) {

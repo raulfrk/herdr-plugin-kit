@@ -234,6 +234,68 @@ func TestDeliverPromptAcceptsGuardedOrdinaryCodexPrefixExactlyOnce(t *testing.T)
 	}
 }
 
+func TestPromptTargetTopLevelGuardsRejectEachDrift(t *testing.T) {
+	target, _ := validPromptTarget(t)
+	validHost := NewPromptHost(Host{Runner: &promptRunner{}})
+	for name, change := range map[string]func(*PromptHost, *PromptTarget){
+		"runner":        func(host *PromptHost, _ *PromptTarget) { host.Host.Runner = nil },
+		"invalid agent": func(_ *PromptHost, target *PromptTarget) { target.Agent.PaneID = "" },
+		"session route": func(_ *PromptHost, target *PromptTarget) { target.Agent.SessionName = "named" },
+		"focused":       func(_ *PromptHost, target *PromptTarget) { target.Agent.Focused = true },
+		"status":        func(_ *PromptHost, target *PromptTarget) { target.Agent.Status = "working" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			host, changed := validHost, target
+			change(&host, &changed)
+			if err := host.validateTarget(changed); !errors.Is(err, ErrPromptStale) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestSamePromptAcknowledgementRequiresExactPaneAndCompatibleSession(t *testing.T) {
+	target, _ := validPromptTarget(t)
+	before := target.Agent
+	prefix := managedNewID[:len(managedNewID)-4]
+	if !samePromptAcknowledgement(before, before, "") {
+		t.Fatal("exact identified acknowledgement rejected")
+	}
+	unbound := before
+	unbound.Session = nil
+	if !samePromptAcknowledgement(unbound, unbound, prefix) || !samePromptAcknowledgement(unbound, before, prefix) {
+		t.Fatal("valid prefix acknowledgement rejected")
+	}
+	for name, after := range map[string]Agent{
+		"immutable drift": func() Agent { value := unbound; value.PaneID = "w1:p3"; return value }(),
+		"invalid session": func() Agent {
+			value := before
+			session := *before.Session
+			session.Source = "other"
+			value.Session = &session
+			return value
+		}(),
+		"wrong prefix": func() Agent {
+			value := before
+			session := *before.Session
+			session.Value = "02b19f5c-37cc-77f1-9409-e9aa070ad8d0"
+			value.Session = &session
+			return value
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if samePromptAcknowledgement(unbound, after, prefix) {
+				t.Fatalf("accepted %+v", after)
+			}
+		})
+	}
+	drifted := before
+	drifted.PaneID = "w1:p3"
+	if samePromptAcknowledgement(before, drifted, "") {
+		t.Fatal("identified acknowledgement drift accepted")
+	}
+}
+
 func TestDeliverPromptUsesOneDirectSocketRequestWithExactBytes(t *testing.T) {
 	target, wire := validPromptTarget(t)
 	socket := filepath.Join(t.TempDir(), "herdr.sock")

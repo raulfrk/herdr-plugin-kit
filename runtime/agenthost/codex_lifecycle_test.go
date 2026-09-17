@@ -226,6 +226,15 @@ func TestCodexLifecycleListCLIThreadsRejectsAmbiguousPagination(t *testing.T) {
 	}
 }
 
+func TestCodexLifecycleListCLIThreadsRejectsInvalidDirectoryBeforeRPC(t *testing.T) {
+	client := &codexLifecycle{}
+	for _, cwd := range []string{"", "relative", "/tmp/project/..", "/tmp/project\x00other"} {
+		if _, err := client.ListCLIThreads(context.Background(), cwd); !errors.Is(err, ErrManagedStale) {
+			t.Fatalf("cwd=%q error=%v", cwd, err)
+		}
+	}
+}
+
 func TestCodexLifecycleReadConstraintsPreservesExactValidatedResponses(t *testing.T) {
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 		lifecycleInitialize(t, ctx, conn)

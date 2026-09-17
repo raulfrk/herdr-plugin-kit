@@ -401,6 +401,14 @@ func TestPromptStartRejectsOwnedSelectorsAndPromptArgumentsBeforeCreation(t *tes
 	}
 }
 
+func TestValidatePromptStartRejectsInvalidExplicitCodexPolicy(t *testing.T) {
+	request := PromptStartRequest{Argv: []string{"codex"}, Directory: "/tmp/project", CodexPolicy: managedPolicy()}
+	request.CodexPolicy.Model = ""
+	if _, kind, err := validatePromptStart(request); err == nil || kind != "" {
+		t.Fatalf("kind=%q error=%v", kind, err)
+	}
+}
+
 func TestPromptStarterOpenCodeLaunchFailureDeletesOnlyPrecreatedSession(t *testing.T) {
 	topology := &fakeTopology{launchErr: errors.New("launch failed")}
 	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}

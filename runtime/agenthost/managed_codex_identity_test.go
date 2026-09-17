@@ -46,6 +46,56 @@ func TestParseManagedStatusAcceptsObservedWrappedCodex01540Shape(t *testing.T) {
 	}
 }
 
+func TestManagedThreadPrefixRequiresExactStrongPartialUUID(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		valid bool
+	}{
+		{"", false},
+		{managedNewID, false},
+		{"01a09f5c-37cc-77f1-9409-e9", false},
+		{"01a09f5c-37cc-77f1-9409-e9aa070a", true},
+		{"01a09f5c-37cc-77f1-9409-e9aa070ad8d", true},
+		{"01a09f5c-37cc-77f1-9409-e9aa070ad8dZ", false},
+	} {
+		if got := validManagedThreadPrefix(test.value); got != test.valid {
+			t.Fatalf("prefix=%q valid=%t want=%t", test.value, got, test.valid)
+		}
+	}
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	if got := managedWireThreadPrefix(wireAgent{TerminalTitleStripped: prefix + "..."}); got != prefix {
+		t.Fatalf("wire prefix=%q", got)
+	}
+	for _, title := range []string{"", managedNewID, "title " + prefix, "01a09f5c-37cc-77f1-9409-e9..."} {
+		if got := managedWireThreadPrefix(wireAgent{TerminalTitleStripped: title}); got != "" {
+			t.Fatalf("title=%q prefix=%q", title, got)
+		}
+	}
+}
+
+func TestParseManagedStatusRequiresExactStatusMarkerAndSessionCardinality(t *testing.T) {
+	base := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Model: gpt-5.6-sol (reasoning medium) │
+│ Directory: /tmp/project │
+│ Session: 01a09f5c-37cc-77f1-9409-e9aa070ad8d0 │`
+	for _, text := range []string{base, "old output\n" + base} {
+		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, managedPolicy()); err != nil {
+			t.Fatalf("valid marker rejected: %v", err)
+		}
+	}
+	for _, text := range []string{
+		strings.TrimPrefix(base, "/status\n"),
+		"old output" + base,
+		base + "\n│ Session: 01a09f5c-37cc-77f1-9409-e9aa070ad8d2 │",
+		base + "\n│ Forked from: 01a09f5c-37cc-77f1-9409-e9aa070ad8d1 │\n│ Forked from: 01a09f5c-37cc-77f1-9409-e9aa070ad8d2 │",
+	} {
+		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, managedPolicy()); err == nil {
+			t.Fatalf("invalid status accepted: %q", text)
+		}
+	}
+}
+
 func TestParseOrdinaryStatusUsesPaneUUIDWithoutRemoteOrServerInference(t *testing.T) {
 	base := `/status
 │ >_ OpenAI Codex (v0.154.0) │
@@ -375,12 +425,30 @@ func TestDiscoverManagedIdentityRejectsEachPreInputDrift(t *testing.T) {
 	base.Session = nil
 	busy := base
 	busy.Focused = true
+	driftedPane := base
+	driftedPane.PaneID = "w1:p3"
+	driftedStatus := base
+	driftedStatus.Status = "done"
+	driftedRevision := base
+	driftedRevision.Revision++
+	driftedSequence := base
+	driftedSequence.StateChangeSeq++
+	recheck := func(agent Agent) []command.Result {
+		return []command.Result{
+			managedAgentResult(t, base), {Stdout: managedEmptyComposer("header")},
+			paneScrollResult(t, target, 0), {Stdout: []byte("old")}, managedAgentResult(t, agent),
+		}
+	}
 	tests := []struct {
 		name    string
 		results []command.Result
 	}{
 		{"busy initial", []command.Result{managedAgentResult(t, busy)}},
-		{"busy recheck", []command.Result{managedAgentResult(t, base), {Stdout: managedEmptyComposer("header")}, paneScrollResult(t, target, 0), {Stdout: []byte("old")}, managedAgentResult(t, busy)}},
+		{"busy recheck", recheck(busy)},
+		{"pane recheck", recheck(driftedPane)},
+		{"status recheck", recheck(driftedStatus)},
+		{"revision recheck", recheck(driftedRevision)},
+		{"state sequence recheck", recheck(driftedSequence)},
 		{"draft recheck", []command.Result{managedAgentResult(t, base), {Stdout: managedEmptyComposer("header")}, paneScrollResult(t, target, 0), {Stdout: []byte("old")}, managedAgentResult(t, base), {Stdout: []byte("\x1b[1m›\x1b[0m user draft")}}},
 	}
 	for _, test := range tests {
@@ -511,6 +579,22 @@ func TestAwaitFreshStatusWaitsForStatusBlockAfterCommandEcho(t *testing.T) {
 	}
 }
 
+func TestAwaitFreshStatusCountsEveryPriorCommandMarker(t *testing.T) {
+	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	prior := observedManagedStatus() + "\n" + strings.Replace(observedManagedStatus(), managedNewID, managedSecondID, 1)
+	history := prior + "\n› " + observedManagedStatus()
+	runner := &scriptedRunner{results: []command.Result{
+		paneScrollResult(t, target, 30), {Stdout: []byte(history)}, {Stdout: managedEmptyComposer("status block")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	id, err := launcher.awaitFreshStatus(ctx, target, prior, "/tmp/project", managedServiceSnapshot(), managedPolicy())
+	if err != nil || id != managedNewID || len(runner.calls) != 3 {
+		t.Fatalf("id=%q calls=%#v error=%v", id, runner.calls, err)
+	}
+}
+
 func TestComposerParsersCoverEmptyAndHomeDisplayBranches(t *testing.T) {
 	if value, ok := codexComposer("header\n› /status\n"); !ok || value != "/status" {
 		t.Fatalf("composer=%q ok=%t", value, ok)
@@ -535,9 +619,13 @@ func TestDiscoverManagedIdentityRetriesUnregisteredAgentOnlyWhileExactProcessLiv
 	launcher := NewManagedCodexLauncher(Host{Runner: runner})
 	topology := &fakeManagedTopology{}
 	launcher.topology = topology
+	started := time.Now()
 	got, id, err := launcher.discoverManagedIdentity(managedIdentityTestContext(t), target, "/tmp/project", []string{"codex"}, managedServiceSnapshot(), managedPolicy())
 	if err != nil || id != agent.Session.Value || got.Session == nil || got.Session.Value != id {
 		t.Fatalf("agent=%+v id=%q error=%v", got, id, err)
+	}
+	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
+		t.Fatalf("unregistered-agent retry spun without backoff: %v", elapsed)
 	}
 	if len(runner.calls) != 5 || len(topology.verifications) != 3 {
 		t.Fatalf("calls=%#v verifications=%#v", runner.calls, topology.verifications)

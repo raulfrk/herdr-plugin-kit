@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
@@ -42,6 +43,102 @@ func TestOrdinaryCodexBindingAcceptsObservedPolicyWithoutExternalCalls(t *testin
 	binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, ManagedNew, Agent{}, "/tmp/project", ManagedCodexPolicy{}, true, 0)
 	if err != nil || binding == nil || binding.policy != (ManagedCodexPolicy{}) {
 		t.Fatalf("binding=%+v error=%v", binding, err)
+	}
+}
+
+func TestOrdinaryCodexBindingObservationRequiresEveryPaneGuard(t *testing.T) {
+	target := sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"}
+	unbound := managedAgent(target, "/tmp/project", managedNewID, false)
+	unbound.Session = nil
+	prepared := ordinaryCodexPreparation{Agent: unbound, Prefix: "01a09f5c-37cc-77f1-9409-e9aa070a"}
+	validWire := wireFromAgent(unbound)
+	validWire.AgentSession = nil
+	otherID := "02b19f5c-37cc-77f1-9409-e9aa070ad8d0"
+	tests := []struct {
+		name  string
+		wire  wireAgent
+		agent Agent
+		valid bool
+	}{
+		{"unbound", validWire, unbound, true},
+		{"focused", func() wireAgent { value := validWire; value.Focused = true; return value }(), unbound, false},
+		{"launch pending", func() wireAgent { value := validWire; value.LaunchPending = true; return value }(), unbound, false},
+		{"pane changed", validWire, func() Agent { value := unbound; value.PaneID = "w1:p2"; return value }(), false},
+		{"cwd changed", validWire, func() Agent { value := unbound; value.CWD = "/tmp/other"; return value }(), false},
+		{"valid bound", validWire, managedAgent(target, "/tmp/project", managedNewID, false), true},
+		{"invalid session", validWire, func() Agent {
+			value := managedAgent(target, "/tmp/project", managedNewID, false)
+			value.Session.Source = "other"
+			return value
+		}(), false},
+		{"wrong prefix", validWire, managedAgent(target, "/tmp/project", otherID, false), false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validOrdinaryBindingObservation(prepared, test.wire, test.agent); got != test.valid {
+				t.Fatalf("valid=%t want=%t", got, test.valid)
+			}
+		})
+	}
+}
+
+func TestResolvedOrdinaryIdentityRequiresEveryAuthoritativeField(t *testing.T) {
+	valid := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ForkedFromID: managedSourceID, Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	if !validResolvedOrdinaryIdentity(valid, managedNewID, "/tmp/project", managedSourceID) {
+		t.Fatal("valid identity rejected")
+	}
+	for name, mutate := range map[string]func(*codexThreadIdentity){
+		"id":        func(value *codexThreadIdentity) { value.ID = managedSecondID },
+		"cwd":       func(value *codexThreadIdentity) { value.CWD = "/tmp/other" },
+		"parent":    func(value *codexThreadIdentity) { value.ForkedFromID = managedOriginalID },
+		"model":     func(value *codexThreadIdentity) { value.Model = "" },
+		"reasoning": func(value *codexThreadIdentity) { value.ReasoningEffort = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if validResolvedOrdinaryIdentity(candidate, managedNewID, "/tmp/project", managedSourceID) {
+				t.Fatalf("accepted %+v", candidate)
+			}
+		})
+	}
+}
+
+func TestResolvedOrdinaryPolicyObservesOrPreservesExactPolicy(t *testing.T) {
+	candidate := codexThreadIdentity{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	observed, err := resolvedOrdinaryPolicy(ManagedCodexPolicy{}, candidate)
+	if err != nil || observed.Model != candidate.Model || observed.ReasoningEffort != candidate.ReasoningEffort {
+		t.Fatalf("observed=%+v error=%v", observed, err)
+	}
+	expected := managedPolicy()
+	preserved, err := resolvedOrdinaryPolicy(expected, candidate)
+	if err != nil || preserved != expected {
+		t.Fatalf("preserved=%+v error=%v", preserved, err)
+	}
+	for _, candidate := range []codexThreadIdentity{{Model: "other", ReasoningEffort: "medium"}, {Model: "gpt-5.6-sol", ReasoningEffort: "high"}} {
+		if _, err := resolvedOrdinaryPolicy(expected, candidate); !errors.Is(err, ErrManagedPolicyDrift) {
+			t.Fatalf("candidate=%+v error=%v", candidate, err)
+		}
+	}
+}
+
+func TestOrdinaryStatusParentMatchesOperationExactly(t *testing.T) {
+	prefix := managedSourceID[:len(managedSourceID)-4]
+	for _, test := range []struct {
+		operation ManagedOperation
+		parent    string
+		valid     bool
+	}{
+		{ManagedNew, "", true},
+		{ManagedNew, prefix, false},
+		{ManagedFork, "", false},
+		{ManagedFork, "02b19f5c-37cc-77f1-9409-e9aa070a", false},
+		{ManagedFork, prefix, true},
+		{ManagedOperation("other"), prefix, false},
+	} {
+		if got := validOrdinaryStatusParent(test.operation, managedSourceID, test.parent); got != test.valid {
+			t.Fatalf("operation=%q parent=%q valid=%t want=%t", test.operation, test.parent, got, test.valid)
+		}
 	}
 }
 
@@ -192,6 +289,33 @@ func TestOrdinaryCodexBindingRejectsAmbiguousDriftedAndCancelledPrefixResolution
 				t.Fatalf("listCalls=%d calls=%q error=%v", verifier.listCalls, runner.calls, err)
 			}
 		})
+	}
+}
+
+func TestOrdinaryCodexPrefixResolutionBacksOffBeforeRetry(t *testing.T) {
+	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	unbound.Session = nil
+	bound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	prefix := managedNewID[:len(managedNewID)-4]
+	identity := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	verifier := &fakeManagedVerifier{listedSeq: [][]codexThreadIdentity{nil, {identity}}, read: []codexThreadIdentity{identity}}
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, unbound), managedAgentResult(t, unbound), managedAgentResult(t, unbound),
+		{}, managedAgentResult(t, bound), managedAgentResult(t, bound),
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	launcher.topology = &fakeManagedTopology{}
+	launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	launcher.verifiers = fakeManagedVerifierFactory{verifier}
+	binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedNew, readyTimeout: DefaultPromptReadyTimeout}
+	started := time.Now()
+	got, _, err := binding.resolvePersistedIdentity(context.Background(), target, "/tmp/project", []string{"codex"}, ordinaryCodexPreparation{Agent: unbound, Prefix: prefix, Policy: managedPolicy()})
+	if err != nil || got.Session == nil || got.Session.Value != managedNewID || verifier.listCalls != 2 {
+		t.Fatalf("agent=%+v listCalls=%d error=%v", got, verifier.listCalls, err)
+	}
+	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
+		t.Fatalf("thread-list retry spun without backoff: %v", elapsed)
 	}
 }
 
