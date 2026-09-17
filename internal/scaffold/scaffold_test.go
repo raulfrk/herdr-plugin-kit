@@ -972,6 +972,161 @@ func TestValidateAllowsFuturePluginSourceFiles(t *testing.T) {
 	}
 }
 
+func TestProductionImportsIncludeFactoredProductionAndExcludeTests(t *testing.T) {
+	directory := t.TempDir()
+	for _, name := range []string{
+		filepath.Join("cmd", "plugin"), filepath.Join("internal", "feature"), filepath.Join("internal", "unused"),
+		filepath.Join("internal", "feature", "testdata"),
+	} {
+		if err := os.MkdirAll(filepath.Join(directory, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join("cmd", "plugin", "main.go"):                      "package main\nimport (\n_ \"" + KitModule + "/config\"\n_ \"example.com/plugin/internal/feature\"\n)\n",
+		filepath.Join("internal", "feature", "feature.go"):             "package feature\nimport \"" + KitModule + "/ui/interaction\"\nvar _ = interaction.NewBuffer\n",
+		filepath.Join("internal", "feature", "feature_test.go"):        "package feature\nimport _ \"" + KitModule + "/ui/debugui\"\n",
+		filepath.Join("internal", "feature", "_ignored.go"):            "package feature\nimport (",
+		filepath.Join("internal", "feature", "helper.s"):               "this is not Go source",
+		filepath.Join("internal", "feature", "windows.go"):             "//go:build windows\n\npackage feature\nimport (",
+		filepath.Join("internal", "feature", "testdata", "fixture.go"): "package fixture\nimport _ \"" + KitModule + "/ui/shell\"\n",
+		filepath.Join("internal", "unused", "unused.go"):               "package unused\nimport _ \"" + KitModule + "/ui/theme\"\n",
+	}
+	for name, source := range files {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directoryFile, root, err := openStableDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryFile.Close()
+	defer root.Close()
+	imports, err := productionImports(root, "cmd/plugin", "example.com/plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !imports[KitModule+"/config"] || !imports[KitModule+"/ui/interaction"] {
+		t.Fatalf("production imports = %v", imports)
+	}
+	if imports[KitModule+"/ui/debugui"] {
+		t.Fatalf("test-only import counted as production: %v", imports)
+	}
+	for _, ignored := range []string{KitModule + "/ui/shell", KitModule + "/ui/theme"} {
+		if imports[ignored] {
+			t.Fatalf("ignored or unreachable import %q counted as production: %v", ignored, imports)
+		}
+	}
+}
+
+func TestProductionImportsRejectUnsafeSources(t *testing.T) {
+	tests := map[string]func(*testing.T, string){
+		"malformed": func(t *testing.T, directory string) {
+			if err := os.WriteFile(filepath.Join(directory, "bad.go"), []byte("package bad\nimport ("), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"oversized": func(t *testing.T, directory string) {
+			source := append([]byte("//"), bytes.Repeat([]byte("x"), maxFileBytes)...)
+			source = append(source, []byte("\npackage large\n")...)
+			if err := os.WriteFile(filepath.Join(directory, "large.go"), source, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink": func(t *testing.T, directory string) {
+			target := filepath.Join(t.TempDir(), "outside.go")
+			if err := os.WriteFile(target, []byte("package outside\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(directory, "linked.go")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, prepare := range tests {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			prepare(t, directory)
+			directoryFile, root, err := openStableDirectory(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directoryFile.Close()
+			defer root.Close()
+			if _, err := productionImports(root, ".", "example.com/plugin"); err == nil {
+				t.Fatal("unsafe production source passed import collection")
+			}
+		})
+	}
+
+	directory := t.TempDir()
+	directoryFile, root, err := openStableDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryFile.Close()
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productionImports(root, ".", "example.com/plugin"); err == nil {
+		t.Fatal("closed production root passed import collection")
+	}
+}
+
+func TestLocalProductionDirectoryRejectsIgnoredAndInvalidPaths(t *testing.T) {
+	const module = "example.com/plugin"
+	tests := map[string]struct {
+		importPath string
+		want       string
+		ok         bool
+	}{
+		"module root":          {importPath: module, want: ".", ok: true},
+		"nested production":    {importPath: module + "/internal/feature", want: "internal/feature", ok: true},
+		"external module":      {importPath: "example.com/other/internal/feature"},
+		"unclean traversal":    {importPath: module + "/internal/../feature"},
+		"testdata component":   {importPath: module + "/internal/testdata/feature"},
+		"hidden component":     {importPath: module + "/internal/.fixture/feature"},
+		"underscore component": {importPath: module + "/internal/_fixture/feature"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := localProductionDirectory(test.importPath, module)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("localProductionDirectory(%q) = %q, %t; want %q, %t", test.importPath, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestValidateUsesProductionImportsButNotTestOnlyImports(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugin")
+	if err := Generate(Options{ID: "example.factored", Name: "Factored", Output: root}); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(root, "cmd", "example.factored", "main.go")
+	mutateText(t, mainPath, KitModule+"/ui/interaction", "example.com/removed/interaction")
+	mutateText(t, mainPath, "import (", "import (\n\t_ \"example.com/herdr/example.factored/internal/surface\"")
+	directory := filepath.Join(root, "internal", "surface")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testSource := "package surface\nimport _ \"" + KitModule + "/ui/interaction\"\n"
+	if err := os.WriteFile(filepath.Join(directory, "surface_test.go"), []byte(testSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(root); err == nil {
+		t.Fatal("required import found only in generated tests passed validation")
+	}
+	source := "package surface\nimport \"" + KitModule + "/ui/interaction\"\nvar _ = interaction.NewBuffer\n"
+	if err := os.WriteFile(filepath.Join(directory, "surface.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(root); err != nil {
+		t.Fatalf("factored production import rejected: %v", err)
+	}
+}
+
 func TestHerdrEncodingUsesArgvArraysAndOverlayPanes(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "plugin")
 	if err := Generate(Options{ID: "example.quote", Name: `Quoted "Name"`, Description: "line one\nline two", Output: root}); err != nil {

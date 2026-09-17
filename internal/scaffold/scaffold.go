@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -531,12 +533,9 @@ func validateOpened(rootFS *os.Root) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", sourceName, err)
 	}
-	imports := make(map[string]bool, len(parsedSource.Imports))
-	for _, imported := range parsedSource.Imports {
-		path, err := strconv.Unquote(imported.Path.Value)
-		if err == nil {
-			imports[path] = true
-		}
+	imports, err := productionImports(rootFS, filepath.Dir(sourceName), "example.com/herdr/"+kitManifest.PluginID)
+	if err != nil {
+		return err
 	}
 	for _, required := range []string{
 		KitModule + "/config", KitModule + "/diagnostics", KitModule + "/documentstore", KitModule + "/runtime/interop",
@@ -568,6 +567,85 @@ func validateOpened(rootFS *os.Root) error {
 	}
 	_, err = readRegular(rootFS, filepath.Join("cmd", kitManifest.PluginID, "main_test.go"))
 	return err
+}
+
+func productionImports(rootFS *os.Root, entryDirectory, modulePath string) (map[string]bool, error) {
+	imports := make(map[string]bool)
+	visited := make(map[string]bool)
+	pending := []string{filepath.ToSlash(entryDirectory)}
+	buildContext := build.Default
+	buildContext.JoinPath = pathpkg.Join
+	for len(pending) > 0 {
+		directory := pending[0]
+		pending = pending[1:]
+		if visited[directory] {
+			continue
+		}
+		visited[directory] = true
+		entries, err := fs.ReadDir(rootFS.FS(), directory)
+		if err != nil {
+			return nil, fmt.Errorf("read production package %s: %w", directory, err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			sourceName := pathpkg.Join(directory, name)
+			source, err := readRegular(rootFS, sourceName)
+			if err != nil {
+				return nil, err
+			}
+			buildContext.OpenFile = func(openName string) (io.ReadCloser, error) {
+				if pathpkg.Clean(openName) != sourceName {
+					return nil, os.ErrNotExist
+				}
+				return io.NopCloser(bytes.NewReader(source)), nil
+			}
+			matched, err := buildContext.MatchFile(directory, name)
+			if err != nil {
+				return nil, fmt.Errorf("match production source %s: %w", sourceName, err)
+			}
+			if !matched {
+				continue
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), sourceName, source, parser.ImportsOnly)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", sourceName, err)
+			}
+			for _, imported := range file.Imports {
+				value, err := strconv.Unquote(imported.Path.Value)
+				if err != nil {
+					continue
+				}
+				imports[value] = true
+				if local, ok := localProductionDirectory(value, modulePath); ok && !visited[local] {
+					pending = append(pending, local)
+				}
+			}
+		}
+	}
+	return imports, nil
+}
+
+func localProductionDirectory(importPath, modulePath string) (string, bool) {
+	if importPath == modulePath {
+		return ".", true
+	}
+	prefix := modulePath + "/"
+	if !strings.HasPrefix(importPath, prefix) {
+		return "", false
+	}
+	directory := strings.TrimPrefix(importPath, prefix)
+	if pathpkg.Clean(directory) != directory {
+		return "", false
+	}
+	for _, component := range strings.Split(directory, "/") {
+		if component == "" || component == "testdata" || strings.HasPrefix(component, ".") || strings.HasPrefix(component, "_") {
+			return "", false
+		}
+	}
+	return directory, true
 }
 
 func validateSourceContract(file *ast.File, pluginID, pluginName string) error {
