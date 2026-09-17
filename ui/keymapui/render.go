@@ -7,6 +7,7 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
 	"github.com/raulfrk/herdr-plugin-kit/ui/shell"
 	"github.com/raulfrk/herdr-plugin-kit/ui/view"
+	"github.com/rivo/uniseg"
 )
 
 func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
@@ -31,7 +32,12 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 	base := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Background}
 	muted := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground}
 	header := view.Style{Foreground: context.Theme.Accent, Background: context.Theme.PanelBackground, Bold: true}
-	if s.view == checkerScreen || s.view == captureScreen || s.view == textScreen || s.view == helpScreen {
+	customHelp := s.view == helpScreen && s.options.HelpOverview != nil
+	if customHelp {
+		frame.Fill(0, 0, w, h, base)
+		s.renderHelpOverview(frame, context, w, h)
+	}
+	if !customHelp && (s.view == checkerScreen || s.view == captureScreen || s.view == textScreen || s.view == helpScreen) {
 		frame.Fill(0, 0, w, h, base)
 		title := "KEY CHECKER"
 		var lines []string
@@ -128,6 +134,77 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 	frame.Fill(0, h-1, w, 1, muted)
 	put(frame, "keymap-footer", 0, h-1, w, 1, []string{footer}, muted, false)
 	return frame, nil
+}
+
+func (s *Surface) renderHelpOverview(frame *view.Frame, context shell.RenderContext, width, height int) {
+	overview := s.options.HelpOverview
+	if overview == nil || width <= 0 || height <= 0 {
+		return
+	}
+	header := view.Style{Foreground: context.Theme.Accent, Background: context.Theme.PanelBackground, Bold: true}
+	frame.Fill(0, 0, width, min(2, height), header)
+	status := HelpOverviewStatus{}
+	if overview.Status != nil {
+		status = overview.Status(width)
+	}
+	status.Text = strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(status.Text))
+	statusStyle := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground, Bold: true}
+	switch status.Tone {
+	case HelpStatusSuccess:
+		statusStyle.Foreground = context.Theme.Green
+	case HelpStatusWarning:
+		statusStyle.Foreground = context.Theme.Yellow
+	case HelpStatusError:
+		statusStyle.Foreground = context.Theme.Red
+	}
+	statusWidth := min(width, uniseg.StringWidth(status.Text))
+	put(frame, "keymap-overview-title", 0, 0, max(0, width-statusWidth-1), 1, []string{overview.Title}, header, false)
+	if statusWidth > 0 {
+		put(frame, "keymap-overview-status", width-statusWidth, 0, statusWidth, 1, []string{status.Text}, statusStyle, false)
+	}
+	if height > 1 {
+		navigation := view.Style{Foreground: context.Theme.Muted, Background: context.Theme.PanelBackground}
+		current := navigation
+		current.Foreground = context.Theme.Accent
+		put(frame, "keymap-overview-previous", 1, 1, 1, 1, []string{"‹"}, navigation, false)
+		currentWidth := uniseg.StringWidth(overview.Current)
+		currentX := max(3, (width-currentWidth)/2)
+		put(frame, "keymap-overview-current", currentX, 1, currentWidth, 1, []string{overview.Current}, current, false)
+		menuWidth := uniseg.StringWidth(overview.ViewMenu)
+		if menuWidth > 0 {
+			put(frame, "keymap-overview-next", max(currentX+currentWidth+1, width-menuWidth-3), 1, 1, 1, []string{"›"}, navigation, false)
+			put(frame, "keymap-overview-menu", max(0, width-menuWidth), 1, menuWidth, 1, []string{overview.ViewMenu}, navigation, false)
+		}
+	}
+	visible := max(1, height-3)
+	selected := min(max(0, s.helpSelected), len(overview.Rows)-1)
+	start := max(0, selected-visible+1)
+	start = min(start, max(0, len(overview.Rows)-visible))
+	labelWidth := min(22, max(12, width*38/100))
+	keyWidth := min(16, max(8, width*22/100))
+	for offset, index := 0, start; offset < visible && index < len(overview.Rows); offset, index = offset+1, index+1 {
+		y := 2 + offset
+		row := overview.Rows[index]
+		rowStyle := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Background}
+		marker := " "
+		if index == selected {
+			marker = "▏"
+			rowStyle.Background, rowStyle.Bold = context.Theme.ActiveRowBackground, true
+			frame.Fill(0, y, width, 1, rowStyle)
+		}
+		put(frame, "keymap-overview-marker", 0, y, 1, 1, []string{marker}, view.Style{Foreground: context.Theme.Accent, Background: rowStyle.Background, Bold: rowStyle.Bold}, false)
+		put(frame, "keymap-overview-label", 2, y, max(0, labelWidth-1), 1, []string{row.Label}, rowStyle, false)
+		keyX := labelWidth + 1
+		keyStyle := view.Style{Foreground: context.Theme.Text, Background: context.Theme.Surface}
+		if index == selected {
+			keyStyle.Foreground, keyStyle.Background, keyStyle.Bold = context.Theme.Accent, context.Theme.SelectionBackground, true
+		}
+		frame.Fill(keyX, y, min(keyWidth, max(0, width-keyX)), 1, keyStyle)
+		sequences := sequenceLabel(s.runtime.Effective(row.Context, row.Action))
+		put(frame, "keymap-overview-binding", keyX+1, y, max(0, min(keyWidth-2, width-keyX-1)), 1, []string{sequences}, keyStyle, false)
+		summaryX := keyX + keyWidth + 1
+		put(frame, "keymap-overview-summary", summaryX, y, max(0, width-summaryX), 1, []string{row.Summary}, view.Style{Foreground: context.Theme.Muted, Background: rowStyle.Background}, false)
+	}
 }
 
 func fittingFooter(width int, full, compact string) string {

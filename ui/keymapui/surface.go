@@ -52,6 +52,7 @@ type Options struct {
 	InteractiveHelp  bool
 	HelpOpenedAction string
 	HelpCommands     []HelpCommand
+	HelpOverview     *HelpOverview
 }
 
 // HelpCommand adds one consumer-owned action to interactive generated Help.
@@ -62,6 +63,35 @@ type HelpCommand struct {
 	Label    string
 	Action   string
 	Defaults []keymap.Sequence
+}
+
+// HelpOverview replaces the generic interactive Help list with a consumer-
+// described overview while the Kit retains binding resolution and editing.
+// Status must be read-only and non-blocking because it runs during rendering.
+type HelpOverview struct {
+	Title, Current, ViewMenu string
+	Status                   func(columns int) HelpOverviewStatus
+	Rows                     []HelpOverviewRow
+}
+
+type HelpOverviewStatus struct {
+	Text string
+	Tone HelpOverviewStatusTone
+}
+
+type HelpOverviewStatusTone uint8
+
+const (
+	HelpStatusNeutral HelpOverviewStatusTone = iota
+	HelpStatusSuccess
+	HelpStatusWarning
+	HelpStatusError
+)
+
+// HelpOverviewRow associates consumer copy with one real configurable action.
+// Context and Action must exactly match the consumer's keymap catalog.
+type HelpOverviewRow struct {
+	Label, Context, Action, Summary string
 }
 
 type screen uint8
@@ -94,6 +124,7 @@ type Surface struct {
 	helpOffset                                int
 	helpSelected                              int
 	helpCommands                              map[string]HelpCommand
+	helpOverviewActions                       []keymap.Action
 	draftOpen                                 bool
 	draft                                     keymap.Document
 	draftRevision                             documentstore.Revision
@@ -123,11 +154,12 @@ func New(options Options) (*Surface, error) {
 	if options.StartDebug && options.Debug == nil {
 		return nil, errors.New("keymap debug surface is nil")
 	}
-	helpCommands, err := validateHelpCommands(options)
+	helpCommands, overview, overviewActions, err := validateHelpOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	s := &Surface{options: options, showingDebug: options.StartDebug, now: time.Now, helpCommands: helpCommands}
+	options.HelpOverview = overview
+	s := &Surface{options: options, showingDebug: options.StartDebug, now: time.Now, helpCommands: helpCommands, helpOverviewActions: overviewActions}
 	if s.menu, err = newList("ACTIONS", "keymap.actions"); err != nil {
 		return nil, err
 	}
@@ -155,40 +187,103 @@ func New(options Options) (*Surface, error) {
 	return s, nil
 }
 
-func validateHelpCommands(options Options) (map[string]HelpCommand, error) {
-	if !options.InteractiveHelp && (options.HelpOpenedAction != "" || len(options.HelpCommands) != 0) {
-		return nil, errors.New("Help extensions require interactive Help")
+func validateHelpOptions(options Options) (map[string]HelpCommand, *HelpOverview, []keymap.Action, error) {
+	if !options.InteractiveHelp && (options.HelpOpenedAction != "" || len(options.HelpCommands) != 0 || options.HelpOverview != nil) {
+		return nil, nil, nil, errors.New("Help extensions require interactive Help")
 	}
 	targets := make(map[string]bool)
-	for _, action := range options.Main.KeymapCatalog() {
+	catalog := options.Main.KeymapCatalog()
+	for _, action := range catalog {
 		targets[action.ID] = true
 	}
 	if options.HelpOpenedAction != "" && !targets[options.HelpOpenedAction] {
-		return nil, errors.New("Help-opened action must target a main action")
+		return nil, nil, nil, errors.New("Help-opened action must target a main action")
 	}
 	commands := make(map[string]HelpCommand, len(options.HelpCommands))
 	for _, command := range options.HelpCommands {
 		id := helpCommandID(command)
 		if _, err := diagnostics.NewID(id); err != nil {
-			return nil, fmt.Errorf("help command ID: %w", err)
+			return nil, nil, nil, fmt.Errorf("help command ID: %w", err)
 		}
 		if command.Label == "" || command.Action == "" || !targets[command.Action] {
-			return nil, fmt.Errorf("help command %q must have a label and target a main action", command.ID)
+			return nil, nil, nil, fmt.Errorf("help command %q must have a label and target a main action", command.ID)
 		}
 		if _, duplicate := commands[id]; duplicate {
-			return nil, fmt.Errorf("duplicate help command %q", command.ID)
+			return nil, nil, nil, fmt.Errorf("duplicate help command %q", command.ID)
 		}
 		for _, sequence := range command.Defaults {
 			if len(sequence) != 1 {
-				return nil, fmt.Errorf("help command %q defaults must be single-stroke", command.ID)
+				return nil, nil, nil, fmt.Errorf("help command %q defaults must be single-stroke", command.ID)
 			}
 			if _, err := keymap.Normalize(sequence[0]); err != nil {
-				return nil, fmt.Errorf("help command %q default: %w", command.ID, err)
+				return nil, nil, nil, fmt.Errorf("help command %q default: %w", command.ID, err)
 			}
 		}
 		commands[id] = command
 	}
-	return commands, nil
+	overview, actions, err := validateHelpOverview(options.HelpOverview, catalog)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return commands, overview, actions, nil
+}
+
+func validateHelpOverview(overview *HelpOverview, catalog []keymap.Action) (*HelpOverview, []keymap.Action, error) {
+	if overview == nil {
+		return nil, nil, nil
+	}
+	if err := validateHelpOverviewText("title", overview.Title, 80, true); err != nil {
+		return nil, nil, err
+	}
+	if err := validateHelpOverviewText("current", overview.Current, 64, false); err != nil {
+		return nil, nil, err
+	}
+	if err := validateHelpOverviewText("view menu", overview.ViewMenu, 32, false); err != nil {
+		return nil, nil, err
+	}
+	if len(overview.Rows) == 0 || len(overview.Rows) > 64 {
+		return nil, nil, errors.New("Help overview must contain between 1 and 64 rows")
+	}
+	byKey := make(map[string]keymap.Action, len(catalog))
+	for _, action := range catalog {
+		byKey[action.Context+"\x00"+action.ID] = action
+	}
+	clone := *overview
+	clone.Rows = append([]HelpOverviewRow(nil), overview.Rows...)
+	actions := make([]keymap.Action, 0, len(clone.Rows))
+	seen := make(map[string]bool, len(clone.Rows))
+	for index, row := range clone.Rows {
+		if err := validateHelpOverviewText(fmt.Sprintf("row %d label", index+1), row.Label, 64, true); err != nil {
+			return nil, nil, err
+		}
+		if err := validateHelpOverviewText(fmt.Sprintf("row %d summary", index+1), row.Summary, 160, false); err != nil {
+			return nil, nil, err
+		}
+		key := row.Context + "\x00" + row.Action
+		action, ok := byKey[key]
+		if !ok {
+			return nil, nil, fmt.Errorf("Help overview row %d must reference a catalog action", index+1)
+		}
+		if seen[key] {
+			return nil, nil, fmt.Errorf("duplicate Help overview action reference %q/%q", row.Context, row.Action)
+		}
+		seen[key] = true
+		actions = append(actions, action)
+	}
+	return &clone, actions, nil
+}
+
+func validateHelpOverviewText(field, value string, limit int, required bool) error {
+	if required && strings.TrimSpace(value) == "" {
+		return fmt.Errorf("Help overview %s is required", field)
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("Help overview %s must be single-line", field)
+	}
+	if len([]rune(value)) > limit {
+		return fmt.Errorf("Help overview %s exceeds %d characters", field, limit)
+	}
+	return nil
 }
 
 func (s *Surface) Close() error {

@@ -2,6 +2,7 @@ package keymapui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -946,6 +947,313 @@ func TestInteractiveHelpEditsSelectedActionAndRoutesDeclaredCommands(t *testing.
 	d.wait(t, func(o observation) bool { return o.view == entryScreen && !o.pending })
 	if s.selected.ID != "probe.edit" {
 		t.Fatalf("Enter opened %q, want selected Help action", s.selected.ID)
+	}
+}
+
+func TestHelpOverviewValidatesCatalogReferences(t *testing.T) {
+	p := &probe{name: "example"}
+	valid := HelpOverview{
+		Title: "ACTIONS ◈ SHORTCUTS", Current: "? · Keys", ViewMenu: "g views",
+		Rows: []HelpOverviewRow{{Label: "Search", Context: "example.results", Action: "probe.edit", Summary: "type query · enter switch"}},
+	}
+	for _, test := range []struct {
+		name     string
+		overview HelpOverview
+		want     string
+	}{
+		{name: "interactive required", overview: valid, want: "interactive Help"},
+		{name: "missing action", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "Missing", Context: "example.results", Action: "probe.missing"}}}, want: "catalog action"},
+		{name: "duplicate reference", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "One", Context: "example.results", Action: "probe.edit"}, {Label: "Two", Context: "example.results", Action: "probe.edit"}}}, want: "duplicate"},
+		{name: "multiline label", overview: HelpOverview{Title: "Keys", Rows: []HelpOverviewRow{{Label: "bad\nlabel", Context: "example.results", Action: "probe.edit"}}}, want: "single-line"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: test.name != "interactive required", HelpOverview: &test.overview})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want containing %q", err, test.want)
+			}
+		})
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	catalog := (&probe{name: "bounds", extraActions: 64}).KeymapCatalog()
+	rows := make([]HelpOverviewRow, 64)
+	for index := range rows {
+		rows[index] = HelpOverviewRow{Label: fmt.Sprintf("Row %d", index+1), Context: "bounds.results", Action: fmt.Sprintf("probe.extra.%02d", index)}
+	}
+	if _, _, err := validateHelpOverview(&HelpOverview{Title: "Keys", Rows: rows}, catalog); err != nil {
+		t.Fatalf("64-row boundary rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		rows []HelpOverviewRow
+		want string
+	}{
+		{name: "zero rows", want: "must contain between 1 and 64 rows"},
+		{name: "65 rows", rows: append(rows, HelpOverviewRow{Label: "Too many", Context: "bounds.results", Action: "probe.refresh"}), want: "must contain between 1 and 64 rows"},
+		{name: "second label", rows: []HelpOverviewRow{rows[0], {Context: "bounds.results", Action: "probe.extra.01"}}, want: "row 2 label is required"},
+		{name: "second summary", rows: []HelpOverviewRow{rows[0], {Label: "Row 2", Context: "bounds.results", Action: "probe.extra.01", Summary: strings.Repeat("x", 161)}}, want: "row 2 summary exceeds 160 characters"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, validationErr := validateHelpOverview(&HelpOverview{Title: "Keys", Rows: test.rows}, catalog)
+			if validationErr == nil || validationErr.Error() != "Help overview "+test.want {
+				t.Fatalf("error=%v want=%q", validationErr, "Help overview "+test.want)
+			}
+		})
+	}
+}
+
+func TestHelpOverviewUsesEffectiveBindingsThemeAndReferencedEditTarget(t *testing.T) {
+	p := &probe{name: "example"}
+	status := "Codex ● ready"
+	overview := HelpOverview{
+		Title: "ACTIONS ◈ SHORTCUTS", Current: "? · Keys", ViewMenu: "g views",
+		Status: func(int) HelpOverviewStatus { return HelpOverviewStatus{Text: status, Tone: HelpStatusSuccess} },
+		Rows: []HelpOverviewRow{
+			{Label: "Attention queue", Context: "example.results", Action: "probe.refresh", Summary: "enter switch · x exclude"},
+			{Label: "Agent search", Context: "example.results", Action: "probe.edit", Summary: "type query · enter switch"},
+			{Label: "Finish query", Context: "example.editing", Action: "probe.finish", Summary: "save exact input"},
+		},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.view, s.helpOrigin, s.helpContext = helpScreen, baseScreen, keymap.Context{ID: "example.results"}
+
+	palettes := []theme.Palette{}
+	for _, id := range []string{"terminal", "catppuccin", "catppuccin-latte"} {
+		palette, paletteErr := theme.Builtin(id)
+		if paletteErr != nil {
+			t.Fatal(paletteErr)
+		}
+		palettes = append(palettes, palette)
+	}
+	custom := palettes[1]
+	custom.ID = "custom-proof"
+	custom.Background, custom.PanelBackground = theme.Color("#010101"), theme.Color("#020202")
+	custom.ActiveRowBackground, custom.SelectionBackground = theme.Color("#030303"), theme.Color("#040404")
+	custom.Surface, custom.Border = theme.Color("#050505"), theme.Color("#060606")
+	custom.Text, custom.Muted, custom.Accent = theme.Color("#070707"), theme.Color("#080808"), theme.Color("#090909")
+	custom.Red, custom.Green, custom.Yellow = theme.Color("#100001"), theme.Color("#100002"), theme.Color("#100003")
+	custom.Blue, custom.Magenta, custom.Cyan = theme.Color("#100004"), theme.Color("#100005"), theme.Color("#100006")
+	palettes = append(palettes, custom)
+
+	for _, size := range []responsive.Size{{Columns: 110, Rows: 24}, {Columns: 80, Rows: 18}, {Columns: 48, Rows: 18}, {Columns: 40, Rows: 10}} {
+		var geometry string
+		for _, palette := range palettes {
+			frame, renderErr := s.Render(shell.RenderContext{Layout: responsive.Resolve(size), Theme: palette})
+			if renderErr != nil {
+				t.Fatalf("theme=%s size=%+v: %v", palette.ID, size, renderErr)
+			}
+			text := view.ANSI(frame)
+			for _, want := range []string{"ACTIONS ◈ SHORTCUTS", "? · Keys", "g views", status, "Attention que", "enter switch"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("theme=%s size=%+v missing %q from %q", palette.ID, size, want, text)
+				}
+			}
+			if size.Columns >= 48 && (!strings.Contains(text, "Attention queue") || !strings.Contains(text, "g r / f5")) {
+				t.Fatalf("theme=%s size=%+v lost full label or binding from %q", palette.ID, size, text)
+			}
+			gotGeometry := helpFrameGeometry(frame)
+			if geometry == "" {
+				geometry = gotGeometry
+			} else if gotGeometry != geometry {
+				t.Fatalf("theme=%s size=%+v changed geometry", palette.ID, size)
+			}
+			assertHelpFrameUsesPalette(t, frame, palette)
+		}
+	}
+
+	s.helpSelected = 1
+	s.action(shell.EventContext{}, "keymap.help.edit")
+	if s.view != entryScreen || s.selected.Context != "example.results" || s.selected.ID != "probe.edit" {
+		t.Fatalf("view=%v selected=%+v", s.view, s.selected)
+	}
+}
+
+func TestHelpOverviewMeasuresHeaderInTerminalCells(t *testing.T) {
+	p := &probe{name: "example"}
+	overview := HelpOverview{
+		Title: "操作 ◈ キー", Current: "? · 検索", ViewMenu: "表示",
+		Status: func(int) HelpOverviewStatus { return HelpOverviewStatus{Text: "準備完了", Tone: HelpStatusSuccess} },
+		Rows:   []HelpOverviewRow{{Label: "検索", Context: "example.results", Action: "probe.edit", Summary: "入力"}},
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.view, s.helpContext = helpScreen, keymap.Context{ID: "example.results"}
+	palette, _ := theme.Builtin("terminal")
+	frame, err := s.Render(shell.RenderContext{Layout: responsive.Resolve(responsive.Size{Columns: 80, Rows: 18}), Theme: palette})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := view.ANSI(frame)
+	for _, want := range []string{"操作 ◈ キー", "? · 検索", "表示", "準備完了"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("wide header text %q was truncated from %q", want, text)
+		}
+	}
+}
+
+func TestHelpOverviewApprovedGeometry(t *testing.T) {
+	p := &probe{name: "example", extraActions: 8}
+	rows := []HelpOverviewRow{
+		{Label: "Attention queue", Context: "example.results", Action: "probe.refresh", Summary: "enter switch · x exclude"},
+		{Label: "Agent search", Context: "example.results", Action: "probe.edit", Summary: "type query · enter switch"},
+	}
+	for index := range 7 {
+		rows = append(rows, HelpOverviewRow{
+			Label:   fmt.Sprintf("Workflow %d", index+1),
+			Context: "example.results",
+			Action:  fmt.Sprintf("probe.extra.%02d", index),
+			Summary: "run configured action",
+		})
+	}
+	overview := HelpOverview{
+		Title: "ACTIONS ◈ SHORTCUTS", Current: "? · Keys", ViewMenu: "g views",
+		Status: func(int) HelpOverviewStatus {
+			return HelpOverviewStatus{Text: "Codex ● ready", Tone: HelpStatusSuccess}
+		},
+		Rows: rows,
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.view, s.helpContext = helpScreen, keymap.Context{ID: "example.results"}
+	palette, _ := theme.Builtin("terminal")
+
+	tests := []struct {
+		name     string
+		size     responsive.Size
+		selected int
+		want     string
+	}{
+		{name: "wide first", size: responsive.Size{Columns: 110, Rows: 24}, selected: 0, want: "5b342f04e061a8c7daf06c8ffec546732eacc70396246832ddb13fb726a6c7a8"},
+		{name: "wide last", size: responsive.Size{Columns: 110, Rows: 24}, selected: 8, want: "58407a53c0d847605c50a87249d5a6cd87094fd49af5567ec8122cfdd116730a"},
+		{name: "standard first", size: responsive.Size{Columns: 80, Rows: 18}, selected: 0, want: "744dfbbfd3f7c555caf831ac0761671d979b6a648964967ba0326d826bcf9e16"},
+		{name: "standard last", size: responsive.Size{Columns: 80, Rows: 18}, selected: 8, want: "9efbde2a6dd378e4fb0c9de8ebab1a8b215f2eb85b5bb53f822f96f360687270"},
+		{name: "compact first", size: responsive.Size{Columns: 48, Rows: 18}, selected: 0, want: "2d4c7ab44f3cc0ee06238292ce77c852e853d35d5ed35a6c679193d719902936"},
+		{name: "compact last", size: responsive.Size{Columns: 48, Rows: 18}, selected: 8, want: "9237462e19f14bc24e0bebab84cc01dd7a82bd5e3fdf8426fa3938e2a45d9525"},
+		{name: "minimum first", size: responsive.Size{Columns: 40, Rows: 10}, selected: 0, want: "a9cb1e14c8096f8a1a13574c956b3f70edee4a66a5961a72457f5834b92eabec"},
+		{name: "minimum last", size: responsive.Size{Columns: 40, Rows: 10}, selected: 8, want: "2781d0dad1246dfbe98bf8a58ec0edc94377ae55ada8a95d519782ea60845725"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s.helpSelected = test.selected
+			frame, renderErr := s.Render(shell.RenderContext{Layout: responsive.Resolve(test.size), Theme: palette})
+			if renderErr != nil {
+				t.Fatal(renderErr)
+			}
+			got := fmt.Sprintf("%x", sha256.Sum256([]byte(helpFrameVisualSignature(frame))))
+			if got != test.want {
+				t.Fatalf("geometry digest=%s want=%s\n%s", got, test.want, view.ANSI(frame))
+			}
+		})
+	}
+}
+
+func TestHelpOverviewRenderingBoundaries(t *testing.T) {
+	p := &probe{name: "example"}
+	overview := HelpOverview{
+		Title: strings.Repeat("T", 80), Current: "Current view", ViewMenu: "g views",
+		Rows: []HelpOverviewRow{{Label: "Search", Context: "example.results", Action: "probe.edit", Summary: "type query"}},
+	}
+	statusCalls := 0
+	overview.Status = func(int) HelpOverviewStatus {
+		statusCalls++
+		return HelpOverviewStatus{Text: "Codex ● ready", Tone: HelpStatusSuccess}
+	}
+	s, err := New(Options{Main: p, ConfigDirectory: t.TempDir(), InteractiveHelp: true, HelpOverview: &overview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	palette, _ := theme.Builtin("terminal")
+	context := shell.RenderContext{Theme: palette}
+
+	for _, test := range []struct {
+		name          string
+		overview      *HelpOverview
+		width, height int
+	}{
+		{name: "nil overview", overview: nil, width: 1, height: 1},
+		{name: "zero width", overview: &overview, width: 0, height: 1},
+		{name: "zero height", overview: &overview, width: 1, height: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame, frameErr := view.NewFrame(1, 1)
+			if frameErr != nil {
+				t.Fatal(frameErr)
+			}
+			s.options.HelpOverview = test.overview
+			s.renderHelpOverview(frame, context, test.width, test.height)
+		})
+	}
+	if statusCalls != 0 {
+		t.Fatalf("status callback ran %d times for non-renderable overviews", statusCalls)
+	}
+
+	s.options.HelpOverview = &overview
+	frame, err := view.NewFrame(40, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.renderHelpOverview(frame, context, 40, 6)
+	got := fmt.Sprintf("%x", sha256.Sum256([]byte(helpFrameVisualSignature(frame))))
+	const want = "a540dfbc5889f1abf892eba1a0bead1d5093f114b22824509282170b4af605b3"
+	if got != want {
+		t.Fatalf("boundary visual digest=%s want=%s\n%s", got, want, view.ANSI(frame))
+	}
+}
+
+func helpFrameVisualSignature(frame *view.Frame) string {
+	var result strings.Builder
+	for y := 0; y < frame.Height(); y++ {
+		for x := 0; x < frame.Width(); x++ {
+			cell, _ := frame.CellAt(x, y)
+			fmt.Fprintf(&result, "%s/%d/%t/%+v|", cell.Text, cell.Width, cell.Continuation, cell.Style)
+		}
+	}
+	return result.String()
+}
+
+func helpFrameGeometry(frame *view.Frame) string {
+	var result strings.Builder
+	for y := 0; y < frame.Height(); y++ {
+		for x := 0; x < frame.Width(); x++ {
+			cell, _ := frame.CellAt(x, y)
+			fmt.Fprintf(&result, "%s/%d/%t|", cell.Text, cell.Width, cell.Continuation)
+		}
+	}
+	return result.String()
+}
+
+func assertHelpFrameUsesPalette(t *testing.T, frame *view.Frame, palette theme.Palette) {
+	t.Helper()
+	allowed := map[theme.Color]bool{
+		"": true, theme.Reset: true,
+		palette.Background: true, palette.PanelBackground: true, palette.SidebarBackground: true,
+		palette.ActiveRowBackground: true, palette.SelectionBackground: true, palette.Surface: true,
+		palette.Overlay: true, palette.Border: true, palette.Text: true, palette.Muted: true,
+		palette.Accent: true, palette.Red: true, palette.Green: true, palette.Yellow: true,
+		palette.Blue: true, palette.Magenta: true, palette.Cyan: true,
+	}
+	for y := 0; y < frame.Height(); y++ {
+		for x := 0; x < frame.Width(); x++ {
+			cell, _ := frame.CellAt(x, y)
+			if !allowed[cell.Style.Foreground] || !allowed[cell.Style.Background] {
+				t.Fatalf("theme=%s cell=%d,%d style=%+v", palette.ID, x, y, cell.Style)
+			}
+		}
 	}
 }
 

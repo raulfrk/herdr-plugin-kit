@@ -151,6 +151,9 @@ func (s *Surface) openEditor(events shell.EventContext) []shell.Effect {
 }
 
 func (s *Surface) helpActions() []keymap.Action {
+	if s.options.HelpOverview != nil {
+		return append([]keymap.Action(nil), s.helpOverviewActions...)
+	}
 	var actions []keymap.Action
 	for _, action := range s.runtime.Catalog() {
 		if action.Context == s.helpContext.ID && action.ID != s.options.HelpOpenedAction {
