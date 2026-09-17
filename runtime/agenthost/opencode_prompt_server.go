@@ -61,10 +61,11 @@ func (observer *openCodeOwnershipObserver) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	remaining := openCodeOwnershipOutputLimit - len(observer.output)
-	if remaining > 0 {
-		observer.output = append(observer.output, p[:min(len(p), remaining)]...)
-		observer.matched = bytes.Contains(observer.output, observer.wantLine)
+	if remaining == 0 {
+		return len(p), nil
 	}
+	observer.output = append(observer.output, p[:min(len(p), remaining)]...)
+	observer.matched = bytes.Contains(observer.output, observer.wantLine)
 	return len(p), nil
 }
 
@@ -175,7 +176,11 @@ func (launcher nativeOpenCodePromptServerLauncher) Start(parent context.Context,
 }
 
 func reserveOpenCodePromptPort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	return reserveOpenCodePromptPortWith(net.Listen)
+}
+
+func reserveOpenCodePromptPortWith(listen func(string, string) (net.Listener, error)) (int, error) {
+	listener, err := listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
 	}

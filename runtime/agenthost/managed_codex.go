@@ -617,9 +617,6 @@ func validateManagedExtraArgv(argv []string) error {
 	seen := make(map[string]struct{}, len(argv))
 	for index := 0; index < len(argv); index++ {
 		name := argv[index]
-		if len(name) > sessionhost.MaxArgBytes || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
-			return errors.New("managed Codex extra argv is invalid")
-		}
 		switch name {
 		case "--search", "--no-alt-screen":
 			if _, duplicate := seen[name]; duplicate {

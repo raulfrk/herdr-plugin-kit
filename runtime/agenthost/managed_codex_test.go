@@ -612,6 +612,56 @@ func TestManagedCodexRejectsUnsafeExtraArgvAndInvalidInheritanceBeforeEnsure(t *
 	}
 }
 
+func TestManagedCodexResumeRejectsEachCreationFieldBeforeEnsure(t *testing.T) {
+	base := ManagedCodexRequest{
+		Operation: ManagedResume, Origin: managedOrigin(), Directory: "/tmp/project",
+		ThreadID: managedOriginalID, Policy: managedPolicy(),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ManagedCodexRequest)
+	}{
+		{"source", func(request *ManagedCodexRequest) { request.Source.PaneID = "w1:p2" }},
+		{"placement", func(request *ManagedCodexRequest) { request.Placement = sessionhost.NewTab }},
+		{"direction", func(request *ManagedCodexRequest) { request.Direction = "down" }},
+		{"tab label", func(request *ManagedCodexRequest) { request.TabLabel = "resume" }},
+		{"focus", func(request *ManagedCodexRequest) { request.Focus = true }},
+		{"extra argv", func(request *ManagedCodexRequest) { request.ExtraArgv = []string{"--search"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := base
+			test.mutate(&request)
+			service := &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+			launcher.service = service
+			if _, err := launcher.Launch(context.Background(), request); err == nil || service.callCount() != 0 {
+				t.Fatalf("request=%+v ensure=%d error=%v", request, service.callCount(), err)
+			}
+		})
+	}
+}
+
+func TestManagedCodexExtraArgvExactBounds(t *testing.T) {
+	max := make([]string, 0, sessionhost.MaxArgv-16)
+	for index := 0; len(max) < cap(max); index++ {
+		max = append(max, "--enable", fmt.Sprintf("feature%d", index))
+	}
+	if err := validateManagedExtraArgv(max); err != nil {
+		t.Fatalf("exact maximum rejected: %v", err)
+	}
+	if err := validateManagedExtraArgv(append(append([]string(nil), max...), "--search")); err == nil {
+		t.Fatal("over-limit extra argv accepted")
+	}
+	exactValue := strings.Repeat("a", sessionhost.MaxArgBytes)
+	if err := validateManagedExtraArgv([]string{"--enable", exactValue}); err != nil {
+		t.Fatalf("exact value bound rejected: %v", err)
+	}
+	if err := validateManagedExtraArgv([]string{"--enable", exactValue + "a"}); err == nil {
+		t.Fatal("over-limit value accepted")
+	}
+}
+
 func TestForkPolicyAllowsOnlyExplicitLegacySandboxToImplicitBuiltinProvenance(t *testing.T) {
 	expected := managedPreflight("/tmp/project").EffectiveCodexPolicy
 	actual := expected
