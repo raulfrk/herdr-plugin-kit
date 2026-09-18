@@ -74,9 +74,7 @@ func acquireCodexServiceLifecycleLock(ctx context.Context, paths codexServicePat
 	if stat.Uid != uint32(uid) || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 {
 		return closeOnError(fmt.Errorf("%w: lifecycle lock ownership or mode", ErrCodexServiceOwnership))
 	}
-	if interval <= 0 {
-		interval = codexServicePollInterval
-	}
+	interval = codexServiceLifecyclePollInterval(interval)
 	for {
 		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -96,4 +94,11 @@ func acquireCodexServiceLifecycleLock(ctx context.Context, paths codexServicePat
 		case <-timer.C:
 		}
 	}
+}
+
+func codexServiceLifecyclePollInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return codexServicePollInterval
+	}
+	return interval
 }

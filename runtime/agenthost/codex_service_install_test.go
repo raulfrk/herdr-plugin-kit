@@ -1305,53 +1305,35 @@ func TestCodexServiceLifecycleLockUsesInjectedOwnerAndCloseHandlesEmptyLocks(t *
 
 func TestCodexServiceLifecycleLockPollIntervalUsesExpectedFallback(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		interval    time.Duration
-		wantAcquire bool
+		name     string
+		interval time.Duration
+		want     time.Duration
 	}{
-		{name: "zero uses default interval", interval: 0},
-		{name: "positive interval remains configured", interval: time.Millisecond, wantAcquire: true},
+		{name: "negative uses default", interval: -time.Nanosecond, want: codexServicePollInterval},
+		{name: "zero uses default", interval: 0, want: codexServicePollInterval},
+		{name: "positive remains configured", interval: time.Millisecond, want: time.Millisecond},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newCodexServiceFixture(t)
-			held, err := acquireCodexServiceLifecycleLock(context.Background(), fixture.paths, false, os.Geteuid(), time.Millisecond)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer held.Close()
-
-			base, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var releaseErr error
-			var cancellation *time.Timer
-			ctx := &releaseLockOnFirstDoneContext{
-				Context: base,
-				release: func() {
-					releaseErr = held.Close()
-					cancellation = time.AfterFunc(25*time.Millisecond, cancel)
-				},
-			}
-			acquired, err := acquireCodexServiceLifecycleLock(ctx, fixture.paths, false, os.Geteuid(), test.interval)
-			if cancellation == nil {
-				t.Fatal("contender did not enter polling select")
-			}
-			cancellation.Stop()
-			if releaseErr != nil {
-				t.Fatalf("release held lock: %v", releaseErr)
-			}
-			if acquired != nil {
-				defer acquired.Close()
-			}
-			if test.wantAcquire {
-				if err != nil || acquired == nil {
-					t.Fatalf("configured poll lock=%v err=%v", acquired, err)
-				}
-				return
-			}
-			if acquired != nil || !errors.Is(err, context.Canceled) {
-				t.Fatalf("default poll lock=%v err=%v", acquired, err)
+			if got := codexServiceLifecyclePollInterval(test.interval); got != test.want {
+				t.Fatalf("interval=%s want=%s", got, test.want)
 			}
 		})
+	}
+
+	fixture := newCodexServiceFixture(t)
+	held, err := acquireCodexServiceLifecycleLock(context.Background(), fixture.paths, false, os.Geteuid(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	var releaseErr error
+	ctx := &releaseLockOnFirstDoneContext{Context: context.Background(), release: func() { releaseErr = held.Close() }}
+	acquired, err := acquireCodexServiceLifecycleLock(ctx, fixture.paths, false, os.Geteuid(), time.Millisecond)
+	if acquired != nil {
+		defer acquired.Close()
+	}
+	if releaseErr != nil || err != nil || acquired == nil {
+		t.Fatalf("configured poll lock=%v release=%v err=%v", acquired, releaseErr, err)
 	}
 }
 
