@@ -53,7 +53,7 @@ func TestCodexServiceLiveIsolatedSystemdFixture(t *testing.T) {
 		t.Skipf("supported Codex %s is unavailable: result=%q err=%v", SupportedCodexVersion, version.Stdout, err)
 	}
 	unit := fmt.Sprintf("hpk-codex-service-live-%d.service", time.Now().UnixNano())
-	socket := filepath.Join(root, "codex.sock")
+	socket := canonicalCodexServiceSocket(root)
 	stop := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
@@ -64,7 +64,7 @@ func TestCodexServiceLiveIsolatedSystemdFixture(t *testing.T) {
 		"--user", "--unit=" + unit,
 		"--property=Type=exec", "--property=UMask=0077", "--property=Restart=no", "--property=TimeoutStopSec=10s",
 		"--setenv=CODEX_HOME=" + root,
-		executable, "app-server", "--listen", "unix://" + socket,
+		executable, "app-server", "--listen", "unix://",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestCodexServiceLiveIsolatedSystemdFixture(t *testing.T) {
 	}
 	t.Logf("isolated fixture unit=%s socket=%s pid=%d invocation=%s", unit, socket, show.MainPID, show.InvocationID)
 	process, err := readCodexServiceProcess(show.MainPID)
-	if err != nil || process.Executable != executable || !sameStrings(process.Argv, []string{executable, "app-server", "--listen", "unix://" + socket}) || process.Environment["CODEX_HOME"] != root || !strings.Contains(process.Cgroup, "/"+unit) {
+	if err != nil || process.Executable != executable || !sameStrings(process.Argv, []string{executable, "app-server", "--listen", "unix://"}) || process.Environment["CODEX_HOME"] != root || !strings.Contains(process.Cgroup, "/"+unit) {
 		t.Fatalf("process executable=%q argv=%q CODEX_HOME=%q cgroup=%q err=%v", process.Executable, process.Argv, process.Environment["CODEX_HOME"], process.Cgroup, err)
 	}
 	if _, err := runner.Run(ctx, "systemctl", []string{"--user", "stop", unit}); err != nil {
@@ -186,7 +186,7 @@ func newIsolatedCodexServiceLifecycleFixture(t *testing.T, suppliedHome string) 
 		DescriptorPath:       filepath.Join(configHome, "herdr-plugin-kit", codexServiceDescriptorName),
 		UnitPath:             filepath.Join(unitDirectory, unitName),
 		RuntimeDir:           filepath.Join(runtimeRoot, name),
-		SocketPath:           filepath.Join(runtimeRoot, name, "codex.sock"),
+		SocketPath:           canonicalCodexServiceSocket(home),
 	}
 	service := NewCodexService(runner)
 	service.resolvePaths = func() (codexServicePaths, error) { return paths, nil }

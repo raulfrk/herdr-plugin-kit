@@ -113,7 +113,7 @@ func TestRunCodexServiceInstallReportsOutstandingRestartWhenFilesAreUnchanged(t 
 }
 
 func TestRunCodexServiceStatusAndStart(t *testing.T) {
-	fake := &fakeCodexServiceCLI{snapshot: agenthost.CodexServiceSnapshot{State: agenthost.CodexServiceReady, SocketPath: "/run/user/1000/herdr-plugin-kit/codex.sock", MainPID: 42, InvocationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+	fake := &fakeCodexServiceCLI{snapshot: agenthost.CodexServiceSnapshot{State: agenthost.CodexServiceReady, SocketPath: "/home/example/.codex/app-server-control/app-server-control.sock", MainPID: 42, InvocationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 	useFakeCodexServiceCLI(t, fake)
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"codex-service", "status"}, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), "state=ready") {

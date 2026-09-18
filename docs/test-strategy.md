@@ -138,18 +138,23 @@ all shell correctness and concurrency tests.
 
 ## HYP-CODEX-SERVICE-01 — Shared service lifecycle preserves user ownership
 
-- Claim: one installed user service serves managed clients; read-only inspection
-  never starts it, and maintenance removal deletes only its verified installation.
+- Claim: one installed user service owns Codex's canonical Unix socket for
+  ordinary and managed clients; read-only inspection never starts it, and
+  maintenance removal deletes only its verified installation.
 - Fault model: duplicate startup, service-instance drift, conflicting unit files,
   unsafe installation ownership, staged configuration versus running-instance
-  mismatch, concurrent installation, native-daemon coexistence, unconfirmed
-  disconnect, partial removal, or data deletion.
+  mismatch, concurrent installation, a foreign canonical listener, unsafe
+  legacy-to-canonical transition, unconfirmed disconnect, partial removal, or
+  data deletion.
 - Setup: temporary installation fixtures and fake systemd observations, followed
   by an isolated supported-version user service and independent clients.
-- Independent oracle: actual systemd PID/InvocationID, socket/process identity,
+- Independent oracle: actual systemd PID/InvocationID, the one canonical
+  socket/process identity observed by ordinary and explicit-remote clients,
   retained marker bytes outside the installation, and exact observed CLI actions.
-- Falsified when: ordinary Codex attaches implicitly, unrelated state changes,
-  inspection repairs, or removal loses Codex data or misreports partial success.
+- Falsified when: clients reach different App Servers, a foreign canonical
+  listener is started over or stopped, unrelated state changes, inspection
+  repairs, rollback identity is lost, or removal loses Codex data or misreports
+  partial success.
 - Diagnostics: command results, ownership paths, version and process identities;
   never include credentials or conversation contents in installation diagnostics.
 

@@ -92,7 +92,7 @@ func newCodexServiceFixture(t *testing.T) codexServiceFixture {
 	}
 	descriptor := codexServiceDescriptor{
 		SchemaVersion: codexServiceDescriptorVersion, UnitName: paths.unitName(), UnitPath: paths.UnitPath,
-		Executable: executable, CodexHome: home, SocketPath: paths.SocketPath,
+		Executable: executable, CodexHome: home, SocketPath: canonicalCodexServiceSocket(home),
 		RuntimeDirectory: paths.runtimeDirectoryName(), Version: SupportedCodexVersion,
 	}
 	writeOwnedCodexServiceFixture(t, paths, descriptor)
@@ -104,9 +104,9 @@ func newCodexServiceFixture(t *testing.T) codexServiceFixture {
 	service.euid = func() int { return 1000 }
 	service.lstat = func(path string) (fs.FileInfo, error) {
 		switch path {
-		case paths.RuntimeDir:
+		case codexServiceSocketDirectory(paths, descriptor):
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
-		case paths.SocketPath:
+		case descriptor.SocketPath:
 			return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: 1000}, nil
 		default:
 			return nil, os.ErrNotExist
@@ -115,7 +115,7 @@ func newCodexServiceFixture(t *testing.T) codexServiceFixture {
 	service.readProcess = func(pid int) (codexServiceProcess, error) {
 		return codexServiceProcess{
 			Executable:  executable,
-			Argv:        []string{executable, "app-server", "--listen", "unix://" + paths.SocketPath},
+			Argv:        []string{executable, "app-server", "--listen", codexServiceListenArgument(descriptor.launchConfiguration())},
 			Environment: map[string]string{"CODEX_HOME": home},
 			Cgroup:      "/user.slice/user-1000.slice/user@1000.service/app.slice/" + codexServiceUnitName,
 		}, nil
@@ -188,11 +188,8 @@ func TestCodexServiceInspectIsReadOnlyWhenStopped(t *testing.T) {
 	}
 }
 
-func TestCodexServiceEnsureStartsStoppedOwnedUnitAlongsideNativeDaemon(t *testing.T) {
+func TestCodexServiceEnsureStartsStoppedOwnedUnit(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
-	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
-		panic("starting an installed shared service must not probe the ordinary Codex daemon")
-	}
 	var shows int
 	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
 		switch {
@@ -220,14 +217,34 @@ func TestCodexServiceEnsureStartsStoppedOwnedUnitAlongsideNativeDaemon(t *testin
 	}
 }
 
+func TestCodexServiceEnsureRejectsForeignCanonicalListenerBeforeStart(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		if executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.descriptor.UnitName)) {
+			return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "inactive", "dead", 0, ""), nil
+		}
+		return command.Result{}, errors.New("unexpected command")
+	}
+
+	if _, err := fixture.service.Ensure(context.Background()); !errors.Is(err, ErrCodexServiceMigrationRequired) {
+		t.Fatalf("foreign canonical listener Ensure error=%v", err)
+	}
+	for _, call := range fixture.runner.observed() {
+		if call.executable == "systemctl" && len(call.args) > 1 && call.args[1] == "start" {
+			t.Fatalf("foreign canonical listener reached start: %+v", call)
+		}
+	}
+}
+
 func TestCodexServiceEnsureWaitsForSocketAfterOwnedProcessStarts(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
 	var shows, socketChecks int
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
 		switch path {
-		case fixture.paths.RuntimeDir:
+		case codexServiceSocketDirectory(fixture.paths, fixture.descriptor):
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
-		case fixture.paths.SocketPath:
+		case fixture.descriptor.SocketPath:
 			socketChecks++
 			if socketChecks == 1 {
 				return nil, os.ErrNotExist
@@ -264,7 +281,7 @@ func TestCodexServiceEnsureReportsBoundedSocketReadinessTimeout(t *testing.T) {
 	fixture.service.timeout = 20 * time.Millisecond
 	fixture.service.pollInterval = time.Millisecond
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
-		if path == fixture.paths.RuntimeDir {
+		if path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor) {
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
 		}
 		return nil, os.ErrNotExist
@@ -291,7 +308,7 @@ func TestCodexServiceEnsureReportsBoundedSocketReadinessTimeout(t *testing.T) {
 	}
 }
 
-func TestCodexServiceRejectsDifferentConsumerHomeAndAllowsNativeDaemonCoexistence(t *testing.T) {
+func TestCodexServiceRejectsDifferentConsumerHomeAndInspectsOwnedCanonicalService(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
 	fixture.service.resolveHome = func() (string, error) { return filepath.Join(t.TempDir(), "other"), nil }
 	if snapshot, err := fixture.service.Ensure(context.Background()); snapshot.State != CodexServiceDegraded || !errors.Is(err, ErrCodexServiceDrift) {
@@ -303,7 +320,7 @@ func TestCodexServiceRejectsDifferentConsumerHomeAndAllowsNativeDaemonCoexistenc
 
 	fixture = newCodexServiceFixture(t)
 	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
-		panic("runtime inspection must not probe the ordinary Codex daemon")
+		panic("read-only inspection must not probe or mutate another process")
 	}
 	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
 		if executable != "systemctl" || !reflect.DeepEqual(args, codexSystemdShowArgs(fixture.descriptor.UnitName)) {
@@ -315,7 +332,7 @@ func TestCodexServiceRejectsDifferentConsumerHomeAndAllowsNativeDaemonCoexistenc
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	if calls := fixture.runner.observed(); len(calls) != 1 || calls[0].executable != "systemctl" {
-		t.Fatalf("native coexistence inspection calls=%+v", calls)
+		t.Fatalf("owned canonical inspection calls=%+v", calls)
 	}
 }
 
@@ -328,7 +345,7 @@ func TestCodexServiceRejectsProcessAndInitializeDrift(t *testing.T) {
 		},
 		"process cgroup suffix": func(f *codexServiceFixture) {
 			f.service.readProcess = func(int) (codexServiceProcess, error) {
-				return codexServiceProcess{Executable: f.descriptor.Executable, Argv: []string{f.descriptor.Executable, "app-server", "--listen", "unix://" + f.descriptor.SocketPath}, Environment: map[string]string{"CODEX_HOME": f.descriptor.CodexHome}, Cgroup: "/user.slice/" + codexServiceUnitName + "-foreign"}, nil
+				return codexServiceProcess{Executable: f.descriptor.Executable, Argv: []string{f.descriptor.Executable, "app-server", "--listen", codexServiceListenArgument(f.descriptor.launchConfiguration())}, Environment: map[string]string{"CODEX_HOME": f.descriptor.CodexHome}, Cgroup: "/user.slice/" + codexServiceUnitName + "-foreign"}, nil
 			}
 		},
 		"initialize metadata": func(f *codexServiceFixture) {
@@ -906,7 +923,7 @@ func TestCodexServiceEnsureDoesNotStartUnsafeStates(t *testing.T) {
 		fixture.service.timeout = 10 * time.Millisecond
 		fixture.service.pollInterval = time.Millisecond
 		fixture.service.lstat = func(path string) (fs.FileInfo, error) {
-			if path == fixture.paths.RuntimeDir {
+			if path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor) {
 				return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
 			}
 			return nil, os.ErrNotExist
@@ -936,7 +953,7 @@ func TestCodexServiceAwaitReadyUsesFallbackForNonpositiveInterval(t *testing.T) 
 	fixture := newCodexServiceFixture(t)
 	fixture.service.pollInterval = 0
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
-		if path == fixture.paths.RuntimeDir {
+		if path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor) {
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
 		}
 		return nil, os.ErrNotExist
@@ -1016,13 +1033,13 @@ func TestCodexServiceValidateSocketRejectsEachOwnershipDrift(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newCodexServiceFixture(t)
 			fixture.service.lstat = func(path string) (fs.FileInfo, error) {
-				if (test.target == "runtime" && path == fixture.paths.RuntimeDir) || (test.target == "socket" && path == fixture.paths.SocketPath) {
+				if (test.target == "runtime" && path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor)) || (test.target == "socket" && path == fixture.descriptor.SocketPath) {
 					if test.err != nil {
 						return nil, test.err
 					}
 					return test.info, nil
 				}
-				if path == fixture.paths.RuntimeDir {
+				if path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor) {
 					return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
 				}
 				return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: 1000}, nil
@@ -1040,9 +1057,9 @@ func TestCodexServiceValidateSocketUsesInjectedEUID(t *testing.T) {
 	fixture.service.euid = func() int { return uid }
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
 		switch path {
-		case fixture.paths.RuntimeDir:
+		case codexServiceSocketDirectory(fixture.paths, fixture.descriptor):
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: uint32(uid), dir: true}, nil
-		case fixture.paths.SocketPath:
+		case fixture.descriptor.SocketPath:
 			return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: uint32(uid)}, nil
 		default:
 			return nil, os.ErrNotExist
@@ -1050,6 +1067,9 @@ func TestCodexServiceValidateSocketUsesInjectedEUID(t *testing.T) {
 	}
 	if err := fixture.service.validateSocket(fixture.paths, fixture.descriptor); err != nil {
 		t.Fatalf("injected EUID socket validation error=%v", err)
+	}
+	if err := fixture.service.validateCanonicalSocketPreflight(fixture.descriptor); err != nil {
+		t.Fatalf("injected EUID canonical preflight error=%v", err)
 	}
 }
 
@@ -1161,6 +1181,6 @@ func serviceShowForDescriptor(paths codexServicePaths, descriptor codexServiceDe
 		"MainPID=" + itoa(pid) + "\n" +
 		"InvocationID=" + invocation + "\n" +
 		"FragmentPath=" + paths.UnitPath + "\n" +
-		"ExecStart={ path=" + descriptor.Executable + " ; argv[]=" + descriptor.Executable + " app-server --listen unix://" + descriptor.SocketPath + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=" + itoa(pid) + " ; code=(null) ; status=0/0 }\n" +
+		"ExecStart={ path=" + descriptor.Executable + " ; argv[]=" + descriptor.Executable + " app-server --listen " + codexServiceListenArgument(descriptor.launchConfiguration()) + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=" + itoa(pid) + " ; code=(null) ; status=0/0 }\n" +
 		"Environment=CODEX_HOME=" + descriptor.CodexHome + "\n")}
 }

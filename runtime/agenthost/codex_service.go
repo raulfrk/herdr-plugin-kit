@@ -153,6 +153,16 @@ func (s *CodexService) Ensure(ctx context.Context) (CodexServiceSnapshot, error)
 	if !errors.Is(err, ErrCodexServiceUnavailable) || !show.startable() {
 		return snapshot, err
 	}
+	if err := s.validateCanonicalSocketPreflight(descriptor); err != nil {
+		return snapshot, err
+	}
+	active, probeErr := s.nativeDaemon(bounds, descriptor.CodexHome)
+	if probeErr != nil {
+		return snapshot, errors.Join(ErrCodexServiceUnavailable, probeErr)
+	}
+	if active && !s.canonicalListenerOwnedByInstalledService(bounds, paths, descriptor, descriptor.CodexHome) {
+		return snapshot, fmt.Errorf("%w: canonical socket for %q is owned by another process", ErrCodexServiceMigrationRequired, descriptor.CodexHome)
+	}
 	if err := s.validateExecutableVersion(bounds, descriptor.Executable); err != nil {
 		return snapshot, err
 	}
@@ -214,13 +224,14 @@ func (s *CodexService) runtimeConfiguration() (codexServicePaths, codexServiceDe
 		return codexServicePaths{}, codexServiceDescriptor{}, CodexServiceSnapshot{State: CodexServiceDegraded, CodexHome: home}, fmt.Errorf("%w: service paths: %v", ErrCodexServiceDrift, err)
 	}
 	descriptor, err := readOwnedCodexService(paths)
-	snapshot := CodexServiceSnapshot{State: CodexServiceDegraded, CodexHome: home, SocketPath: paths.SocketPath}
+	snapshot := CodexServiceSnapshot{State: CodexServiceDegraded, CodexHome: home}
 	if err != nil {
 		return paths, codexServiceDescriptor{}, snapshot, err
 	}
 	if descriptor.CodexHome != home {
 		return paths, descriptor, snapshot, fmt.Errorf("%w: requested CODEX_HOME %q differs from configured home", ErrCodexServiceDrift, home)
 	}
+	snapshot.SocketPath = descriptor.SocketPath
 	return paths, descriptor, snapshot, nil
 }
 
@@ -378,7 +389,7 @@ func (s *CodexService) validateProcess(descriptor codexServiceDescriptor, show c
 	if process.Executable != descriptor.Executable {
 		return fmt.Errorf("%w: service executable", ErrCodexServiceDrift)
 	}
-	wantArgv := []string{descriptor.Executable, "app-server", "--listen", "unix://" + descriptor.SocketPath}
+	wantArgv := []string{descriptor.Executable, "app-server", "--listen", codexServiceListenArgument(descriptor.launchConfiguration())}
 	if !sameStrings(process.Argv, wantArgv) {
 		return fmt.Errorf("%w: service argv", ErrCodexServiceDrift)
 	}
@@ -412,14 +423,15 @@ func (s *CodexService) validateSocket(paths codexServicePaths, descriptor codexS
 	if s.euid != nil {
 		euid = s.euid
 	}
-	directory, err := lstat(paths.RuntimeDir)
+	directoryPath := codexServiceSocketDirectory(paths, descriptor)
+	directory, err := lstat(directoryPath)
 	if errors.Is(err, os.ErrNotExist) {
 		// inspectConfigured has already validated the exact active process.
-		// systemd may report it running just before RuntimeDirectory appears.
+		// systemd may report it running just before the socket directory appears.
 		return errors.Join(ErrCodexServiceUnavailable, err)
 	}
 	if err != nil || directory.Mode()&os.ModeSymlink != 0 || !directory.IsDir() || directory.Mode().Perm() != 0o700 || !ownedBy(directory, euid()) {
-		return fmt.Errorf("%w: runtime directory", ErrCodexServiceDrift)
+		return fmt.Errorf("%w: socket directory", ErrCodexServiceDrift)
 	}
 	socket, err := lstat(descriptor.SocketPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -427,6 +439,45 @@ func (s *CodexService) validateSocket(paths codexServicePaths, descriptor codexS
 	}
 	if err != nil || socket.Mode()&os.ModeSymlink != 0 || socket.Mode()&os.ModeSocket == 0 || socket.Mode().Perm() != 0o600 || !ownedBy(socket, euid()) {
 		return fmt.Errorf("%w: socket", ErrCodexServiceDrift)
+	}
+	return nil
+}
+
+func codexServiceSocketDirectory(paths codexServicePaths, descriptor codexServiceDescriptor) string {
+	if descriptor.SocketPath == canonicalCodexServiceSocket(descriptor.CodexHome) {
+		return filepath.Dir(descriptor.SocketPath)
+	}
+	return paths.RuntimeDir
+}
+
+// validateCanonicalSocketPreflight rejects path redirection and foreign file
+// types before a stopped service can reach systemd start. Missing paths are
+// safe: pinned Codex creates them beneath the already canonical CODEX_HOME.
+func (s *CodexService) validateCanonicalSocketPreflight(descriptor codexServiceDescriptor) error {
+	if descriptor.SocketPath != canonicalCodexServiceSocket(descriptor.CodexHome) {
+		return nil
+	}
+	lstat := s.lstat
+	if lstat == nil {
+		lstat = os.Lstat
+	}
+	euid := os.Geteuid
+	if s.euid != nil {
+		euid = s.euid
+	}
+	directory, err := lstat(filepath.Dir(descriptor.SocketPath))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: canonical socket directory", ErrCodexServiceDrift)
+	}
+	if err == nil && (directory.Mode()&os.ModeSymlink != 0 || !directory.IsDir() || directory.Mode().Perm() != 0o700 || !ownedBy(directory, euid())) {
+		return fmt.Errorf("%w: canonical socket directory", ErrCodexServiceDrift)
+	}
+	socket, err := lstat(descriptor.SocketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || socket.Mode()&os.ModeSymlink != 0 || socket.Mode()&os.ModeSocket == 0 || socket.Mode().Perm() != 0o600 || !ownedBy(socket, euid()) {
+		return fmt.Errorf("%w: canonical socket", ErrCodexServiceDrift)
 	}
 	return nil
 }
@@ -707,7 +758,7 @@ func canonicalExistingDirectory(path string, requireAbsolute bool) (string, erro
 }
 
 func canonicalNativeDaemonActive(ctx context.Context, home string) (bool, error) {
-	socket := filepath.Join(home, "app-server-control", "app-server-control.sock")
+	socket := canonicalCodexServiceSocket(home)
 	info, err := os.Lstat(socket)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

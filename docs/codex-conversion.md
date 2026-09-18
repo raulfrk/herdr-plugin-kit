@@ -5,9 +5,10 @@ existing Herdr 0.8.2 pane. It uses the Kit's one installed user-systemd App Serv
 service and configured `CODEX_HOME`; it never starts a per-pane server, creates a replacement
 conversation, injects environment, or moves the session to another pane.
 
-Plain `codex` remains unmanaged even while the service runs. Managed New/Fork
-explicitly connect to its private socket. See [service lifecycle](codex-service.md)
-for installation, migration, maintenance restart, and uninstall.
+Plain `codex` remains product-unmanaged even while it uses the service-owned
+canonical socket. Managed New/Fork explicitly connect to that same App Server.
+See [service lifecycle](codex-service.md) for installation, migration,
+maintenance restart, and uninstall.
 
 ## Identity prerequisite
 

@@ -93,17 +93,21 @@ func validCodexServiceLaunchConfiguration(configuration codexServiceLaunchConfig
 	return configuration.Version == SupportedCodexVersion && cleanAbsolute(configuration.Executable) && cleanAbsolute(configuration.CodexHome) && cleanAbsolute(configuration.SocketPath) && validRuntimeDirectoryName(configuration.RuntimeDirectory)
 }
 
-func validCodexServicePendingTransition(pending *codexServicePendingTransition, current codexServiceDescriptor) bool {
+func validCodexServicePendingTransition(pending *codexServicePendingTransition, current codexServiceDescriptor, paths codexServicePaths) bool {
 	if pending == nil {
 		return true
 	}
 	if pending.MainPID <= 0 || !validInvocationID(pending.InvocationID) || !validCodexServiceLaunchConfiguration(pending.Previous) {
 		return false
 	}
-	if pending.Previous.SocketPath != current.SocketPath || pending.Previous.RuntimeDirectory != current.RuntimeDirectory || pending.Previous.Version != current.Version {
+	if !validOwnedCodexServiceSocket(pending.Previous, paths) || pending.Previous.RuntimeDirectory != current.RuntimeDirectory || pending.Previous.Version != current.Version {
 		return false
 	}
 	return !sameCodexServiceLaunchConfiguration(pending.Previous, current.launchConfiguration())
+}
+
+func validOwnedCodexServiceSocket(configuration codexServiceLaunchConfiguration, paths codexServicePaths) bool {
+	return configuration.SocketPath == canonicalCodexServiceSocket(configuration.CodexHome) || configuration.SocketPath == paths.SocketPath
 }
 
 // CodexServiceInstallOptions selects the one supported executable and home.
@@ -185,6 +189,28 @@ func (p codexServicePaths) runtimeDirectoryName() string {
 	return p.RuntimeDirectoryName
 }
 
+func canonicalCodexServiceSocket(home string) string {
+	return filepath.Join(home, "app-server-control", "app-server-control.sock")
+}
+
+// codexServiceListenArgument preserves exact ownership of legacy Kit service
+// installations while new installations use Codex's canonical discovery
+// endpoint. The canonical argument must remain literal so ordinary Codex
+// clients recognize the same App Server through CODEX_HOME.
+func codexServiceListenArgument(configuration codexServiceLaunchConfiguration) string {
+	if configuration.SocketPath == canonicalCodexServiceSocket(configuration.CodexHome) {
+		return "unix://"
+	}
+	return "unix://" + configuration.SocketPath
+}
+
+func codexServiceUnitListenArgument(descriptor codexServiceDescriptor) (string, bool) {
+	if descriptor.SocketPath == canonicalCodexServiceSocket(descriptor.CodexHome) {
+		return "unix://", false
+	}
+	return "unix://%t/" + descriptor.RuntimeDirectory + "/codex.sock", true
+}
+
 // Install writes and validates the owned descriptor and unit but never starts
 // or restarts a client. Start is an explicit separate command.
 func (s *CodexService) Install(ctx context.Context, options CodexServiceInstallOptions) (CodexServiceInstallResult, error) {
@@ -212,7 +238,19 @@ func (s *CodexService) Install(ctx context.Context, options CodexServiceInstallO
 		return CodexServiceInstallResult{}, errors.Join(ErrCodexServiceUnavailable, err)
 	}
 	if active {
-		return CodexServiceInstallResult{}, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
+		state, stateErr := inspectCodexServiceInstallation(paths)
+		if stateErr != nil {
+			return CodexServiceInstallResult{}, stateErr
+		}
+		if !state.descriptorExists {
+			return CodexServiceInstallResult{}, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
+		}
+		if !state.unitExists {
+			return CodexServiceInstallResult{}, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
+		}
+		if !s.canonicalListenerOwnedByInstalledService(bounds, paths, state.descriptor, home) {
+			return CodexServiceInstallResult{}, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
+		}
 	}
 	executable, err := s.installExecutable(options.Executable, home)
 	if err != nil {
@@ -232,11 +270,18 @@ func (s *CodexService) Install(ctx context.Context, options CodexServiceInstallO
 
 	descriptor := codexServiceDescriptor{
 		SchemaVersion: codexServiceDescriptorVersion, UnitName: paths.unitName(), UnitPath: paths.UnitPath,
-		Executable: executable, CodexHome: home, SocketPath: paths.SocketPath, RuntimeDirectory: paths.runtimeDirectoryName(), Version: SupportedCodexVersion,
+		Executable: executable, CodexHome: home, SocketPath: canonicalCodexServiceSocket(home), RuntimeDirectory: paths.runtimeDirectoryName(), Version: SupportedCodexVersion,
 	}
 	state, err := inspectCodexServiceInstallation(paths)
 	if err != nil {
 		return CodexServiceInstallResult{}, err
+	}
+	active, err = s.nativeDaemon(bounds, home)
+	if err != nil {
+		return CodexServiceInstallResult{}, errors.Join(ErrCodexServiceUnavailable, err)
+	}
+	if active && !(state.descriptorExists && state.unitExists && s.canonicalListenerOwnedByInstalledService(bounds, paths, state.descriptor, home)) {
+		return CodexServiceInstallResult{}, fmt.Errorf("%w: canonical native daemon is listening for %q; settle clients and migrate it explicitly", ErrCodexServiceMigrationRequired, home)
 	}
 	if err := s.rejectForeignLoadedUnit(bounds, paths, descriptor.UnitName); err != nil {
 		return CodexServiceInstallResult{}, err
@@ -280,8 +325,8 @@ func (s *CodexService) Install(ctx context.Context, options CodexServiceInstallO
 	}, nil
 }
 
-// Start enables the owned unit for boot persistence and starts it. Once the
-// shared service is installed, ordinary Codex's native daemon may coexist.
+// Start enables the owned unit for boot persistence and starts it. The unit
+// owns Codex's canonical socket, so ordinary and managed clients share it.
 func (s *CodexService) Start(ctx context.Context) (CodexServiceSnapshot, error) {
 	return s.startOrRestart(ctx, false, false)
 }
@@ -332,6 +377,16 @@ func (s *CodexService) startOrRestart(ctx context.Context, restart, confirmDisco
 	if err := s.verifyOwnedUnitInventory(bounds, paths, descriptor); err != nil {
 		return snapshot, err
 	}
+	if err := s.validateCanonicalSocketPreflight(descriptor); err != nil {
+		return snapshot, err
+	}
+	active, err := s.nativeDaemon(bounds, descriptor.CodexHome)
+	if err != nil {
+		return snapshot, errors.Join(ErrCodexServiceUnavailable, err)
+	}
+	if active && !s.canonicalListenerOwnedByInstalledService(bounds, paths, descriptor, descriptor.CodexHome) {
+		return snapshot, fmt.Errorf("%w: canonical socket for %q is owned by another process", ErrCodexServiceMigrationRequired, descriptor.CodexHome)
+	}
 	if !restart {
 		if _, err := s.runner.Run(bounds, "systemctl", []string{"--user", "enable", descriptor.UnitName}); err != nil {
 			return snapshot, errors.Join(ErrCodexServiceUnavailable, err)
@@ -355,6 +410,27 @@ func (s *CodexService) startOrRestart(ctx context.Context, restart, confirmDisco
 		return snapshot, errors.Join(ErrCodexServiceUnavailable, err)
 	}
 	return s.awaitReadyAndFinalizeTransition(bounds, paths, descriptor, snapshot)
+}
+
+func (s *CodexService) canonicalListenerOwnedByInstalledService(ctx context.Context, paths codexServicePaths, descriptor codexServiceDescriptor, home string) bool {
+	if descriptor.CodexHome != home || descriptor.SocketPath != canonicalCodexServiceSocket(home) {
+		return false
+	}
+	show, err := s.showUnit(ctx, descriptor.UnitName)
+	if err != nil || !loadedCodexServiceUnitMatches(paths, descriptor, show) || show.ActiveState != "active" || show.SubState != "running" || show.MainPID <= 0 || !validInvocationID(show.InvocationID) {
+		return false
+	}
+	if s.validateProcess(descriptor, show) == nil {
+		return true
+	}
+	if descriptor.PendingTransition == nil {
+		return false
+	}
+	previous := descriptor.PendingTransition.previousDescriptor(descriptor)
+	if previous.CodexHome != home || previous.SocketPath != canonicalCodexServiceSocket(home) {
+		return false
+	}
+	return s.validateReceiptBoundPreviousProcess(descriptor, show) == nil
 }
 
 // Uninstall removes only exact, owned service files. It is deliberately
@@ -616,7 +692,7 @@ func systemdExecStartMatches(value string, descriptor codexServiceDescriptor) bo
 	if !found {
 		return false
 	}
-	return path == descriptor.Executable && argv == descriptor.Executable+" app-server --listen unix://"+descriptor.SocketPath
+	return path == descriptor.Executable && argv == descriptor.Executable+" app-server --listen "+codexServiceListenArgument(descriptor.launchConfiguration())
 }
 
 func (s *CodexService) installHome(explicit string) (string, error) {
@@ -857,7 +933,7 @@ func parseOwnedCodexServiceDescriptor(raw []byte, paths codexServicePaths) (code
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return codexServiceDescriptor{}, fmt.Errorf("%w: descriptor contents changed", ErrCodexServiceOwnership)
 	}
-	if descriptor.SchemaVersion != codexServiceDescriptorVersion || descriptor.UnitName != paths.unitName() || descriptor.UnitPath != paths.UnitPath || descriptor.SocketPath != paths.SocketPath || descriptor.RuntimeDirectory != paths.runtimeDirectoryName() || !validCodexServiceLaunchConfiguration(descriptor.launchConfiguration()) || !validCodexServicePendingTransition(descriptor.PendingTransition, descriptor) {
+	if descriptor.SchemaVersion != codexServiceDescriptorVersion || descriptor.UnitName != paths.unitName() || descriptor.UnitPath != paths.UnitPath || !validOwnedCodexServiceSocket(descriptor.launchConfiguration(), paths) || descriptor.RuntimeDirectory != paths.runtimeDirectoryName() || !validCodexServiceLaunchConfiguration(descriptor.launchConfiguration()) || !validCodexServicePendingTransition(descriptor.PendingTransition, descriptor, paths) {
 		return codexServiceDescriptor{}, fmt.Errorf("%w: descriptor identity", ErrCodexServiceOwnership)
 	}
 	return descriptor, nil
@@ -891,7 +967,8 @@ func renderCodexServiceUnit(descriptor codexServiceDescriptor) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	listenSocket, err := quoteSystemdValue("unix://%t/"+descriptor.RuntimeDirectory+"/codex.sock", true)
+	listenArgument, preserveSpecifiers := codexServiceUnitListenArgument(descriptor)
+	listenSocket, err := quoteSystemdValue(listenArgument, preserveSpecifiers)
 	if err != nil {
 		return nil, err
 	}

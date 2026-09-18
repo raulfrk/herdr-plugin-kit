@@ -131,10 +131,20 @@ func newStagedCodexServiceFixture(t *testing.T) *stagedCodexServiceFixture {
 		resolvedHome:        base.descriptor.CodexHome,
 	}
 	fixture.service.resolveHome = func() (string, error) { return fixture.resolvedHome, nil }
+	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+		switch path {
+		case codexServiceSocketDirectory(fixture.paths, fixture.running):
+			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
+		case fixture.running.SocketPath:
+			return codexServiceFileInfo{mode: os.ModeSocket | 0o600, uid: 1000}, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
 	fixture.service.readProcess = func(int) (codexServiceProcess, error) {
 		return codexServiceProcess{
 			Executable: fixture.running.Executable,
-			Argv:       []string{fixture.running.Executable, "app-server", "--listen", "unix://" + fixture.running.SocketPath},
+			Argv:       []string{fixture.running.Executable, "app-server", "--listen", codexServiceListenArgument(fixture.running.launchConfiguration())},
 			Environment: map[string]string{
 				"CODEX_HOME": fixture.running.CodexHome,
 			},
@@ -255,12 +265,19 @@ func TestCodexServiceInstallRendersOwnedUnitAndIsIdempotent(t *testing.T) {
 	for _, required := range []string{
 		"Environment=\"CODEX_HOME=" + fixture.home + "\"",
 		"WorkingDirectory=%h", "RuntimeDirectory=herdr-plugin-kit", "RuntimeDirectoryMode=0700", "UMask=0077",
-		"ExecStart=\"" + fixture.executable + "\" \"app-server\" \"--listen\" \"unix://%t/herdr-plugin-kit/codex.sock\"",
+		"ExecStart=\"" + fixture.executable + "\" \"app-server\" \"--listen\" \"unix://\"",
 		"Restart=on-failure", "RestartSec=2s", "WantedBy=default.target",
 	} {
 		if !strings.Contains(string(unit), required) {
 			t.Fatalf("unit is missing %q:\n%s", required, unit)
 		}
+	}
+	descriptor, err := readOwnedCodexService(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.SocketPath != canonicalCodexServiceSocket(fixture.home) || codexServiceListenArgument(descriptor.launchConfiguration()) != "unix://" {
+		t.Fatalf("canonical service descriptor=%+v", descriptor)
 	}
 	if info, err := os.Stat(fixture.paths.UnitPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("unit mode=%v err=%v", info.Mode(), err)
@@ -281,6 +298,59 @@ func TestCodexServiceInstallRendersOwnedUnitAndIsIdempotent(t *testing.T) {
 			t.Fatalf("idempotent install restarted service: %+v", call)
 		}
 	}
+}
+
+func TestCodexServiceInstallStagesLegacyPrivateSocketForCanonicalRestart(t *testing.T) {
+	fixture := newStagedCodexServiceFixture(t)
+	legacy := fixture.descriptor
+	legacy.SocketPath = fixture.paths.SocketPath
+	legacy.PendingTransition = nil
+	fixture.descriptor = legacy
+	fixture.loadedDescriptor = legacy
+	fixture.running = legacy
+	writeOwnedCodexServiceFixture(t, fixture.paths, legacy)
+	if err := os.WriteFile(fixture.paths.UnitPath, frozenLegacyCodexServiceUnit(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.service.Install(context.Background(), fixture.sourceOptions())
+	if err != nil || !result.Changed || !result.RestartRequired {
+		t.Fatalf("legacy migration stage=%+v err=%v", result, err)
+	}
+	descriptor, err := readOwnedCodexService(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.SocketPath != canonicalCodexServiceSocket(legacy.CodexHome) || descriptor.PendingTransition == nil || descriptor.PendingTransition.Previous.SocketPath != legacy.SocketPath {
+		t.Fatalf("canonical descriptor with legacy receipt=%+v", descriptor)
+	}
+	unit, err := os.ReadFile(fixture.paths.UnitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), `"--listen" "unix://"`) || strings.Contains(string(unit), `"--listen" "unix://`+legacy.SocketPath+`"`) {
+		t.Fatalf("canonical staged unit:\n%s", unit)
+	}
+}
+
+func frozenLegacyCodexServiceUnit(descriptor codexServiceDescriptor) []byte {
+	return []byte("[Unit]\n" +
+		"Description=Herdr Plugin Kit shared Codex App Server\n" +
+		"StartLimitIntervalSec=60s\n" +
+		"StartLimitBurst=3\n\n" +
+		"[Service]\n" +
+		"Type=simple\n" +
+		"Environment=\"CODEX_HOME=" + descriptor.CodexHome + "\"\n" +
+		"WorkingDirectory=%h\n" +
+		"RuntimeDirectory=" + descriptor.RuntimeDirectory + "\n" +
+		"RuntimeDirectoryMode=0700\n" +
+		"UMask=0077\n" +
+		"ExecStart=\"" + descriptor.Executable + "\" \"app-server\" \"--listen\" \"unix://%t/" + descriptor.RuntimeDirectory + "/codex.sock\"\n" +
+		"Restart=on-failure\n" +
+		"RestartSec=2s\n" +
+		"TimeoutStopSec=10s\n\n" +
+		"[Install]\n" +
+		"WantedBy=default.target\n")
 }
 
 func TestCodexServiceInstallChangedConfigurationRequiresExplicitRestart(t *testing.T) {
@@ -308,7 +378,7 @@ func TestCodexServiceInstallChangedConfigurationRequiresExplicitRestart(t *testi
 		case executable == "systemd-analyze":
 			return command.Result{}, nil
 		case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
-			return serviceShowForDescriptor(fixture.paths, codexServiceDescriptor{Executable: fixture.executable, CodexHome: fixture.home, SocketPath: fixture.paths.SocketPath}, "inactive", "dead", 0, ""), nil
+			return serviceShowForDescriptor(fixture.paths, codexServiceDescriptor{Executable: fixture.executable, CodexHome: fixture.home, SocketPath: canonicalCodexServiceSocket(fixture.home)}, "inactive", "dead", 0, ""), nil
 		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "daemon-reload"}):
 			return command.Result{}, nil
 		default:
@@ -380,6 +450,7 @@ func TestCodexServiceMaintenanceUsesExactOwnershipWithoutRequiringHealthySource(
 		fixture := newStagedCodexServiceFixture(t)
 		fixture.stage(t)
 		fixture.setNaturallyRestartedDesired()
+		fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
 		fixture.handshakeErr = errors.New("desired app server is unresponsive")
 		restarted, err := fixture.service.Restart(context.Background(), true)
 		if err != nil || restarted.State != CodexServiceReady || restarted.CodexHome != fixture.targetHome || restarted.MainPID == 42 {
@@ -388,7 +459,9 @@ func TestCodexServiceMaintenanceUsesExactOwnershipWithoutRequiringHealthySource(
 	})
 	t.Run("restart recovers unresponsive receipt-bound source", func(t *testing.T) {
 		fixture := newStagedCodexServiceFixture(t)
+		fixture.targetHome = fixture.descriptor.CodexHome
 		fixture.stage(t)
+		fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
 		fixture.handshakeErr = errors.New("source app server is unresponsive")
 		restarted, err := fixture.service.Restart(context.Background(), true)
 		if err != nil || restarted.State != CodexServiceReady || restarted.CodexHome != fixture.targetHome || restarted.MainPID == 42 {
@@ -537,6 +610,33 @@ func TestCodexServiceInstallRejectsNativeDaemonAndConflictingFiles(t *testing.T)
 			t.Fatalf("native-daemon rejection ran command: %+v", calls)
 		}
 	})
+	t.Run("native daemon with descriptor only", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		if err := os.Remove(fixture.paths.UnitPath); err != nil {
+			t.Fatal(err)
+		}
+		fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
+		if _, err := fixture.service.Install(context.Background(), CodexServiceInstallOptions{Executable: fixture.descriptor.Executable, CodexHome: fixture.descriptor.CodexHome}); !errors.Is(err, ErrCodexServiceMigrationRequired) {
+			t.Fatalf("err=%v", err)
+		}
+		if calls := fixture.runner.observed(); len(calls) != 0 {
+			t.Fatalf("partial installation conflict ran command: %+v", calls)
+		}
+	})
+	t.Run("native daemon beside an unowned canonical process", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
+		fixture.service.readProcess = func(int) (codexServiceProcess, error) { return codexServiceProcess{}, errors.New("foreign process") }
+		fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+			if executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())) {
+				return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+			}
+			return command.Result{}, errors.New("unexpected command")
+		}
+		if _, err := fixture.service.Install(context.Background(), CodexServiceInstallOptions{Executable: fixture.descriptor.Executable, CodexHome: fixture.descriptor.CodexHome}); !errors.Is(err, ErrCodexServiceMigrationRequired) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 	t.Run("dropin", func(t *testing.T) {
 		fixture := newCodexServiceInstallFixture(t)
 		fixture.runner.run = fixture.normalInstallRunner()
@@ -565,6 +665,140 @@ func TestCodexServiceInstallRejectsNativeDaemonAndConflictingFiles(t *testing.T)
 			t.Fatalf("invalid binary wrote unit: %v", err)
 		}
 	})
+}
+
+func TestCodexServiceInstallAcceptsExactOwnedCanonicalListener(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		switch {
+		case executable == fixture.descriptor.Executable && reflect.DeepEqual(args, []string{"--version"}):
+			return command.Result{Stdout: []byte("codex-cli " + SupportedCodexVersion + "\n")}, nil
+		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
+			return command.Result{}, nil
+		case executable == "loginctl" && reflect.DeepEqual(args, []string{"show-user", "1000", "--property=Linger", "--value"}):
+			return command.Result{Stdout: []byte("yes\n")}, nil
+		case executable == "systemd-analyze" && reflect.DeepEqual(args, []string{"verify", fixture.paths.UnitPath}):
+			return command.Result{}, nil
+		case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+			return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "daemon-reload"}):
+			return command.Result{}, nil
+		default:
+			return command.Result{}, errors.New("unexpected command")
+		}
+	}
+
+	result, err := fixture.service.Install(context.Background(), CodexServiceInstallOptions{Executable: fixture.descriptor.Executable, CodexHome: fixture.descriptor.CodexHome})
+	if err != nil || result.Changed || result.RestartRequired {
+		t.Fatalf("owned canonical idempotent install=%+v err=%v", result, err)
+	}
+}
+
+func TestCodexServiceCanonicalListenerOwnershipBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		showErr error
+		mutate  func(command.Result) command.Result
+		process func(*codexServiceFixture)
+		want    bool
+	}{
+		{name: "exact owned", want: true},
+		{name: "show error", showErr: errors.New("show failed")},
+		{name: "loaded unit mismatch", mutate: func(result command.Result) command.Result {
+			result.Stdout = []byte(strings.Replace(string(result.Stdout), "FragmentPath=", "FragmentPath=/foreign-", 1))
+			return result
+		}},
+		{name: "inactive", mutate: func(result command.Result) command.Result {
+			result.Stdout = []byte(strings.Replace(string(result.Stdout), "ActiveState=active", "ActiveState=inactive", 1))
+			return result
+		}},
+		{name: "wrong substate", mutate: func(result command.Result) command.Result {
+			result.Stdout = []byte(strings.Replace(string(result.Stdout), "SubState=running", "SubState=dead", 1))
+			return result
+		}},
+		{name: "zero PID", mutate: func(result command.Result) command.Result {
+			result.Stdout = []byte(strings.Replace(string(result.Stdout), "MainPID=42", "MainPID=0", 1))
+			return result
+		}},
+		{name: "invalid invocation", mutate: func(result command.Result) command.Result {
+			result.Stdout = []byte(strings.Replace(string(result.Stdout), "InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "InvocationID=invalid", 1))
+			return result
+		}},
+		{name: "process drift", process: func(fixture *codexServiceFixture) {
+			fixture.service.readProcess = func(int) (codexServiceProcess, error) { return codexServiceProcess{}, errors.New("process drift") }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCodexServiceFixture(t)
+			if test.process != nil {
+				test.process(&fixture)
+			}
+			fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+				if executable != "systemctl" || !reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())) {
+					return command.Result{}, errors.New("unexpected command")
+				}
+				result := serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+				if test.mutate != nil {
+					result = test.mutate(result)
+				}
+				return result, test.showErr
+			}
+			if got := fixture.service.canonicalListenerOwnedByInstalledService(context.Background(), fixture.paths, fixture.descriptor, fixture.descriptor.CodexHome); got != test.want {
+				t.Fatalf("canonical listener owned=%t, want %t", got, test.want)
+			}
+		})
+	}
+
+	t.Run("descriptor home mismatch", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		home := fixture.descriptor.CodexHome
+		fixture.descriptor.CodexHome += "-other"
+		if fixture.service.canonicalListenerOwnedByInstalledService(context.Background(), fixture.paths, fixture.descriptor, home) {
+			t.Fatal("accepted a different requested home")
+		}
+		if calls := fixture.runner.observed(); len(calls) != 0 {
+			t.Fatalf("descriptor home mismatch reached systemd: %+v", calls)
+		}
+	})
+	t.Run("legacy descriptor socket", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		fixture.descriptor.SocketPath = fixture.paths.SocketPath
+		if fixture.service.canonicalListenerOwnedByInstalledService(context.Background(), fixture.paths, fixture.descriptor, fixture.descriptor.CodexHome) {
+			t.Fatal("accepted a legacy socket as the canonical listener")
+		}
+		if calls := fixture.runner.observed(); len(calls) != 0 {
+			t.Fatalf("legacy descriptor socket reached systemd: %+v", calls)
+		}
+	})
+	for _, mismatch := range []string{"previous home", "previous socket"} {
+		t.Run(mismatch, func(t *testing.T) {
+			fixture := newStagedCodexServiceFixture(t)
+			fixture.targetHome = fixture.descriptor.CodexHome
+			fixture.stage(t)
+			descriptor, err := readOwnedCodexService(fixture.paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mismatch == "previous home" {
+				descriptor.PendingTransition.Previous.CodexHome += "-other"
+			} else {
+				descriptor.PendingTransition.Previous.SocketPath += "-other"
+			}
+			processReads := 0
+			readProcess := fixture.service.readProcess
+			fixture.service.readProcess = func(pid int) (codexServiceProcess, error) {
+				processReads++
+				return readProcess(pid)
+			}
+			if fixture.service.canonicalListenerOwnedByInstalledService(context.Background(), fixture.paths, descriptor, descriptor.CodexHome) {
+				t.Fatalf("accepted %s mismatch", mismatch)
+			}
+			if processReads != 1 {
+				t.Fatalf("%s mismatch process reads=%d, want 1", mismatch, processReads)
+			}
+		})
+	}
 }
 
 func TestCodexServiceLifecycleOwnershipRejectsUnsafeDirectoriesAndFilesBeforeMutation(t *testing.T) {
@@ -653,7 +887,7 @@ func TestCodexServiceInstallRefusesForeignLoadedUnitBeforeWriting(t *testing.T) 
 	fixture.runner.run = func(ctx context.Context, executable string, args []string) (command.Result, error) {
 		if executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())) {
 			foreign := serviceShowForDescriptor(fixture.paths, codexServiceDescriptor{
-				Executable: fixture.executable, CodexHome: fixture.home, SocketPath: fixture.paths.SocketPath,
+				Executable: fixture.executable, CodexHome: fixture.home, SocketPath: canonicalCodexServiceSocket(fixture.home),
 			}, "inactive", "dead", 0, "")
 			foreign.Stdout = []byte(strings.Replace(string(foreign.Stdout), "FragmentPath="+fixture.paths.UnitPath, "FragmentPath=/etc/systemd/user/"+fixture.paths.unitName(), 1))
 			return foreign, nil
@@ -676,11 +910,9 @@ func TestCodexServiceInstallRefusesForeignLoadedUnitBeforeWriting(t *testing.T) 
 	}
 }
 
-func TestCodexServiceStartAllowsNativeDaemonAfterInstallation(t *testing.T) {
+func TestCodexServiceStartAllowsOwnedCanonicalListener(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
-	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
-		panic("starting an installed shared service must not probe the ordinary Codex daemon")
-	}
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
 	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
 		switch {
 		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
@@ -1357,7 +1589,7 @@ func TestCodexServiceLaunchConfigurationValidationRejectsEachDistinctField(t *te
 		InvocationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
 	validPending.Previous.Executable += "-previous"
-	if !validCodexServicePendingTransition(validPending, fixture.descriptor) {
+	if !validCodexServicePendingTransition(validPending, fixture.descriptor, fixture.paths) {
 		t.Fatal("valid transition receipt was rejected")
 	}
 	for _, test := range []struct {
@@ -1375,7 +1607,7 @@ func TestCodexServiceLaunchConfigurationValidationRejectsEachDistinctField(t *te
 		t.Run(test.name, func(t *testing.T) {
 			pending := *validPending
 			test.mutate(&pending)
-			if validCodexServicePendingTransition(&pending, fixture.descriptor) {
+			if validCodexServicePendingTransition(&pending, fixture.descriptor, fixture.paths) {
 				t.Fatalf("accepted invalid pending transition %s", test.name)
 			}
 		})
@@ -1420,7 +1652,7 @@ func TestCodexServiceInstallWritesMissingOwnedUnitWhenDescriptorAlreadyMatches(t
 func TestCodexServiceStartDoesNotStartAnUnresponsiveActiveInstance(t *testing.T) {
 	fixture := newCodexServiceFixture(t)
 	fixture.service.lstat = func(path string) (fs.FileInfo, error) {
-		if path == fixture.paths.RuntimeDir {
+		if path == codexServiceSocketDirectory(fixture.paths, fixture.descriptor) {
 			return codexServiceFileInfo{mode: os.ModeDir | 0o700, uid: 1000, dir: true}, nil
 		}
 		return nil, os.ErrNotExist
@@ -1449,6 +1681,87 @@ func TestCodexServiceStartDoesNotStartAnUnresponsiveActiveInstance(t *testing.T)
 	snapshot, err := fixture.service.Start(context.Background())
 	if !errors.Is(err, ErrCodexServiceUnavailable) || snapshot.State != CodexServiceDegraded || enabled != 1 || starts != 0 {
 		t.Fatalf("active unresponsive Start snapshot=%+v err=%v enable=%d start=%d", snapshot, err, enabled, starts)
+	}
+}
+
+func TestCodexServiceStartRejectsForeignCanonicalListenerBeforeManagerMutation(t *testing.T) {
+	fixture := newCodexServiceFixture(t)
+	fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) { return true, nil }
+	fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+		switch {
+		case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
+			return command.Result{}, nil
+		case executable == "loginctl" && reflect.DeepEqual(args, []string{"show-user", "1000", "--property=Linger", "--value"}):
+			return command.Result{Stdout: []byte("yes\n")}, nil
+		case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+			return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "inactive", "dead", 0, ""), nil
+		default:
+			return command.Result{}, errors.New("unexpected command")
+		}
+	}
+
+	if _, err := fixture.service.Start(context.Background()); !errors.Is(err, ErrCodexServiceMigrationRequired) {
+		t.Fatalf("foreign canonical listener start error=%v", err)
+	}
+	for _, call := range fixture.runner.observed() {
+		if call.executable == "systemctl" && len(call.args) > 1 && (call.args[1] == "enable" || call.args[1] == "start" || call.args[1] == "restart") {
+			t.Fatalf("foreign canonical listener reached manager mutation: %+v", call)
+		}
+	}
+}
+
+func TestCodexServiceStartAndEnsureRejectUnsafeCanonicalPathsBeforeManagerMutation(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(*CodexService) error
+	}{
+		{name: "start", run: func(service *CodexService) error { _, err := service.Start(context.Background()); return err }},
+		{name: "ensure", run: func(service *CodexService) error { _, err := service.Ensure(context.Background()); return err }},
+	}
+	for _, unsafe := range []string{"directory symlink", "socket symlink"} {
+		for _, operation := range operations {
+			t.Run(operation.name+" "+unsafe, func(t *testing.T) {
+				fixture := newCodexServiceFixture(t)
+				fixture.service.lstat = func(path string) (fs.FileInfo, error) {
+					switch path {
+					case codexServiceSocketDirectory(fixture.paths, fixture.descriptor):
+						mode := os.ModeDir | os.FileMode(0o700)
+						if unsafe == "directory symlink" {
+							mode |= os.ModeSymlink
+						}
+						return codexServiceFileInfo{mode: mode, uid: 1000, dir: true}, nil
+					case fixture.descriptor.SocketPath:
+						mode := os.ModeSocket | os.FileMode(0o600)
+						if unsafe == "socket symlink" {
+							mode |= os.ModeSymlink
+						}
+						return codexServiceFileInfo{mode: mode, uid: 1000}, nil
+					default:
+						return nil, os.ErrNotExist
+					}
+				}
+				fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+					switch {
+					case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
+						return command.Result{}, nil
+					case executable == "loginctl" && reflect.DeepEqual(args, []string{"show-user", "1000", "--property=Linger", "--value"}):
+						return command.Result{Stdout: []byte("yes\n")}, nil
+					case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+						return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "inactive", "dead", 0, ""), nil
+					default:
+						return command.Result{}, errors.New("unexpected command")
+					}
+				}
+				if err := operation.run(fixture.service); !errors.Is(err, ErrCodexServiceDrift) {
+					t.Fatalf("unsafe canonical path error=%v", err)
+				}
+				for _, call := range fixture.runner.observed() {
+					if call.executable == "systemctl" && len(call.args) > 1 && (call.args[1] == "enable" || call.args[1] == "start" || call.args[1] == "restart") {
+						t.Fatalf("unsafe canonical path reached manager mutation: %+v", call)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -1901,7 +2214,7 @@ func TestCodexServiceMaintenanceInventoryAndStopChecksRejectDistinctUnsafeStates
 				reads++
 				return codexServiceProcess{
 					Executable:  fixture.descriptor.Executable,
-					Argv:        []string{fixture.descriptor.Executable, "app-server", "--listen", "unix://" + fixture.descriptor.SocketPath},
+					Argv:        []string{fixture.descriptor.Executable, "app-server", "--listen", codexServiceListenArgument(fixture.descriptor.launchConfiguration())},
 					Environment: map[string]string{"CODEX_HOME": fixture.descriptor.CodexHome},
 					Cgroup:      "/" + fixture.paths.unitName(),
 				}, nil
@@ -1992,6 +2305,7 @@ func TestCodexServiceStageAndFinalizeTransitionFailClosed(t *testing.T) {
 				previous := fixture.descriptor
 				previous.Executable += "-previous"
 				previous.CodexHome += "-previous"
+				previous.SocketPath = canonicalCodexServiceSocket(previous.CodexHome)
 				fixture.descriptor.PendingTransition = newCodexServicePendingTransition(previous, CodexServiceSnapshot{MainPID: 42, InvocationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 				writeOwnedCodexServiceFixture(t, fixture.paths, fixture.descriptor)
 			}

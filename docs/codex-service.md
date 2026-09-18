@@ -7,18 +7,20 @@ conversation storage; it does not create one server per conversation.
 
 ## Managed versus ordinary
 
-Typing `codex` starts an ordinary, unmanaged TUI. Managed New and Fork explicitly
-use the service's private Unix socket. Convert stops the exact guarded ordinary
-TUI and resumes its existing conversation through that socket, preserving its
-identity, history, directory, and effective settings. It does not replace the
-conversation or move it to a different pane.
+Typing `codex` starts an ordinary, unmanaged TUI, but its App Server transport
+is the same systemd-owned canonical Unix socket used by managed operations.
+Managed New and Fork explicitly use that socket. Convert stops the exact
+guarded ordinary TUI and resumes its existing conversation through that socket,
+preserving its identity, history, directory, and effective settings. It does
+not replace the conversation or move it to a different pane.
 
-The socket is outside Codex's native-daemon discovery location. A native daemon
-that predates initial service installation must be retired at an explicit
-maintenance checkpoint; installing a second socket alone does not migrate its
-active clients. After installation, plain `codex` may start its ordinary native
-daemon alongside the shared service. Runtime health validates the Kit-owned
-systemd process and socket independently and never stops the ordinary daemon.
+The service launches pinned Codex with literal `app-server --listen unix://`,
+which resolves to `CODEX_HOME/app-server-control/app-server-control.sock`.
+Consequently plain and explicitly remote Codex clients share one App Server
+process while remaining distinct conversations. A native daemon or legacy Kit
+service that predates installation must be retired through the explicit
+maintenance procedure below; installation never creates a second canonical
+listener or silently disconnects clients.
 
 For prompt delivery, an ordinary target has a zero `CodexService` snapshot.
 Its exact pane/process, empty composer, and full Herdr hook identity authorize
@@ -56,6 +58,21 @@ An unchanged installation is idempotent and does not restart clients.
 `install` writes the configuration without starting it; `start` enables boot
 startup and starts the service. Complete both steps during initial setup.
 
+If an active native daemon already owns the canonical socket, `install` fails
+before changing files. After settling and saving all Codex work, migrate using
+the supported Codex stop boundary, then stage and restart the exact Kit-owned
+unit:
+
+```text
+codex app-server daemon stop
+herdr-plugin-kit codex-service install
+herdr-plugin-kit codex-service restart --confirm-disconnect
+```
+
+For a non-default home, run the first command with that same `CODEX_HOME`.
+The staged descriptor retains the verified legacy launch identity until the
+confirmed restart succeeds, so a failed migration is diagnosable and retryable.
+
 Installing a changed executable or home stages that configuration without
 restarting existing clients. Complete the change with an explicitly confirmed
 maintenance restart. Until then, the old running instance is not reported as
@@ -64,8 +81,8 @@ or migrate conversations between homes.
 
 The user service manager and lingering are prerequisites for starting at boot
 and surviving logout. Installation must not silently change system-wide login
-policy or repair unrelated failed units. There is no native-daemon or ad hoc
-process fallback.
+policy or repair unrelated failed units. There is no ad hoc process fallback,
+and the Kit never starts a second socket.
 
 `status` is read-only. The next explicit managed operation starts an installed
 but stopped service and checks readiness. Plugin monitoring uses this same
@@ -100,14 +117,16 @@ history, lingering, unrelated services and panes, and external SSH settings.
 systemd cleans the dedicated runtime directory; the Kit does not recursively
 delete a shared directory or Codex home. The private lifecycle lock file remains
 so separate Kit processes continue to coordinate safely across uninstall and
-reinstallation. An already absent installation is a successful no-op.
-Managed actions then report that installation is required;
-they do not reinstall the service automatically. Plain `codex` still works.
+reinstallation. An already absent installation is a successful no-op. Managed
+actions then report that installation is required; they do not reinstall the
+service automatically. A later plain `codex` may start Codex's native daemon
+again, which is intentionally ordinary and unmanaged until the service is
+reinstalled.
 
 ## Optional remote access
 
 Keep the socket private. Use SSH Unix-socket forwarding to the owning user's
-runtime socket and explicitly attach the remote Codex TUI to the forwarded
+canonical socket and explicitly attach the remote Codex TUI to the forwarded
 local socket. Do not expose an unauthenticated TCP/WebSocket listener. SSH
 credentials, tunnel lifecycle, and local socket permissions remain the user's
 responsibility; service uninstall does not alter independently owned tunnels.
