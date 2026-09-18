@@ -721,6 +721,28 @@ func TestNativeEmptyComposerParsersUseSupportedVersionShapes(t *testing.T) {
 	}
 }
 
+func TestOpenCodeEmptyComposerAcceptsBoundedWrappedStatus(t *testing.T) {
+	empty := openCodeEmptyComposerANSI("sidebar")
+	status := "  Build · GPT-5.6 Sol OpenAI · medium        "
+	wrapped := strings.Replace(empty, status, "  Build · GPT-5.6 Sol OpenAI · mediu\n"+openCodeComposerRow("m       ", "sidebar"), 1)
+	if !emptyOpenCodeComposer(wrapped) {
+		t.Fatal("supported wrapped OpenCode status was rejected")
+	}
+	changedBackground := strings.Replace(wrapped, "48;2;30;30;30mm", "48;2;1;2;3mm", 1)
+	if emptyOpenCodeComposer(changedBackground) {
+		t.Fatal("mixed status backgrounds were accepted")
+	}
+	excessive := strings.Replace(empty, status, "  Build · GPT-5.6 Sol OpenAI · mediu\n"+
+		openCodeComposerRow("m", "sidebar")+"\n"+openCodeComposerRow("continued", "sidebar")+"\n"+openCodeComposerRow("again", "sidebar"), 1)
+	if emptyOpenCodeComposer(excessive) {
+		t.Fatal("excessive status continuations were accepted")
+	}
+	draft := strings.Replace(wrapped, openCodeComposerRow("", "sidebar"), openCodeComposerRow("draft", "sidebar"), 1)
+	if emptyOpenCodeComposer(draft) {
+		t.Fatal("typed draft above a wrapped status was accepted")
+	}
+}
+
 func openCodeEmptyComposerANSI(sidebarText string) string {
 	left := "\x1b[38;2;255;255;255;48;2;10;10;10m  \x1b[0m"
 	border := "\x1b[38;2;92;156;245;48;2;10;10;10m┃\x1b[0m"
@@ -729,6 +751,14 @@ func openCodeEmptyComposerANSI(sidebarText string) string {
 	input := left + border + blank + left + sidebar
 	status := left + border + "\x1b[38;2;255;255;255;48;2;30;30;30m  Build · GPT-5.6 Sol OpenAI · medium        \x1b[0m" + left + sidebar
 	return strings.Join([]string{"header", input, input, input, status, left + "╹▀▀▀", "footer"}, "\n")
+}
+
+func openCodeComposerRow(content, sidebarText string) string {
+	left := "\x1b[38;2;255;255;255;48;2;10;10;10m  \x1b[0m"
+	border := "\x1b[38;2;92;156;245;48;2;10;10;10m┃\x1b[0m"
+	composer := "\x1b[38;2;255;255;255;48;2;30;30;30m" + content + strings.Repeat(" ", max(0, 8-len(content))) + "\x1b[0m"
+	sidebar := "\x1b[38;2;128;128;128;48;2;20;20;20m" + sidebarText + "\x1b[0m"
+	return left + border + composer + left + sidebar
 }
 
 func validPromptTarget(t *testing.T) (PromptTarget, wireAgent) {

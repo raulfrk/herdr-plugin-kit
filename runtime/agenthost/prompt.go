@@ -374,22 +374,16 @@ func emptyOMPComposer(text string) bool {
 
 func emptyOpenCodeComposer(text string) bool {
 	// OpenCode 1.18.30 renders blank input rows immediately above one model
-	// status row and the heavy lower border. The optional right sidebar shares
-	// those rows, so compare ANSI backgrounds and inspect only the composer.
+	// status row and the heavy lower border. At narrow supported widths the
+	// status may wrap onto at most two continuation rows. The optional right
+	// sidebar shares those rows, so compare ANSI backgrounds and inspect only
+	// the composer.
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	for bottom := len(lines) - 1; bottom >= 0; bottom-- {
 		if !strings.HasPrefix(strings.TrimSpace(managedANSI.ReplaceAllString(lines[bottom], "")), "╹▀") {
 			continue
 		}
-		status := bottom - 1
-		statusLine := ""
-		if status >= 0 {
-			statusLine = strings.TrimSpace(managedANSI.ReplaceAllString(lines[status], ""))
-		}
-		if !strings.HasPrefix(statusLine, "┃  ") || strings.Count(statusLine, "·") < 1 {
-			return false
-		}
-		background, ok := openCodeComposerBackground(lines[status])
+		status, background, ok := openCodeStatusStart(lines, bottom)
 		if !ok {
 			return false
 		}
@@ -408,6 +402,33 @@ func emptyOpenCodeComposer(text string) bool {
 		return blankRows >= 2
 	}
 	return false
+}
+
+const maxOpenCodeStatusContinuationRows = 2
+
+func openCodeStatusStart(lines []string, bottom int) (int, string, bool) {
+	background := ""
+	for status, continuations := bottom-1, 0; status >= 0; status, continuations = status-1, continuations+1 {
+		plain := strings.TrimSpace(managedANSI.ReplaceAllString(lines[status], ""))
+		if !strings.HasPrefix(plain, "┃") || continuations > maxOpenCodeStatusContinuationRows {
+			return 0, "", false
+		}
+		rowBackground, ok := openCodeComposerBackground(lines[status])
+		if !ok || background != "" && rowBackground != background {
+			return 0, "", false
+		}
+		if background == "" {
+			background = rowBackground
+		}
+		content, found := openCodeBackgroundText(lines[status], background)
+		if !found || strings.TrimSpace(content) == "" {
+			return 0, "", false
+		}
+		if strings.HasPrefix(plain, "┃  ") && strings.Count(plain, "·") >= 1 {
+			return status, background, true
+		}
+	}
+	return 0, "", false
 }
 
 func openCodeComposerBackground(line string) (string, bool) {
