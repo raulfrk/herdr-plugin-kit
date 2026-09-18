@@ -414,16 +414,13 @@ func openCodeStatusStart(lines []string, bottom int) (int, string, bool) {
 			return 0, "", false
 		}
 		rowBackground, ok := openCodeComposerBackground(lines[status])
-		if !ok || background != "" && rowBackground != background {
+		if !ok {
 			return 0, "", false
 		}
 		if background == "" {
 			background = rowBackground
 		}
-		// rowBackground was extracted from this same line, so a matching span
-		// is guaranteed here; only its visible content remains to validate.
-		content, _ := openCodeBackgroundText(lines[status], background)
-		if strings.TrimSpace(content) == "" {
+		if rowBackground != background {
 			return 0, "", false
 		}
 		if strings.HasPrefix(plain, "┃  ") && strings.Count(plain, "·") >= 1 {

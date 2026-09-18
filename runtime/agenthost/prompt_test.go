@@ -757,9 +757,15 @@ func TestOpenCodeStatusStartAcceptsExactContinuationAndIndexBoundaries(t *testin
 }
 
 func TestOpenCodeStatusStartRejectsMissingANSIAndBlankContinuation(t *testing.T) {
+	left := "\x1b[38;2;255;255;255;48;2;10;10;10m  \x1b[0m"
+	border := "\x1b[38;2;92;156;245;48;2;10;10;10m┃\x1b[0m"
+	mixedStatus := left + border +
+		"\x1b[38;2;255;255;255;48;2;1;2;3m  Build \x1b[0m" +
+		"\x1b[38;2;255;255;255;48;2;30;30;30m· Model\x1b[0m"
 	for _, lines := range [][]string{
 		{"┃  Build · Model", "╹▀▀▀"},
 		{openCodeComposerRow("  Build · Model", "sidebar"), openCodeComposerRow("", ""), "╹▀▀▀"},
+		{mixedStatus, openCodeComposerRow("status tail", "sidebar"), "╹▀▀▀"},
 	} {
 		if status, background, ok := openCodeStatusStart(lines, len(lines)-1); ok || status != 0 || background != "" {
 			t.Fatalf("lines=%q status=%d background=%q ok=%t", lines, status, background, ok)
