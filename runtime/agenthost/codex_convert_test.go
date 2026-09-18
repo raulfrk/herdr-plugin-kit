@@ -2,10 +2,12 @@ package agenthost
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +207,243 @@ func TestCodexConverterSupportsDefaultHerdrSession(t *testing.T) {
 	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if err != nil || result.Outcome != CodexConversionManaged || len(harness.launches) != 1 || harness.launches[0].Origin.SessionName != "" {
 		t.Fatalf("result=%+v error=%v launches=%+v", result, err, harness.launches)
+	}
+}
+
+func TestCodexConverterDiscoversAndBindsMissingOrdinarySessionBeforeStopping(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	managed := harness.managedResult()
+	bound := harness.source
+	harness.source.Session = nil
+	harness.verifier.identities = append([]codexThreadIdentity{harness.identity}, harness.verifier.identities...)
+	harness.runner.results = append(conversionDiscoveryResults(t, harness.source, bound), harness.runner.results...)
+	harness.converter.launch = func(_ context.Context, request ManagedCodexRequest) (*ManagedCodex, error) {
+		harness.launches = append(harness.launches, request)
+		return managed, nil
+	}
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if err != nil || result.Outcome != CodexConversionManaged || result.ThreadID != managedSourceID {
+		t.Fatalf("result=%+v error=%v calls=%q", result, err, harness.runner.calls)
+	}
+	if len(harness.topology.stops) != 1 || len(harness.launches) != 1 || harness.launches[0].ThreadID != managedSourceID {
+		t.Fatalf("stops=%+v launches=%+v", harness.topology.stops, harness.launches)
+	}
+	assertConversionDiscoveryCalls(t, harness.runner.calls, harness.source.SessionName)
+}
+
+func TestCodexConverterPreparesCustomizationAfterBindingMissingOrdinarySession(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	bound := harness.source
+	harness.source.Session = nil
+	harness.runner.results = conversionDiscoveryResults(t, harness.source, bound)
+	harness.verifier.identities = []codexThreadIdentity{harness.identity, harness.identity}
+	harness.verifier.histories = [][32]byte{harness.history}
+	harness.verifier.constraints = []codexConstraintSnapshot{conversionConstraints()}
+	desired := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "high", ApprovalPolicy: "on-request", SandboxMode: "read-only"}
+
+	disclosure, err := harness.converter.PrepareCustomization(context.Background(), harness.source, desired, 0)
+	if err != nil || disclosure.ThreadID != managedSourceID || len(disclosure.ConfirmationToken) != 64 {
+		t.Fatalf("disclosure=%+v error=%v calls=%q", disclosure, err, harness.runner.calls)
+	}
+	if len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 {
+		t.Fatalf("stops=%+v runs=%+v", harness.topology.stops, harness.topology.runs)
+	}
+	assertConversionDiscoveryCalls(t, harness.runner.calls, harness.source.SessionName)
+}
+
+func TestCodexConverterMissingSessionRejectsAppServerDisagreementBeforeBinding(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	bound := harness.source
+	harness.source.Session = nil
+	harness.runner.results = conversionDiscoveryResults(t, harness.source, bound)
+	harness.verifier.identities = []codexThreadIdentity{{
+		ID: managedSourceID, CWD: "/tmp/other", ModelProvider: "openai",
+		Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+	}}
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrManagedStale) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 {
+		t.Fatalf("result=%+v error=%v stops=%+v calls=%+v", result, err, harness.topology.stops, harness.runner.calls)
+	}
+	for _, call := range harness.runner.calls {
+		if strings.Contains(strings.Join(call, " "), "report-agent-session") {
+			t.Fatalf("authority failure reported a Herdr session: %v", harness.runner.calls)
+		}
+	}
+}
+
+func TestCodexConverterMissingSessionRejectsStaleSourceBeforePaneInput(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	harness.source.Session = nil
+	changed := harness.source
+	changed.Status = "working"
+	harness.runner.results = []command.Result{managedAgentResult(t, changed)}
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrManagedStale) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || hasPaneInput(harness.runner.calls) {
+		t.Fatalf("result=%+v error=%v stops=%+v calls=%+v", result, err, harness.topology.stops, harness.runner.calls)
+	}
+}
+
+func TestCodexConverterMissingSessionRejectsRemoteProcessBeforePaneInput(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Session = nil
+	harness.topology.inspected.Argv = []string{"codex", "--remote", "unix:///tmp/shared.sock"}
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.runner.calls) != 0 || len(harness.topology.stops) != 0 {
+		t.Fatalf("result=%+v error=%v calls=%+v stops=%+v", result, err, harness.runner.calls, harness.topology.stops)
+	}
+}
+
+func TestCodexConverterMissingSessionRejectsMalformedCustomizationBeforeDiscovery(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Session = nil
+	request := harness.request()
+	request.Customization = &CodexConversionCustomization{Desired: managedPolicy(), ConfirmationToken: "wrong"}
+
+	result, err := harness.converter.Convert(context.Background(), request)
+	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(result, CodexConversionResult{}) || harness.service.callCount() != 0 || len(harness.runner.calls) != 0 || len(harness.topology.stops) != 0 {
+		t.Fatalf("result=%+v error=%v service=%d calls=%+v stops=%+v", result, err, harness.service.callCount(), harness.runner.calls, harness.topology.stops)
+	}
+}
+
+func TestCodexConverterRejectsServiceErrorBeforeIdentityWork(t *testing.T) {
+	harness := newConversionHarness(t)
+	serviceErr := errors.New("service unavailable")
+	harness.service.err = serviceErr
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, serviceErr) || !errors.Is(err, ErrManagedStale) || !reflect.DeepEqual(result, CodexConversionResult{}) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if len(harness.runner.calls) != 0 || len(harness.topology.stops) != 0 {
+		t.Fatalf("calls=%+v stops=%+v", harness.runner.calls, harness.topology.stops)
+	}
+}
+
+func TestCodexConversionValidationRequiresResolvableAndBoundSourceIndependently(t *testing.T) {
+	harness := newConversionHarness(t)
+	valid := harness.request()
+	for name, request := range map[string]CodexConversionRequest{
+		"unresolvable": func() CodexConversionRequest {
+			value := valid
+			value.Source.SessionName = "other"
+			return value
+		}(),
+		"unbound": func() CodexConversionRequest {
+			value := valid
+			value.Source.Session = nil
+			return value
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !errors.Is(harness.converter.validate(request), ErrManagedUnsupported) {
+				t.Fatalf("accepted request=%+v", request)
+			}
+		})
+	}
+}
+
+func TestCodexConverterMissingSessionRejectsEveryForegroundProcessMismatchBeforePaneInput(t *testing.T) {
+	inspectErr := errors.New("inspect failed")
+	for name, configure := range map[string]func(*fakeManagedTopology){
+		"inspect error": func(topology *fakeManagedTopology) { topology.inspectErr = inspectErr },
+		"process name":  func(topology *fakeManagedTopology) { topology.inspected.Name = "other" },
+		"empty argv":    func(topology *fakeManagedTopology) { topology.inspected.Argv = nil },
+		"executable":    func(topology *fakeManagedTopology) { topology.inspected.Argv = []string{"other"} },
+		"cwd":           func(topology *fakeManagedTopology) { topology.inspected.CWD = "/tmp/other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			harness := newConversionHarness(t)
+			harness.source.Session = nil
+			configure(harness.topology)
+
+			result, err := harness.converter.Convert(context.Background(), harness.request())
+			if err == nil || !reflect.DeepEqual(result, CodexConversionResult{}) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			if name == "inspect error" && !errors.Is(err, inspectErr) {
+				t.Fatalf("error=%v", err)
+			}
+			if name != "inspect error" && !errors.Is(err, ErrManagedStale) {
+				t.Fatalf("error=%v", err)
+			}
+			if len(harness.runner.calls) != 0 || len(harness.topology.stops) != 0 {
+				t.Fatalf("calls=%+v stops=%+v", harness.runner.calls, harness.topology.stops)
+			}
+		})
+	}
+}
+
+func TestRecheckSourceBeforeBindingRejectsEveryGuard(t *testing.T) {
+	inspectErr := errors.New("inspect failed")
+	for name, arrange := range map[string]func(*conversionHarness, Agent) []command.Result{
+		"already bound": func(_ *conversionHarness, expected Agent) []command.Result {
+			bound := expected
+			bound.Session = &SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: managedSourceID}
+			return []command.Result{managedAgentResult(t, bound)}
+		},
+		"immutable": func(_ *conversionHarness, expected Agent) []command.Result {
+			wire := wireFromAgent(expected)
+			wire.Agent = "CODEX"
+			return []command.Result{managedWireAgentResult(t, wire)}
+		},
+		"focused": func(_ *conversionHarness, expected Agent) []command.Result {
+			expected.Focused = true
+			return []command.Result{managedAgentResult(t, expected)}
+		},
+		"launch pending": func(_ *conversionHarness, expected Agent) []command.Result {
+			wire := wireFromAgent(expected)
+			wire.LaunchPending = true
+			return []command.Result{managedWireAgentResult(t, wire)}
+		},
+		"working": func(_ *conversionHarness, expected Agent) []command.Result {
+			expected.Status = "working"
+			return []command.Result{managedAgentResult(t, expected)}
+		},
+		"inspect error": func(harness *conversionHarness, expected Agent) []command.Result {
+			harness.topology.inspectErr = inspectErr
+			return []command.Result{managedAgentResult(t, expected)}
+		},
+		"process drift": func(harness *conversionHarness, expected Agent) []command.Result {
+			harness.topology.inspected.PID++
+			return []command.Result{managedAgentResult(t, expected)}
+		},
+		"draft": func(_ *conversionHarness, expected Agent) []command.Result {
+			return []command.Result{managedAgentResult(t, expected), {Stdout: []byte("answer\n› draft\n status")}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			harness := newConversionHarness(t)
+			expected := harness.source
+			expected.Session = nil
+			expected.Revision, expected.StateChangeSeq = 1, 1
+			harness.runner.results = arrange(harness, expected)
+			process := sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: expected.CWD, Argv: []string{"codex"}}
+
+			_, err := harness.converter.recheckSourceBeforeBinding(context.Background(), managedOrigin(), expected, process)
+			if err == nil {
+				t.Fatal("unsafe source accepted")
+			}
+			if name == "inspect error" && !errors.Is(err, inspectErr) {
+				t.Fatalf("error=%v", err)
+			}
+			if hasPaneInput(harness.runner.calls) {
+				t.Fatalf("calls=%+v", harness.runner.calls)
+			}
+		})
+	}
+}
+
+func TestConversionConfirmationTokenRejectsUppercaseHex(t *testing.T) {
+	if validConversionConfirmationToken(strings.Repeat("A", sha256.Size*2)) {
+		t.Fatal("uppercase confirmation token accepted")
 	}
 }
 
@@ -547,6 +786,62 @@ func conversionPaneResult(t *testing.T, origin sessionhost.Origin, cwd string, f
 			},
 		},
 	})
+}
+
+func conversionDiscoveryResults(t *testing.T, unbound, bound Agent) []command.Result {
+	t.Helper()
+	target := sessionhost.Origin{SessionName: unbound.SessionName, WorkspaceID: unbound.WorkspaceID, TabID: unbound.TabID, PaneID: unbound.PaneID}
+	status := fmt.Sprintf(`/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Model: gpt-5.6-sol (reasoning medium, summaries detailed) │
+│ Directory: %s │
+│ Session: %s │`, unbound.CWD, bound.Session.Value)
+	return []command.Result{
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("header")},
+		paneScrollResult(t, target, 10),
+		{Stdout: []byte("old output")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("header")},
+		{},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		{},
+		paneScrollResult(t, target, 40),
+		{Stdout: []byte("old output\n" + status)},
+		{Stdout: managedEmptyComposer("status block")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("status block")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("status block")},
+		{},
+		managedAgentResult(t, bound),
+		managedAgentResult(t, bound),
+	}
+}
+
+func assertConversionDiscoveryCalls(t *testing.T, calls [][]string, sessionName string) {
+	t.Helper()
+	prefix := []string{"herdr"}
+	if sessionName != "" {
+		prefix = append(prefix, "--session", sessionName)
+	}
+	wantStatus := append(append([]string(nil), prefix...), "pane", "send-text", "w1:p1", "/status")
+	wantEnter := append(append([]string(nil), prefix...), "pane", "send-keys", "w1:p1", "enter")
+	wantBind := append(append([]string(nil), prefix...), "pane", "report-agent-session", "w1:p1", "--source", "herdr:codex", "--agent", "codex", "--agent-session-id", managedSourceID)
+	for _, want := range [][]string{wantStatus, wantEnter, wantBind} {
+		count := 0
+		for _, call := range calls {
+			if reflect.DeepEqual(call, want) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("call=%q count=%d all=%q", want, count, calls)
+		}
+	}
 }
 
 func sameManagedRequest(a, b ManagedCodexRequest) bool {

@@ -14,25 +14,29 @@ maintenance restart, and uninstall.
 
 Conversion never guesses a Codex thread from CWD, time, title, or the global
 thread list. An already-used ordinary session normally has an exact
-`agent_session` from the installed Herdr `SessionStart` hook. If no exact
-identity is available, the source process, draft, focus, and topology remain
-untouched and conversion reports identity unavailable.
+`agent_session` from the installed Herdr `SessionStart` hook. A valid existing
+binding is used without sending `/status` or any other discovery input.
 
-The guarded zero-turn fallback may issue one local `/status` only after two
-unchanged observations prove that the exact pane is unfocused, quiescent, and
-has an empty composer. Incomplete output fails safely with widen-and-retry.
-Widening is guidance only when status output was actually truncated. If Herdr
-cannot submit the command, use the ordinary session normally and retry after
-its authoritative hook identity appears; conversion must not try alternate
-keys or reconstruct an ID from correlated metadata.
+When that binding is missing, the guarded fallback may issue exactly one local
+`/status` plus Enter only after repeated observations prove that the same
+default or named Herdr pane, foreground argv and PID, clean absolute CWD,
+revision, activity state, and empty unfocused composer remain unchanged. It
+requires a fresh complete UUID and exact CWD from Codex 0.154.0, validates the
+thread through the shared App Server, reports that ID to Herdr, and re-reads the
+same immutable identity before conversion can stop the source. A foreign remote
+endpoint, incomplete or ambiguous output, a draft, focus, activity, process or
+topology drift, cancellation, or a failed Herdr report leaves the running TUI
+untouched. Widen-and-retry guidance applies only to actually incomplete status
+output; conversion never tries alternate keys or reconstructs an ID from
+correlated metadata.
 
 ## Automatic conversion
 
 Call `Convert` with the exact `Agent` returned for the source pane. Conversion:
 
 1. validates the default or named Herdr session, pane identity, stable
-   `agent_session`, clean absolute CWD, persisted turn history, foreground PID
-   and literal argv;
+   `agent_session` (resolving a missing binding through the guarded path above),
+   clean absolute CWD, persisted turn history, foreground PID and literal argv;
 2. reads current Codex constraints, then waits without input for two stable
    unfocused, idle/done observations with an empty composer;
 3. gracefully stops only that exact Codex process and requires the same pane's
@@ -79,9 +83,12 @@ disclosure, err := converter.PrepareCustomization(
 )
 ```
 
-Preparation sends no pane input. The UI must display `KnownReplacements`, every
-entry in `UnknownBeforeStop`, the desired policy, thread ID, and CWD. Only after
-a dedicated second user confirmation may it pass the returned token:
+Preparation sends no discovery input for an already-bound source. For a missing
+binding it may first perform the same guarded `/status` transaction described
+above; it still does not stop or relaunch the source. The UI must display
+`KnownReplacements`, every entry in `UnknownBeforeStop`, the desired policy,
+thread ID, and CWD. Only after a dedicated second user confirmation may it pass
+the returned token:
 
 ```go
 result, err := converter.Convert(ctx, agenthost.CodexConversionRequest{

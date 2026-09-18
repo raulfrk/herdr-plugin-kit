@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -59,11 +60,36 @@ func (l ManagedCodexLauncher) waitForProcess(ctx context.Context, target session
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
-	agent, observed, err := l.discoverManagedIdentityObservation(ctx, target, cwd, argv, service, policy, false)
+	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, false, nil, nil, false)
 	return agent, observed.identity, err
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
+	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, false)
+}
+
+func (l ManagedCodexLauncher) discoverManagedIdentityForSource(ctx context.Context, target sessionhost.Origin, cwd string, expected Agent, expectedProcess sessionhost.ForegroundProcess, service CodexServiceSnapshot) (Agent, string, error) {
+	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, expectedProcess.Argv, service, ManagedCodexPolicy{}, false, &expected, &expectedProcess, true)
+	return agent, observed.identity, err
+}
+
+func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, expected *Agent, expectedProcess *sessionhost.ForegroundProcess, allowLocal bool) (Agent, managedStatusObservation, error) {
+	verifyProcess := func() error {
+		if expectedProcess != nil {
+			current, err := l.topologyHost().InspectForegroundProcess(ctx, target)
+			if err != nil {
+				return fmt.Errorf("foreground process changed: %w", err)
+			}
+			if !sameForegroundProcess(*expectedProcess, current) {
+				return fmt.Errorf("foreground process changed: %w", ErrManagedStale)
+			}
+		}
+		_, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv)
+		if err != nil {
+			return fmt.Errorf("foreground process verification: %w", err)
+		}
+		return nil
+	}
 	for {
 		wire, agent, err := l.readManagedAgent(ctx, target, cwd)
 		if err != nil {
@@ -71,7 +97,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 			// foreground Codex process is already present. Treat only that
 			// pane-bound interval as unsettled; process or target drift still
 			// fails immediately and no terminal input is sent.
-			if _, processErr := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); processErr != nil {
+			if processErr := verifyProcess(); processErr != nil {
 				return Agent{}, managedStatusObservation{}, processErr
 			}
 			if waitErr := waitManaged(ctx, 25*time.Millisecond); waitErr != nil {
@@ -79,13 +105,16 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 			}
 			continue
 		}
-		if wire.Focused || wire.LaunchPending || !managedPaneQuiescent(wire) {
+		if expected != nil && !sameManagedPreInputObservation(*expected, agent) {
+			return Agent{}, managedStatusObservation{}, fmt.Errorf("source observation changed: %w", ErrManagedStale)
+		}
+		if !managedPaneReadyForSessionChange(wire, false) {
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
 				return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 			}
 			continue
 		}
-		if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
+		if err := verifyProcess(); err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
 		if agent.Session != nil {
@@ -109,7 +138,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 				}
 				return Agent{}, managedStatusObservation{}, err
 			}
-			if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
+			if err := verifyProcess(); err != nil {
 				return Agent{}, managedStatusObservation{}, err
 			}
 			visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
@@ -144,9 +173,9 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 			return Agent{}, managedStatusObservation{}, err
 		}
 		if !sameManagedPreInputObservation(agent, checkedAgent) {
-			return Agent{}, managedStatusObservation{}, ErrManagedStale
+			return Agent{}, managedStatusObservation{}, fmt.Errorf("pre-input source observation changed: %w", ErrManagedStale)
 		}
-		if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
+		if err := verifyProcess(); err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
 		visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
@@ -169,9 +198,9 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 		if allowPrefix {
 			titlePrefix = managedWireThreadPrefix(check)
 		}
-		observed, err := l.awaitFreshStatusObservation(ctx, target, before, cwd, service, policy, allowPrefix, titlePrefix)
+		observed, err := l.awaitFreshStatusObservationMode(ctx, target, before, cwd, service, policy, allowPrefix, titlePrefix, allowLocal)
 		if err != nil {
-			return Agent{}, managedStatusObservation{}, err
+			return Agent{}, managedStatusObservation{}, fmt.Errorf("fresh /status observation: %w", err)
 		}
 		if managedPrefixReadbackRequired(allowPrefix, observed.identity) {
 			finalWire, finalAgent, err := l.readManagedAgent(ctx, target, cwd)
@@ -182,7 +211,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Con
 			if !validManagedPrefixReadback(checkedAgent, finalWire, finalAgent, observed.identity, finalPrefix) {
 				return Agent{}, managedStatusObservation{}, ErrManagedStale
 			}
-			if _, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv); err != nil {
+			if err := verifyProcess(); err != nil {
 				return Agent{}, managedStatusObservation{}, err
 			}
 		}
@@ -452,6 +481,10 @@ func (l ManagedCodexLauncher) awaitFreshStatus(ctx context.Context, target sessi
 }
 
 func (l ManagedCodexLauncher) awaitFreshStatusObservation(ctx context.Context, target sessionhost.Origin, before string, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string) (managedStatusObservation, error) {
+	return l.awaitFreshStatusObservationMode(ctx, target, before, cwd, service, policy, allowPrefix, fallbackPrefix, false)
+}
+
+func (l ManagedCodexLauncher) awaitFreshStatusObservationMode(ctx context.Context, target sessionhost.Origin, before string, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string, allowLocal bool) (managedStatusObservation, error) {
 	beforeCommands := managedStatusCmd.FindAllStringIndex(strings.ReplaceAll(before, "\r\n", "\n"), -1)
 	incomplete := false
 	for {
@@ -466,7 +499,7 @@ func (l ManagedCodexLauncher) awaitFreshStatusObservation(ctx context.Context, t
 		}
 		if len(commands) == len(beforeCommands)+1 {
 			fresh := "/status" + normalized[commands[len(commands)-1][1]:]
-			observed, err := parseManagedStatusObservation(fresh, cwd, service, policy, allowPrefix, fallbackPrefix)
+			observed, err := parseManagedStatusObservationMode(fresh, cwd, service, policy, allowPrefix, fallbackPrefix, allowLocal)
 			if err != nil {
 				// The submitted command is visible before Codex finishes drawing
 				// the status block. Wait only while no Session field has appeared;
@@ -558,6 +591,10 @@ func parseManagedStatus(text, cwd string, service CodexServiceSnapshot, policy M
 }
 
 func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string) (managedStatusObservation, error) {
+	return parseManagedStatusObservationMode(text, cwd, service, policy, allowPrefix, fallbackPrefix, false)
+}
+
+func parseManagedStatusObservationMode(text, cwd string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, fallbackPrefix string, allowLocal bool) (managedStatusObservation, error) {
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
 	marker := strings.LastIndex(normalized, "\n/status\n")
 	if marker == -1 {
@@ -608,12 +645,32 @@ func parseManagedStatusObservation(text, cwd string, service CodexServiceSnapsho
 		}
 		return r
 	}, block)
+	remoteCount := strings.Count(compact, "Remote:")
 	if service == (CodexServiceSnapshot{}) {
-		if strings.Contains(compact, "Remote:") {
+		if remoteCount != 0 {
 			return managedStatusObservation{}, ErrManagedStale
 		}
-	} else if !validManagedServiceSnapshot(service) || !strings.Contains(compact, "Remote:unix://"+service.SocketPath+"(v"+SupportedCodexVersion+")") {
-		return managedStatusObservation{}, ErrManagedNarrow
+	} else {
+		if !validManagedServiceSnapshot(service) {
+			return managedStatusObservation{}, ErrManagedNarrow
+		}
+		remote := ""
+		if remoteCount != 0 {
+			_, afterRemote, _ := strings.Cut(compact, "Remote:")
+			var foundModel bool
+			remote, _, foundModel = strings.Cut(afterRemote, "Model:")
+			if !foundModel {
+				return managedStatusObservation{}, ErrManagedNarrow
+			}
+		}
+		wantRemote := "unix://" + service.SocketPath + "(v" + SupportedCodexVersion + ")"
+		if remoteCount == 0 {
+			if !allowLocal {
+				return managedStatusObservation{}, ErrManagedNarrow
+			}
+		} else if remoteCount != 1 || remote != wantRemote {
+			return managedStatusObservation{}, ErrManagedNarrow
+		}
 	}
 	displayCWD := cwd
 	if home, err := os.UserHomeDir(); err == nil && (cwd == home || strings.HasPrefix(cwd, home+string(filepath.Separator))) {

@@ -13,6 +13,13 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
+func managedWireAgentResult(t *testing.T, wire wireAgent) command.Result {
+	t.Helper()
+	var response agentInfoResponse
+	response.ID, response.Result.Type, response.Result.Agent = "cli:agent:get", "agent_info", wire
+	return jsonResult(t, response)
+}
+
 func managedIdentityTestContext(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -98,6 +105,71 @@ func TestManagedPreInputObservationRequiresEveryStableField(t *testing.T) {
 				t.Fatalf("accepted %+v", after)
 			}
 		})
+	}
+}
+
+func TestManagedIdentityDiscoveryRejectsEveryProcessAndPaneGuardBeforeInput(t *testing.T) {
+	inspectErr := errors.New("inspect failed")
+	for name, arrange := range map[string]func(*wireAgent, *fakeManagedTopology){
+		"focused":        func(wire *wireAgent, _ *fakeManagedTopology) { wire.Focused = true },
+		"launch pending": func(wire *wireAgent, _ *fakeManagedTopology) { wire.LaunchPending = true },
+		"working":        func(wire *wireAgent, _ *fakeManagedTopology) { wire.AgentStatus = "working" },
+		"inspect error":  func(_ *wireAgent, topology *fakeManagedTopology) { topology.inspectErr = inspectErr },
+		"process drift":  func(_ *wireAgent, topology *fakeManagedTopology) { topology.inspected.PID++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			target := managedOrigin()
+			expected := managedAgent(target, "/tmp/project", managedSourceID, false)
+			expected.Session = nil
+			expected.Revision, expected.StateChangeSeq = 1, 1
+			process := sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: expected.CWD, Argv: []string{"codex"}}
+			wire := wireFromAgent(expected)
+			topology := &fakeManagedTopology{inspected: process}
+			arrange(&wire, topology)
+			runner := &scriptedRunner{results: []command.Result{managedWireAgentResult(t, wire)}}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: target.SessionName})
+			launcher.topology = topology
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			_, _, err := launcher.discoverManagedIdentityForSource(ctx, target, expected.CWD, expected, process, managedServiceSnapshot())
+			if err == nil {
+				t.Fatal("unsafe discovery source accepted")
+			}
+			if name == "inspect error" && !errors.Is(err, inspectErr) {
+				t.Fatalf("error=%v", err)
+			}
+			if hasPaneInput(runner.calls) {
+				t.Fatalf("calls=%+v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestManagedIdentityDiscoveryBusyRetryBacksOff(t *testing.T) {
+	target := managedOrigin()
+	expected := managedAgent(target, "/tmp/project", managedSourceID, false)
+	expected.Session = nil
+	expected.Revision, expected.StateChangeSeq = 1, 1
+	busy := wireFromAgent(expected)
+	busy.Focused = true
+	changed := wireFromAgent(expected)
+	changed.Revision++
+	process := sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: expected.CWD, Argv: []string{"codex"}}
+	runner := &scriptedRunner{results: []command.Result{managedWireAgentResult(t, busy), managedWireAgentResult(t, changed)}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: target.SessionName})
+	launcher.topology = &fakeManagedTopology{inspected: process}
+	started := time.Now()
+
+	_, _, err := launcher.discoverManagedIdentityForSource(managedIdentityTestContext(t), target, expected.CWD, expected, process, managedServiceSnapshot())
+	if !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
+		t.Fatalf("busy-pane retry spun without backoff: %v", elapsed)
+	}
+	if hasPaneInput(runner.calls) {
+		t.Fatalf("calls=%+v", runner.calls)
 	}
 }
 
@@ -211,6 +283,49 @@ func TestParseOrdinaryStatusCanObserveOneExactModelAndReasoning(t *testing.T) {
 		if _, err := parseManagedStatus(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}); err == nil {
 			t.Fatalf("accepted incomplete or ambiguous observed policy: %q", text)
 		}
+	}
+}
+
+func TestConversionStatusAcceptsOnlyLocalOrOwnedCodexEndpoints(t *testing.T) {
+	service := managedServiceSnapshot()
+	header := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+`
+	tail := `│ Model: gpt-5.6-sol (reasoning medium, summaries auto) │
+│ Directory: /tmp/project │
+│ Session: 01a0a793-5a65-78e1-b56f-ab827c31b2f9 │`
+	base := header + tail
+	shared := header + "│ Remote: unix://" + service.SocketPath + " (v0.154.0) │\n" + tail
+	for _, text := range []string{base, shared} {
+		observed, err := parseManagedStatusObservationMode(text, "/tmp/project", service, ManagedCodexPolicy{}, false, "", true)
+		if err != nil || observed.identity != "01a0a793-5a65-78e1-b56f-ab827c31b2f9" {
+			t.Fatalf("observation=%+v error=%v text=%q", observed, err, text)
+		}
+	}
+	foreign := header + "│ Remote: unix:///tmp/foreign.sock (v0.154.0) │\n" + tail
+	conflicting := header + "│ Remote: unix://" + service.SocketPath + " (v0.154.0) │\n│ Remote: unix:///tmp/foreign.sock (v0.154.0) │\n" + tail
+	for _, text := range []string{foreign, conflicting} {
+		if _, err := parseManagedStatusObservationMode(text, "/tmp/project", service, ManagedCodexPolicy{}, false, "", true); !errors.Is(err, ErrManagedNarrow) {
+			t.Fatalf("foreign or conflicting endpoint error=%v text=%q", err, text)
+		}
+	}
+	if _, err := parseManagedStatusObservationMode(base, "/tmp/project", service, ManagedCodexPolicy{}, false, "", false); !errors.Is(err, ErrManagedNarrow) {
+		t.Fatalf("strict local endpoint error=%v", err)
+	}
+	if observed, err := parseManagedStatusObservationMode(shared, "/tmp/project", service, ManagedCodexPolicy{}, false, "", false); err != nil || observed.identity != "01a0a793-5a65-78e1-b56f-ab827c31b2f9" {
+		t.Fatalf("strict shared endpoint observation=%+v error=%v", observed, err)
+	}
+}
+
+func TestConversionStatusRejectsRemoteWithoutFollowingModelField(t *testing.T) {
+	service := managedServiceSnapshot()
+	text := `/status
+│ >_ OpenAI Codex (v0.154.0) │
+│ Directory: /tmp/project │
+│ Session: 01a0a793-5a65-78e1-b56f-ab827c31b2f9 │
+│ Remote: unix://` + service.SocketPath + ` (v0.154.0) │`
+	if _, err := parseManagedStatusObservationMode(text, "/tmp/project", service, ManagedCodexPolicy{}, false, "", true); !errors.Is(err, ErrManagedNarrow) {
+		t.Fatalf("malformed Remote ordering error=%v", err)
 	}
 }
 
@@ -449,8 +564,8 @@ func TestDiscoverManagedIdentityNeverSendsInputWhileDraftPresent(t *testing.T) {
 	}}
 	launcher := NewManagedCodexLauncher(Host{Runner: runner})
 	launcher.topology = &fakeManagedTopology{}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	_, _, err := launcher.discoverManagedIdentity(ctx, target, "/tmp/project", []string{"codex"}, managedServiceSnapshot(), managedPolicy())
 	if !errors.Is(err, ErrManagedPaneBusy) || len(runner.calls) != 2 {
 		t.Fatalf("error=%v calls=%#v", err, runner.calls)
@@ -489,8 +604,8 @@ func TestDiscoverManagedIdentityDoesNotLetReportedSessionBypassDraftGuard(t *tes
 	}}
 	launcher := NewManagedCodexLauncher(Host{Runner: runner})
 	launcher.topology = &fakeManagedTopology{}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	_, _, err := launcher.discoverManagedIdentity(ctx, target, "/tmp/project", []string{"codex"}, managedServiceSnapshot(), managedPolicy())
 	if !errors.Is(err, ErrManagedPaneBusy) || len(runner.calls) != 2 {
 		t.Fatalf("error=%v calls=%#v", err, runner.calls)

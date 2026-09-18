@@ -74,7 +74,7 @@ type CodexConversionResult struct {
 	FallbackUsed    bool
 }
 
-// CodexConverter converts an ordinary Codex TUI to the shared managed daemon
+// CodexConverter converts an ordinary Codex TUI to the shared managed App Server
 // without changing panes or replacing the conversation.
 type CodexConverter struct {
 	launcher     ManagedCodexLauncher
@@ -94,9 +94,10 @@ func NewCodexConverter(host Host) CodexConverter {
 	return CodexConverter{launcher: NewManagedCodexLauncher(host)}
 }
 
-// PrepareCustomization validates a desired transient policy without sending
-// pane input. Callers must show the returned disclosure and only pass its token
-// to Convert after a dedicated second user confirmation.
+// PrepareCustomization validates a desired transient policy. When Herdr has no
+// Codex session binding, it first performs the guarded /status discovery used
+// by ordinary Codex launches. Callers must show the returned disclosure and
+// only pass its token to Convert after a dedicated second user confirmation.
 func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, desired ManagedCodexPolicy, readyTimeout time.Duration) (CodexConversionDisclosure, error) {
 	request := CodexConversionRequest{Source: source, ReadyTimeout: readyTimeout}
 	if ctx == nil {
@@ -105,7 +106,7 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if err := ctx.Err(); err != nil {
 		return CodexConversionDisclosure{}, err
 	}
-	if err := c.validate(request); err != nil {
+	if err := c.validateResolvable(request); err != nil {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization: %w", err)
 	}
 	if err := validateManagedPolicy(desired); err != nil {
@@ -116,6 +117,14 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if err != nil || !validManagedServiceSnapshot(service) {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization service: %w", errors.Join(ErrManagedStale, err))
 	}
+	request.Source, err = c.resolveSource(ctx, request.Source, ready, service)
+	if err != nil {
+		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization identity: %w", err)
+	}
+	if err := c.validate(request); err != nil {
+		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization identity: %w", err)
+	}
+	source = request.Source
 	verifier, err := c.launcher.verifierFactory().Connect(ctx, service.SocketPath)
 	if err != nil {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization verifier: %w", err)
@@ -161,13 +170,28 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 	if err := ctx.Err(); err != nil {
 		return CodexConversionResult{}, err
 	}
-	if err := c.validate(request); err != nil {
+	if err := c.validateResolvable(request); err != nil {
 		return CodexConversionResult{}, fmt.Errorf("convert Codex: %w", err)
+	}
+	if request.Customization != nil {
+		if err := validateManagedPolicy(request.Customization.Desired); err != nil || !validConversionConfirmationToken(request.Customization.ConfirmationToken) {
+			return CodexConversionResult{}, fmt.Errorf("convert Codex customization: %w", ErrManagedUnsupported)
+		}
 	}
 	ready := managedReadyTimeout(request.ReadyTimeout)
 	service, err := c.launcher.serviceClient().Ensure(ctx)
-	if err != nil || !validManagedServiceSnapshot(service) {
+	if err != nil {
 		return CodexConversionResult{}, fmt.Errorf("convert Codex service: %w", errors.Join(ErrManagedStale, err))
+	}
+	if !validManagedServiceSnapshot(service) {
+		return CodexConversionResult{}, fmt.Errorf("convert Codex service: %w", errors.Join(ErrManagedStale, err))
+	}
+	request.Source, err = c.resolveSource(ctx, request.Source, ready, service)
+	if err != nil {
+		return CodexConversionResult{}, fmt.Errorf("convert Codex identity: %w", err)
+	}
+	if err := c.validate(request); err != nil {
+		return CodexConversionResult{}, fmt.Errorf("convert Codex identity: %w", err)
 	}
 	verifier, err := c.launcher.verifierFactory().Connect(ctx, service.SocketPath)
 	if err != nil {
@@ -358,6 +382,14 @@ func conversionConfirmationToken(source Agent, identity codexThreadIdentity, des
 	values := []string{source.SessionName, source.WorkspaceID, source.TabID, source.PaneID, identity.ID, identity.CWD, identity.ModelProvider, identity.Model, identity.ReasoningEffort, desired.Model, desired.ReasoningEffort, desired.ApprovalPolicy, desired.SandboxMode}
 	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
 	return hex.EncodeToString(digest[:])
+}
+
+func validConversionConfirmationToken(token string) bool {
+	if len(token) != sha256.Size*2 || token != strings.ToLower(token) {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
 }
 
 func sameFinalConversionIdentity(actual, before codexThreadIdentity, target EffectiveCodexPolicy) bool {
@@ -551,7 +583,17 @@ func (c CodexConverter) awaitFallbackIdentity(ctx context.Context, target sessio
 }
 
 func (c CodexConverter) validate(request CodexConversionRequest) error {
-	if c.launcher.Host.Runner == nil || request.Source.SessionName != c.launcher.Host.Session || validateTarget(request.Source) != nil || !strings.EqualFold(request.Source.Kind, "codex") || !validManagedSession(request.Source.Session) {
+	if err := c.validateResolvable(request); err != nil {
+		return ErrManagedUnsupported
+	}
+	if !validManagedSession(request.Source.Session) {
+		return ErrManagedUnsupported
+	}
+	return nil
+}
+
+func (c CodexConverter) validateResolvable(request CodexConversionRequest) error {
+	if c.launcher.Host.Runner == nil || request.Source.SessionName != c.launcher.Host.Session || validateTarget(request.Source) != nil || !strings.EqualFold(request.Source.Kind, "codex") || request.Source.Session != nil && !validManagedSession(request.Source.Session) {
 		return ErrManagedUnsupported
 	}
 	if !filepath.IsAbs(request.Source.CWD) || filepath.Clean(request.Source.CWD) != request.Source.CWD || strings.ContainsRune(request.Source.CWD, 0) {
@@ -561,6 +603,103 @@ func (c CodexConverter) validate(request CodexConversionRequest) error {
 		return ErrManagedUnsupported
 	}
 	return nil
+}
+
+func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready time.Duration, service CodexServiceSnapshot) (Agent, error) {
+	if source.Session != nil {
+		return source, nil
+	}
+	target := sessionhost.Origin{
+		SessionName: source.SessionName, WorkspaceID: source.WorkspaceID,
+		TabID: source.TabID, PaneID: source.PaneID,
+	}
+	process, err := c.launcher.topologyHost().InspectForegroundProcess(ctx, target)
+	if err != nil {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex process: %w", err)
+	}
+	if process.Name != "codex" {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex process name: %w", ErrManagedStale)
+	}
+	if len(process.Argv) == 0 {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex process argv: %w", ErrManagedStale)
+	}
+	if filepath.Base(process.Argv[0]) != "codex" {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex executable: %w", ErrManagedStale)
+	}
+	if process.CWD != source.CWD {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex cwd: %w", ErrManagedStale)
+	}
+	if codexRemoteArgv(process.Argv) || validateManagedSourceArgv(process.Argv) != nil {
+		return Agent{}, fmt.Errorf("inspect ordinary Codex argv: %w", ErrManagedUnsupported)
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, ready)
+	defer cancel()
+	observed, threadID, err := c.launcher.discoverManagedIdentityForSource(resolveCtx, target, source.CWD, source, process, service)
+	if err != nil {
+		return Agent{}, fmt.Errorf("discover ordinary Codex identity: %w", err)
+	}
+	if !validManagedThreadID(threadID) {
+		return Agent{}, ErrManagedNarrow
+	}
+	verifier, err := c.launcher.verifierFactory().Connect(resolveCtx, service.SocketPath)
+	if err != nil {
+		return Agent{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
+	}
+	identity, identityErr := verifier.ReadThread(resolveCtx, threadID)
+	closeErr := verifier.Close()
+	if identityErr == nil {
+		identityErr = validateConversionIdentity(identity, observed, threadID)
+	}
+	if err := errors.Join(identityErr, closeErr); err != nil {
+		return Agent{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
+	}
+	observed, err = c.recheckSourceBeforeBinding(resolveCtx, target, observed, process)
+	if err != nil {
+		return Agent{}, fmt.Errorf("recheck ordinary Codex identity: %w", err)
+	}
+	bound, err := c.launcher.bindManagedIdentity(resolveCtx, target, source.CWD, observed, threadID)
+	if err != nil {
+		return Agent{}, fmt.Errorf("bind ordinary Codex identity: %w", err)
+	}
+	return bound, nil
+}
+
+func (c CodexConverter) recheckSourceBeforeBinding(ctx context.Context, target sessionhost.Origin, expected Agent, expectedProcess sessionhost.ForegroundProcess) (Agent, error) {
+	var prior Agent
+	for sample := 0; sample < 2; sample++ {
+		wire, current, err := c.launcher.readManagedAgent(ctx, target, expected.CWD)
+		if err != nil {
+			return Agent{}, err
+		}
+		if current.Session != nil {
+			return Agent{}, ErrManagedStale
+		}
+		if !sameImmutable(expected, current) {
+			return Agent{}, ErrManagedStale
+		}
+		if !managedPaneReadyForSessionChange(wire, false) {
+			return Agent{}, ErrManagedPaneBusy
+		}
+		process, err := c.launcher.topologyHost().InspectForegroundProcess(ctx, target)
+		if err != nil {
+			return Agent{}, err
+		}
+		if !sameForegroundProcess(expectedProcess, process) {
+			return Agent{}, ErrManagedStale
+		}
+		visible, err := c.launcher.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+		if err != nil {
+			return Agent{}, err
+		}
+		if !emptyCodexComposer(visible) {
+			return Agent{}, ErrManagedPaneBusy
+		}
+		if sample != 0 && !sameManagedPreInputObservation(prior, current) {
+			return Agent{}, ErrManagedStale
+		}
+		prior = current
+	}
+	return prior, nil
 }
 
 func validateConversionIdentity(identity codexThreadIdentity, source Agent, threadID string) error {
