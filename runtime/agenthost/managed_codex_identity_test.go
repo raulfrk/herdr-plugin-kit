@@ -435,6 +435,9 @@ func TestEmptyCodexComposerRejectsSingleAndMultilineDrafts(t *testing.T) {
 	if !emptyCodexComposer("header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n \n  gpt-5.6-sol medium · ~/projects/herdr-plugin-kit · Context 100% left") {
 		t.Fatal("Codex 0.154.0 unstyled status footer rejected")
 	}
+	if !emptyCodexComposer("header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n \n  gpt-5.6-sol medium · ~ · weekly 23% left · Context 100% left") {
+		t.Fatal("Codex 0.154.0 home-directory status footer rejected")
+	}
 	for _, text := range []string{
 		"header\n› draft text\n status",
 		"header\n› first draft line\n  second draft line\n status",
@@ -443,6 +446,8 @@ func TestEmptyCodexComposerRejectsSingleAndMultilineDrafts(t *testing.T) {
 		"header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  user continuation",
 		"header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  first unstyled line\n  second unstyled line",
 		"header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  \x1b[1munexpected styled footer\x1b[0m",
+		"header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  gpt-5.6-sol medium · ~raul · Context 100% left",
+		"header\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  gpt-5.6-sol medium · relative · Context 100% left",
 		"header without composer",
 	} {
 		if emptyCodexComposer(text) {

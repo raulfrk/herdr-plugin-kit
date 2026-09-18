@@ -562,8 +562,11 @@ func unstyledCodexStatusFooter(line string) bool {
 		return false
 	}
 	parts := strings.Split(strings.TrimSpace(line), " · ")
+	if len(parts) < 2 {
+		return false
+	}
 	model := strings.Fields(parts[0])
-	if len(parts) < 2 || len(model) != 2 || !(strings.HasPrefix(parts[1], "/") || strings.HasPrefix(parts[1], "~/")) {
+	if len(model) != 2 || !(parts[1] == "~" || strings.HasPrefix(parts[1], "/") || strings.HasPrefix(parts[1], "~/")) {
 		return false
 	}
 	for _, part := range parts {
