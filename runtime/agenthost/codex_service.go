@@ -54,6 +54,7 @@ var (
 // deliberately not included because systemd changes them without a restart.
 type CodexServiceSnapshot struct {
 	State            CodexServiceState
+	Executable       string
 	CodexHome        string
 	SocketPath       string
 	CLIVersion       string
@@ -231,6 +232,7 @@ func (s *CodexService) runtimeConfiguration() (codexServicePaths, codexServiceDe
 	if descriptor.CodexHome != home {
 		return paths, descriptor, snapshot, fmt.Errorf("%w: requested CODEX_HOME %q differs from configured home", ErrCodexServiceDrift, home)
 	}
+	snapshot.Executable = descriptor.Executable
 	snapshot.SocketPath = descriptor.SocketPath
 	return paths, descriptor, snapshot, nil
 }
@@ -288,6 +290,7 @@ func (s *CodexService) inspectRunningConfiguration(ctx context.Context, paths co
 		return snapshot, fmt.Errorf("%w: initialize metadata", ErrCodexServiceIncompatible)
 	}
 	snapshot.State = CodexServiceReady
+	snapshot.Executable = descriptor.Executable
 	snapshot.CodexHome = descriptor.CodexHome
 	snapshot.SocketPath = descriptor.SocketPath
 	snapshot.CLIVersion = SupportedCodexVersion

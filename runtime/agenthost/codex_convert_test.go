@@ -752,7 +752,7 @@ func newConversionHarness(t *testing.T) *conversionHarness {
 }
 
 func (h *conversionHarness) managedResult() *ManagedCodex {
-	argv := composeManagedTUIArgv(ManagedCodexRequest{Operation: ManagedResume, Directory: h.source.CWD, ThreadID: managedSourceID}, h.service.snapshot.SocketPath, managedSourceID)
+	argv := composeManagedTUIArgv(ManagedCodexRequest{Operation: ManagedResume, Directory: h.source.CWD, ThreadID: managedSourceID}, h.service.snapshot, managedSourceID)
 	return &ManagedCodex{
 		Operation: ManagedResume, ThreadID: managedSourceID, SourceThreadID: managedSourceID,
 		Agent: h.source, Target: sessionhost.CreatedTarget{Origin: managedOrigin()},

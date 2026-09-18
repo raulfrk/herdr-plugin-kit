@@ -9,6 +9,28 @@ import (
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
+func TestValidManagedServiceSnapshotRequiresEveryLaunchField(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CodexServiceSnapshot)
+	}{
+		{"state", func(snapshot *CodexServiceSnapshot) { snapshot.State = CodexServiceDegraded }},
+		{"executable", func(snapshot *CodexServiceSnapshot) { snapshot.Executable = "codex" }},
+		{"socket", func(snapshot *CodexServiceSnapshot) { snapshot.SocketPath = "shared.sock" }},
+		{"CLI version", func(snapshot *CodexServiceSnapshot) { snapshot.CLIVersion = "0.155.0" }},
+		{"App Server version", func(snapshot *CodexServiceSnapshot) { snapshot.AppServerVersion = "0.155.0" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := managedServiceSnapshot()
+			test.mutate(&snapshot)
+			if validManagedServiceSnapshot(snapshot) {
+				t.Fatalf("invalid snapshot accepted: %+v", snapshot)
+			}
+		})
+	}
+}
+
 func TestAwaitSafeSessionChangeAcceptsStableDonePaneWithoutInput(t *testing.T) {
 	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
 	source.Status = "done"

@@ -162,7 +162,7 @@ func TestCodexServiceInspectValidatesStableServiceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := CodexServiceSnapshot{State: CodexServiceReady, CodexHome: fixture.descriptor.CodexHome, SocketPath: fixture.descriptor.SocketPath, CLIVersion: SupportedCodexVersion, AppServerVersion: SupportedCodexVersion, MainPID: 1462121, InvocationID: "32f79e6311fb4b3595300a5c76c8a0aa"}
+	want := CodexServiceSnapshot{State: CodexServiceReady, Executable: fixture.descriptor.Executable, CodexHome: fixture.descriptor.CodexHome, SocketPath: fixture.descriptor.SocketPath, CLIVersion: SupportedCodexVersion, AppServerVersion: SupportedCodexVersion, MainPID: 1462121, InvocationID: "32f79e6311fb4b3595300a5c76c8a0aa"}
 	if snapshot != want {
 		t.Fatalf("snapshot=%+v want=%+v", snapshot, want)
 	}

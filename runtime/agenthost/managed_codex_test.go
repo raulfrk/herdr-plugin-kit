@@ -265,7 +265,7 @@ func managedPreflight(cwd string) codexPreflight {
 }
 
 func managedServiceSnapshot() CodexServiceSnapshot {
-	return CodexServiceSnapshot{State: CodexServiceReady, CodexHome: "/tmp/codex-home", SocketPath: "/tmp/codex-home/app-server-control/app-server-control.sock", CLIVersion: SupportedCodexVersion, AppServerVersion: SupportedCodexVersion}
+	return CodexServiceSnapshot{State: CodexServiceReady, Executable: "/tmp/codex-home/bin/codex", CodexHome: "/tmp/codex-home", SocketPath: "/tmp/codex-home/app-server-control/app-server-control.sock", CLIVersion: SupportedCodexVersion, AppServerVersion: SupportedCodexVersion}
 }
 
 func managedEmptyComposer(prefix string) []byte {
@@ -319,7 +319,7 @@ func TestManagedCodexNewUsesSharedServiceAndLiteralBackgroundLaunch(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArgv := []string{"codex", "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="medium"`, "-a", "never", "-s", "danger-full-access", "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project"}
+	wantArgv := []string{service.snapshot.Executable, "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="medium"`, "-c", managedSkipUpdateConfig, "-a", "never", "-s", "danger-full-access", "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project"}
 	if service.callCount() != 1 || len(topology.launches) != 1 || topology.launches[0].Focus || !reflect.DeepEqual(topology.launches[0].Argv, wantArgv) || !reflect.DeepEqual(managed.Argv, wantArgv) || managed.Service != service.snapshot || managed.ThreadID != managedNewID || verifier.confirmID != managedNewID {
 		t.Fatalf("managed=%+v service=%d launches=%+v verifier=%+v", managed, service.callCount(), topology.launches, verifier)
 	}
@@ -336,7 +336,7 @@ func TestManagedCodexNewIncludesOnlyValidatedLiteralExtraArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := []string{"codex", "--search", "--enable", "responses_websockets", "--no-alt-screen", "-m"}
+	wantPrefix := []string{service.snapshot.Executable, "--search", "--enable", "responses_websockets", "--no-alt-screen", "-m"}
 	if service.callCount() != 1 || len(topology.launches) != 1 || len(managed.Argv) < len(wantPrefix) || !reflect.DeepEqual(managed.Argv[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("managed argv=%q launches=%+v service=%d", managed.Argv, topology.launches, service.callCount())
 	}
@@ -560,7 +560,7 @@ func TestManagedCodexForkOmitsPermissionOverridesAndPreservesSource(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "fork", "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="medium"`, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
+	want := []string{managedServiceSnapshot().Executable, "fork", "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="medium"`, "-c", managedSkipUpdateConfig, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
 	if !reflect.DeepEqual(managed.Argv, want) || verifier.confirmSrc != managedSourceID || verifier.confirmOp != ManagedFork || managed.SourceThreadID != managedSourceID {
 		t.Fatalf("managed=%+v verifier=%+v", managed, verifier)
 	}
@@ -592,7 +592,7 @@ func TestManagedCodexForkCanInheritAuthoritativeSourcePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPolicy := ManagedCodexPolicy{Model: "gpt-5.6-terra", ReasoningEffort: "high", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"}
-	wantArgv := []string{"codex", "fork", "--search", "-m", "gpt-5.6-terra", "-c", `model_reasoning_effort="high"`, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
+	wantArgv := []string{managedServiceSnapshot().Executable, "fork", "--search", "-m", "gpt-5.6-terra", "-c", `model_reasoning_effort="high"`, "-c", managedSkipUpdateConfig, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
 	if !reflect.DeepEqual(verifier.policies, []ManagedCodexPolicy{wantPolicy}) || !reflect.DeepEqual(managed.Argv, wantArgv) || managed.SourceThreadID != managedSourceID {
 		t.Fatalf("preflight=%+v managed=%+v", verifier.policies, managed)
 	}
@@ -601,6 +601,7 @@ func TestManagedCodexForkCanInheritAuthoritativeSourcePolicy(t *testing.T) {
 func TestManagedCodexRejectsUnsafeExtraArgvAndInvalidInheritanceBeforeEnsure(t *testing.T) {
 	unsafe := [][]string{
 		{"--remote", "unix:///tmp/other"}, {"--cd", "/tmp/other"}, {"-m", "other"},
+		{"-c", "check_for_update_on_startup=true"},
 		{"--sandbox", "read-only"}, {"fork"}, {"--enable"}, {"--search", "--search"},
 		{"--enable", "feature", "--enable", "feature"}, {"--enable", "bad value"}, {"--", "prompt"},
 		{"--enable", "feature", "--disable", "feature"},
@@ -701,7 +702,7 @@ func TestManagedCodexResumeRunsExactIDInCallerProvedShell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "resume", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedOriginalID}
+	want := []string{managedServiceSnapshot().Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedOriginalID}
 	if len(topology.launches) != 0 || len(topology.runs) != 1 || !reflect.DeepEqual(topology.runs[0], want) || verifier.confirmSrc != managedOriginalID || managed.ThreadID != managedOriginalID {
 		t.Fatalf("managed=%+v runs=%v verifier=%+v", managed, topology.runs, verifier)
 	}
@@ -739,7 +740,7 @@ func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "resume", "--remote", "unix://" + service.snapshot.SocketPath, "--cd", request.Directory, managedOriginalID}
+	want := []string{service.snapshot.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.snapshot.SocketPath, "--cd", request.Directory, managedOriginalID}
 	wantDiscovery := ManagedCodexPolicy{Model: source.Model, ReasoningEffort: source.ReasoningEffort, ApprovalPolicy: source.ApprovalPolicy, SandboxMode: source.SandboxMode}
 	if !reflect.DeepEqual(discoveryPolicy, wantDiscovery) || !reflect.DeepEqual(managed.Argv, want) || len(topology.runs) != 1 || !reflect.DeepEqual(topology.runs[0], want) || len(verifier.reconciles) != 1 || requiredPolicyDrift(verifier.reconciles[0], target) != "" || requiredPolicyDrift(managed.Policy, target) != "" {
 		t.Fatalf("managed=%+v discovery=%+v runs=%q reconciles=%+v", managed, discoveryPolicy, topology.runs, verifier.reconciles)

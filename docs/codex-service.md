@@ -14,6 +14,13 @@ guarded ordinary TUI and resumes its existing conversation through that socket,
 preserving its identity, history, directory, and effective settings. It does
 not replace the conversation or move it to a different pane.
 
+Every Kit-managed New, Fork, and Convert/Resume TUI launch uses the
+descriptor-owned absolute Codex executable and passes the literal per-process
+override `-c check_for_update_on_startup=false`. The Kit pins and validates the
+supported Codex version, so `PATH` drift or a newer-version chooser cannot block
+managed readiness or receive automation input. This does not edit the user's
+Codex configuration or change ordinary sessions started manually with `codex`.
+
 The service launches pinned Codex with literal `app-server --listen unix://`,
 which resolves to `CODEX_HOME/app-server-control/app-server-control.sock`.
 Consequently plain and explicitly remote Codex clients share one App Server

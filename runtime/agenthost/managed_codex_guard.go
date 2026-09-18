@@ -155,5 +155,5 @@ func managedPaneReadyForSessionChange(agent wireAgent, focused bool) bool {
 }
 
 func validManagedServiceSnapshot(service CodexServiceSnapshot) bool {
-	return service.State == CodexServiceReady && cleanAbsolute(service.SocketPath) && service.CLIVersion == SupportedCodexVersion && service.AppServerVersion == SupportedCodexVersion
+	return service.State == CodexServiceReady && cleanAbsolute(service.Executable) && cleanAbsolute(service.SocketPath) && service.CLIVersion == SupportedCodexVersion && service.AppServerVersion == SupportedCodexVersion
 }

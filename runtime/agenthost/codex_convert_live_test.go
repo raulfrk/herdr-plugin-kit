@@ -66,7 +66,7 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 				}
 			})
 			sourcePolicy := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium", ApprovalPolicy: "never", SandboxMode: test.sandbox}
-			argv := []string{"codex", "-m", sourcePolicy.Model, "-c", "model_reasoning_effort=" + strconv.Quote(sourcePolicy.ReasoningEffort), "-a", sourcePolicy.ApprovalPolicy, "-s", sourcePolicy.SandboxMode, "--strict-config", "--cd", directory, "Reply exactly OK."}
+			argv := []string{service.Executable, "-m", sourcePolicy.Model, "-c", "model_reasoning_effort=" + strconv.Quote(sourcePolicy.ReasoningEffort), "-a", sourcePolicy.ApprovalPolicy, "-s", sourcePolicy.SandboxMode, "--strict-config", "--cd", directory, "Reply exactly OK."}
 			attempted, err := launcher.topologyHost().RunInShell(ctx, shell, directory, argv)
 			if err != nil || !attempted {
 				t.Fatalf("launch ordinary Codex attempted=%t error=%v", attempted, err)
@@ -113,7 +113,7 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 					_ = converted.Managed.Cleanup(cleanupCtx)
 				}
 			})
-			wantArgv := []string{"codex", "resume", "--remote", "unix://" + service.SocketPath, "--cd", directory, agent.Session.Value}
+			wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.SocketPath, "--cd", directory, agent.Session.Value}
 			checkedHistory, historyErr := verifier.ReadStableHistory(ctx, agent.Session.Value)
 			effective, policyErr := verifier.ReadEffective(ctx, agent.Session.Value)
 			closeErr := verifier.Close()
@@ -218,7 +218,7 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 	closeErr := verifier.Close()
 	focusAfter, focusErr := liveFocusedWorkspace(ctx, liveRunner)
 	afterService, serviceErr := launcher.serviceClient().Ensure(ctx)
-	wantArgv := []string{"codex", "resume", "--remote", "unix://" + service.SocketPath, "--cd", directory, threadID}
+	wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.SocketPath, "--cd", directory, threadID}
 	if checkedHistoryErr != nil || closeErr != nil || checkedHistory != history || focusErr != nil || focusAfter != focusBefore || serviceErr != nil || afterService != service || converted.Outcome != CodexConversionManaged || converted.ThreadID != threadID || converted.Agent.Session == nil || converted.Agent.Session.Value != threadID || converted.Agent.PaneID != shell.PaneID || converted.Process.PID == ordinaryProcess.PID || converted.Process.CWD != directory || !reflect.DeepEqual(converted.Argv, wantArgv) {
 		t.Fatalf("converted=%+v historyErr=%v closeErr=%v focus=%q/%q focusErr=%v serviceErr=%v", converted, checkedHistoryErr, closeErr, focusBefore, focusAfter, focusErr, serviceErr)
 	}

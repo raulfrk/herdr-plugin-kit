@@ -20,6 +20,7 @@ const (
 	DefaultManagedReadyTimeout time.Duration = 30_000_000_000  // 30 seconds
 	MaxManagedReadyTimeout     time.Duration = 300_000_000_000 // 5 minutes
 	managedCleanupTimeout      time.Duration = 5_000_000_000   // 5 seconds
+	managedSkipUpdateConfig                  = "check_for_update_on_startup=false"
 )
 
 type ManagedOperation string
@@ -235,7 +236,7 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	}
 
 	var target sessionhost.CreatedTarget
-	argv := composeManagedTUIArgv(request, service.SocketPath, sourceID)
+	argv := composeManagedTUIArgv(request, service, sourceID)
 	cleanup.argv, cleanup.cwd = append([]string(nil), argv...), request.Directory
 	if request.Operation == ManagedResume {
 		target = sessionhost.CreatedTarget{Origin: request.Origin}
@@ -645,13 +646,13 @@ func validateManagedExtraArgv(argv []string) error {
 	return nil
 }
 
-func composeManagedTUIArgv(request ManagedCodexRequest, socket, sourceID string) []string {
-	remote := "unix://" + socket
+func composeManagedTUIArgv(request ManagedCodexRequest, service CodexServiceSnapshot, sourceID string) []string {
+	remote := "unix://" + service.SocketPath
 	if request.Operation == ManagedResume {
-		return []string{"codex", "resume", "--remote", remote, "--cd", request.Directory, request.ThreadID}
+		return []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", remote, "--cd", request.Directory, request.ThreadID}
 	}
 	policy := request.Policy
-	args := []string{"codex"}
+	args := []string{service.Executable}
 	if request.Operation == ManagedFork {
 		args = append(args, "fork")
 	}
@@ -659,6 +660,7 @@ func composeManagedTUIArgv(request ManagedCodexRequest, socket, sourceID string)
 	args = append(args,
 		"-m", policy.Model,
 		"-c", "model_reasoning_effort="+strconv.Quote(policy.ReasoningEffort),
+		"-c", managedSkipUpdateConfig,
 	)
 	if request.Operation == ManagedNew {
 		args = append(args, "-a", policy.ApprovalPolicy, "-s", policy.SandboxMode)
