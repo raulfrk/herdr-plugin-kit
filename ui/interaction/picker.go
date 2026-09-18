@@ -624,13 +624,17 @@ func (picker *Picker) renderRoot(frame *view.Frame, palette theme.Palette, split
 		item := items[itemIndex]
 		style := view.Style{Foreground: palette.Text, Background: palette.Background}
 		prefix := "  "
+		label := item.Label
 		if item.Disabled {
 			prefix, style.Foreground, style.Dim = "× ", palette.Muted, true
+			if item.Description != "" {
+				label += " · " + item.Description
+			}
 		} else if itemIndex == picker.selected {
 			prefix, style.Background, style.Bold = "▌ ", palette.ActiveRowBackground, true
 			frame.Fill(0, row+3, listWidth, 1, style)
 		}
-		frame.PutText(0, row+3, fitCells(prefix+item.Label, listWidth), style)
+		frame.PutText(0, row+3, fitCells(prefix+label, listWidth), style)
 	}
 	putTextBox(frame, "picker-footer", 0, 0, height-footerHeight, width, footerHeight, view.TextTruncate, false, footer, view.Style{Foreground: palette.Muted, Background: palette.PanelBackground})
 }

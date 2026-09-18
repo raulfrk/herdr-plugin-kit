@@ -30,6 +30,7 @@ import (
 type probe struct {
 	changeAfterRefresh                              bool
 	bold                                            bool
+	disableRefresh                                  bool
 	extraActions                                    int
 	name                                            string
 	ownDebugKey                                     bool
@@ -76,6 +77,9 @@ func (p *probe) KeymapContext() keymap.Context {
 func (p *probe) ActionState(id string) keymap.State {
 	for _, a := range p.KeymapCatalog() {
 		if a.Context == p.KeymapContext().ID && a.ID == id {
+			if p.disableRefresh && id == "probe.refresh" {
+				return keymap.State{Reason: "current selection is unavailable"}
+			}
 			return keymap.State{Enabled: true}
 		}
 	}
@@ -1935,6 +1939,20 @@ func TestActionsRejectChangedOriginTarget(t *testing.T) {
 	state = d.wait(t, func(o observation) bool { return strings.Contains(o.status, "Target changed") })
 	if state.calls != 1 || state.view != actionsScreen {
 		t.Fatal("stale menu invoked action")
+	}
+}
+
+func TestActionsPaletteShowsDisabledActionReason(t *testing.T) {
+	s, p := uiForTest(t, t.TempDir(), false)
+	p.disableRefresh = true
+	d := runUIForTest(t, s, p)
+	d.key(tea.KeyCtrlK)
+	state := d.wait(t, func(o observation) bool { return o.view == actionsScreen && !o.pending })
+	if !strings.Contains(state.frame, "× Refresh example · current selection is unavailable") {
+		t.Fatalf("disabled reason missing from Actions palette: %q", state.frame)
+	}
+	if state.selected != "probe.edit" || state.calls != 0 {
+		t.Fatalf("disabled action remained selectable or was invoked: selected=%q calls=%d", state.selected, state.calls)
 	}
 }
 

@@ -518,6 +518,34 @@ func TestPickerApprovedFramesRemainByteStable(t *testing.T) {
 	}
 }
 
+func TestPickerRendersDisabledReasonInlineAtSupportedWidths(t *testing.T) {
+	palette, _ := theme.Builtin("terminal")
+	for _, size := range []responsive.Size{{Columns: 110, Rows: 24}, {Columns: 40, Rows: 10}} {
+		picker := newPickerForTest(t)
+		picker.layout = responsive.Resolve(size)
+		_ = picker.applyPage(loadResult{page: Page{Items: []Item{
+			{Key: "enabled", Label: "New profile"},
+			{Key: "disabled", Label: "Delete profile", Description: "at least one profile is required", Disabled: true},
+		}}})
+		frame, err := picker.Render(shell.RenderContext{Layout: picker.layout, Theme: palette})
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain := stripANSI(view.ANSI(frame))
+		want := "× Delete profile · at least one profile is required"
+		if size.Columns == 40 {
+			want = "× Delete profile · at least one profi"
+		}
+		if !strings.Contains(plain, want) {
+			t.Fatalf("size=%+v disabled reason missing from:\n%s", size, plain)
+		}
+		cell, _ := frame.CellAt(0, 4)
+		if !cell.Style.Dim || cell.Style.Foreground != palette.Muted {
+			t.Fatalf("size=%+v disabled style=%+v", size, cell.Style)
+		}
+	}
+}
+
 func TestPickerDetailBasicKeysAndEmptySemanticState(t *testing.T) {
 	picker := newPickerForTest(t)
 	picker.options.Activate = func(context.Context, Item) error { return nil }
