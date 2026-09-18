@@ -44,15 +44,16 @@ func (s *Surface) childOwnsTab(context keymap.Context) bool {
 }
 
 type Options struct {
-	Main             MappedSurface
-	Debug            MappedSurface
-	ConfigDirectory  string
-	DefaultKeymap    bool
-	StartDebug       bool
-	InteractiveHelp  bool
-	HelpOpenedAction string
-	HelpCommands     []HelpCommand
-	HelpOverview     *HelpOverview
+	Main                MappedSurface
+	Debug               MappedSurface
+	ConfigDirectory     string
+	DefaultKeymap       bool
+	StartDebug          bool
+	InteractiveHelp     bool
+	CompactNormalWeight bool
+	HelpOpenedAction    string
+	HelpCommands        []HelpCommand
+	HelpOverview        *HelpOverview
 }
 
 // HelpCommand adds one consumer-owned action to interactive generated Help.

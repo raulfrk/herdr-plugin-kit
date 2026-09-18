@@ -189,6 +189,14 @@ func dimensionsOverflow(width, height, maxCells int) bool {
 func (f *Frame) Width() int  { return f.width }
 func (f *Frame) Height() int { return f.height }
 
+// ClearBold removes bold weight without changing frame content, geometry,
+// colours, or other style attributes.
+func (f *Frame) ClearBold() {
+	for index := range f.cells {
+		f.cells[index].Style.Bold = false
+	}
+}
+
 func (f *Frame) CellAt(x, y int) (Cell, bool) {
 	if !f.inBounds(x, y) {
 		return Cell{}, false

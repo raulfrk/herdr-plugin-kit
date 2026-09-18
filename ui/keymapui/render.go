@@ -141,6 +141,9 @@ func (s *Surface) Render(context shell.RenderContext) (*view.Frame, error) {
 	footer = fittingFooter(w, footer, compactFooter)
 	frame.Fill(0, h-1, w, 1, muted)
 	put(frame, "keymap-footer", 0, h-1, w, 1, []string{footer}, muted, false)
+	if s.options.CompactNormalWeight && w < 64 {
+		frame.ClearBold()
+	}
 	return frame, nil
 }
 

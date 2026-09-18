@@ -29,6 +29,7 @@ import (
 
 type probe struct {
 	changeAfterRefresh                              bool
+	bold                                            bool
 	extraActions                                    int
 	name                                            string
 	ownDebugKey                                     bool
@@ -115,7 +116,7 @@ func (p *probe) Update(events shell.EventContext, event shell.Event) []shell.Eff
 func (p *probe) Render(context shell.RenderContext) (*view.Frame, error) {
 	frame, err := view.NewFrame(context.Layout.Render.Columns, context.Layout.Render.Rows)
 	if frame != nil {
-		frame.PutText(0, 3, "example content", view.Style{})
+		frame.PutText(0, 3, "example content", view.Style{Bold: p.bold})
 	}
 	return frame, err
 }
@@ -135,6 +136,85 @@ func uiForTest(t *testing.T, directory string, recovery bool) (*Surface, *probe)
 		t.Fatal(err)
 	}
 	return s, p
+}
+
+func TestCompactNormalWeightIsOptInAcrossComposedScreens(t *testing.T) {
+	palette, err := theme.Builtin("catppuccin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(t *testing.T, width, height int, enabled bool, screen screen) *view.Frame {
+		t.Helper()
+		main := &probe{name: "example", bold: true}
+		surface, newErr := New(Options{
+			Main: main, ConfigDirectory: t.TempDir(), InteractiveHelp: true,
+			CompactNormalWeight: enabled,
+		})
+		if newErr != nil {
+			t.Fatal(newErr)
+		}
+		defer surface.Close()
+		surface.view = screen
+		frame, renderErr := surface.Render(shell.RenderContext{
+			Layout: responsive.Resolve(responsive.Size{Columns: width, Rows: height}),
+			Theme:  palette,
+		})
+		if renderErr != nil {
+			t.Fatal(renderErr)
+		}
+		return frame
+	}
+	hasBold := func(frame *view.Frame) bool {
+		for y := 0; y < frame.Height(); y++ {
+			for x := 0; x < frame.Width(); x++ {
+				cell, _ := frame.CellAt(x, y)
+				if cell.Text != "" && cell.Style.Bold {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, current := range []screen{baseScreen, actionsScreen, editorScreen, entryScreen, textScreen, captureScreen, checkerScreen, helpScreen} {
+		t.Run(fmt.Sprintf("compact-screen-%d", current), func(t *testing.T) {
+			if frame := render(t, 48, 18, true, current); hasBold(frame) {
+				t.Fatalf("screen %d retained visible bold cells", current)
+			}
+		})
+	}
+	for _, size := range []responsive.Size{{Columns: 40, Rows: 10}, {Columns: 48, Rows: 18}} {
+		if frame := render(t, size.Columns, size.Rows, true, baseScreen); hasBold(frame) {
+			t.Fatalf("opted-in compact size %+v retained visible bold cells", size)
+		}
+	}
+	for _, test := range []struct {
+		name    string
+		width   int
+		enabled bool
+	}{{name: "default compact", width: 48}, {name: "boundary", width: 64, enabled: true}, {name: "standard", width: 80, enabled: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			if frame := render(t, test.width, 18, test.enabled, baseScreen); !hasBold(frame) {
+				t.Fatalf("width %d enabled=%t lost existing bold hierarchy", test.width, test.enabled)
+			}
+		})
+	}
+
+	defaultFrame := render(t, 48, 18, false, helpScreen)
+	compactFrame := render(t, 48, 18, true, helpScreen)
+	for y := 0; y < defaultFrame.Height(); y++ {
+		for x := 0; x < defaultFrame.Width(); x++ {
+			want, _ := defaultFrame.CellAt(x, y)
+			got, _ := compactFrame.CellAt(x, y)
+			want.Style.Bold = false
+			if got != want {
+				t.Fatalf("cell %d,%d changed beyond bold: got=%+v want=%+v", x, y, got, want)
+			}
+		}
+	}
+	if !reflect.DeepEqual(defaultFrame.TextFit(), compactFrame.TextFit()) {
+		t.Fatal("compact weight changed text-fit diagnostics")
+	}
 }
 
 func TestGlobalFooterFitsSupportedMinimum(t *testing.T) {

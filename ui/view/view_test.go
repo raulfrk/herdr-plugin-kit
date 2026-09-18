@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -83,6 +84,33 @@ func TestCellAtFrameBoundaries(t *testing.T) {
 		if _, ok := frame.CellAt(point.X, point.Y); ok {
 			t.Fatalf("out-of-bounds cell %v accepted", point)
 		}
+	}
+}
+
+func TestClearBoldPreservesFrameContentGeometryAndOtherStyles(t *testing.T) {
+	frame, _ := view.NewFrame(4, 2)
+	style := view.Style{Foreground: "#ffffff", Background: "#112233", Bold: true, Dim: true, Underline: true}
+	frame.PutText(0, 0, "A界", style)
+	beforeFit := frame.TextFit()
+
+	frame.ClearBold()
+
+	for x := 0; x < frame.Width(); x++ {
+		cell, _ := frame.CellAt(x, 0)
+		if cell.Style.Bold {
+			t.Fatalf("cell %d remained bold: %+v", x, cell)
+		}
+		if cell.Text != "" && (cell.Style.Foreground != style.Foreground || cell.Style.Background != style.Background || !cell.Style.Dim || !cell.Style.Underline) {
+			t.Fatalf("cell %d changed non-weight style: %+v", x, cell)
+		}
+	}
+	lead, _ := frame.CellAt(1, 0)
+	continuation, _ := frame.CellAt(2, 0)
+	if lead.Text != "界" || lead.Width != 2 || continuation.Text != "" || !continuation.Continuation {
+		t.Fatalf("wide glyph geometry changed: lead=%+v continuation=%+v", lead, continuation)
+	}
+	if afterFit := frame.TextFit(); !reflect.DeepEqual(beforeFit, afterFit) {
+		t.Fatalf("text-fit report changed: before=%+v after=%+v", beforeFit, afterFit)
 	}
 }
 
