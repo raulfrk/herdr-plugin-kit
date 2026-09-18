@@ -87,6 +87,43 @@ func TestForkCodexPreservesSourceAndCreatesDistinctBackgroundChild(t *testing.T)
 	}
 }
 
+func TestForkOpenCodeAddsOwnedLoopbackEndpointAndPreservesSource(t *testing.T) {
+	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
+	child := forkAgent("opencode", "w1:p2", "ses_child", "/tmp/project")
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: child.PaneID}}
+	topology := &fakeTopology{created: created}
+	runner := &scriptedRunner{results: []command.Result{listForkResult(t, source), listForkResult(t, child), listForkResult(t, source)}}
+	forker := NewForker(Host{Runner: runner, Session: "named"})
+	forker.launcher = topology
+	forker.wait = func(context.Context, time.Duration) error { return nil }
+	forker.openCodeTUIReserve = fixedOpenCodeTUIReserve(49154)
+
+	result, err := forker.Fork(context.Background(), ForkRequest{
+		Source: source, Profile: ForkProfile{Executable: "opencode", Options: []string{"--mini"}}, Placement: sessionhost.NewPane, Direction: "right",
+	})
+	if err != nil || !sameImmutable(result.Source, source) || !sameImmutable(result.Child, child) || result.Created != created {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	want := []string{"opencode", "/tmp/project", "--mini", "--session", "ses_source", "--fork", "--hostname", "127.0.0.1", "--port", "49154"}
+	if len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, want) || len(topology.cleanupCalls) != 0 {
+		t.Fatalf("launch=%+v cleanup=%+v", topology.requests, topology.cleanupCalls)
+	}
+}
+
+func TestForkOpenCodeTUIReservationFailureCreatesNothing(t *testing.T) {
+	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
+	topology := &fakeTopology{}
+	forker := NewForker(Host{Runner: &scriptedRunner{results: []command.Result{listForkResult(t, source)}}, Session: "named"})
+	forker.launcher = topology
+	forker.openCodeTUIReserve = func() (int, error) { return 0, errors.New("unavailable") }
+	_, err := forker.Fork(context.Background(), ForkRequest{
+		Source: source, Profile: ForkProfile{Executable: "opencode"}, Placement: sessionhost.NewTab,
+	})
+	if err == nil || len(topology.requests) != 0 || len(topology.cleanupCalls) != 0 {
+		t.Fatalf("launch=%+v cleanup=%+v error=%v", topology.requests, topology.cleanupCalls, err)
+	}
+}
+
 func listForkResult(t *testing.T, agents ...Agent) command.Result {
 	t.Helper()
 	wires := make([]wireAgent, len(agents))

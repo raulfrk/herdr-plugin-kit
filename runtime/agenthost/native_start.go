@@ -40,11 +40,12 @@ type NativeStartResult struct {
 }
 
 type NativeStarter struct {
-	Host             Host
-	launcher         topologyLauncher
-	wait             func(context.Context, time.Duration) error
-	openCodeServer   openCodePromptServerLauncher
-	openCodeSessions openCodePromptSessions
+	Host               Host
+	launcher           topologyLauncher
+	wait               func(context.Context, time.Duration) error
+	openCodeServer     openCodePromptServerLauncher
+	openCodeSessions   openCodePromptSessions
+	openCodeTUIReserve func() (int, error)
 }
 
 func NewNativeStarter(host Host) NativeStarter {
@@ -84,6 +85,16 @@ func (s NativeStarter) Start(ctx context.Context, request NativeStartRequest) (r
 			return NativeStartResult{}, fmt.Errorf("native New OpenCode session: %w", err)
 		}
 		argv = append(argv, "--session", openCode.session)
+		endpointArgs, endpointErr := openCodeTUIEndpointArgs(s.openCodeTUIReserve)
+		if endpointErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
+			defer cancel()
+			return NativeStartResult{}, errors.Join(
+				fmt.Errorf("native New OpenCode TUI: %w", endpointErr),
+				openCode.deleteSession(cleanupCtx), openCode.stopServer(cleanupCtx),
+			)
+		}
+		argv = append(argv, endpointArgs...)
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
 			defer cancel()

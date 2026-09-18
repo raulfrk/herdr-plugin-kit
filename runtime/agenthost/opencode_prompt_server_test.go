@@ -55,6 +55,26 @@ func blockingOpenCodeRun(ctx context.Context, _ string, _ []string) (command.Res
 	return command.Result{Canceled: true}, &command.RunError{Kind: command.ErrorCanceled, Cause: ctx.Err()}
 }
 
+func fixedOpenCodeTUIReserve(port int) func() (int, error) {
+	return func() (int, error) { return port, nil }
+}
+
+func TestOpenCodeTUIEndpointArgsAreLiteralAndBounded(t *testing.T) {
+	args, err := openCodeTUIEndpointArgs(fixedOpenCodeTUIReserve(49153))
+	if err != nil || !reflect.DeepEqual(args, []string{"--hostname", "127.0.0.1", "--port", "49153"}) {
+		t.Fatalf("args=%q error=%v", args, err)
+	}
+	for _, reserve := range []func() (int, error){
+		func() (int, error) { return 0, nil },
+		func() (int, error) { return 65536, nil },
+		func() (int, error) { return 0, errors.New("unavailable") },
+	} {
+		if args, err := openCodeTUIEndpointArgs(reserve); err == nil || args != nil {
+			t.Fatalf("invalid reservation args=%q error=%v", args, err)
+		}
+	}
+}
+
 func ownedOpenCodeTestRunner(run runnerFunc) (openCodePromptSpecRunner, func(context.Context, time.Duration) error) {
 	observed := make(chan struct{})
 	waits := 0

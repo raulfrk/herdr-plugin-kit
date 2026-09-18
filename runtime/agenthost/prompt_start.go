@@ -34,13 +34,14 @@ type PromptStartRequest struct {
 }
 
 type PromptStarter struct {
-	Host             Host
-	launcher         topologyLauncher
-	openCodeSessions openCodePromptSessions
-	wait             func(context.Context, time.Duration) error
-	deliver          func(context.Context, Prompt, PromptTarget) (PromptResult, error)
-	managed          ManagedCodexLauncher
-	openCodeServer   openCodePromptServerLauncher
+	Host               Host
+	launcher           topologyLauncher
+	openCodeSessions   openCodePromptSessions
+	wait               func(context.Context, time.Duration) error
+	deliver            func(context.Context, Prompt, PromptTarget) (PromptResult, error)
+	managed            ManagedCodexLauncher
+	openCodeServer     openCodePromptServerLauncher
+	openCodeTUIReserve func() (int, error)
 }
 
 type preparedOpenCodeStart struct {
@@ -123,6 +124,16 @@ func (s PromptStarter) Start(ctx context.Context, prompt Prompt, request PromptS
 		}
 		request.OpenCodeServer = openCode.server
 		argv = append(argv, "--session", openCode.session)
+		endpointArgs, endpointErr := openCodeTUIEndpointArgs(s.openCodeTUIReserve)
+		if endpointErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
+			defer cancel()
+			return PromptResult{State: PromptNotAttempted}, errors.Join(
+				fmt.Errorf("prompt OpenCode TUI: %w", endpointErr),
+				openCode.deleteSession(cleanupCtx), openCode.stopServer(cleanupCtx),
+			)
+		}
+		argv = append(argv, endpointArgs...)
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodePromptServerStop)
 			defer cancel()

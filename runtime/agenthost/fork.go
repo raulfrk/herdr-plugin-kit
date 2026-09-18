@@ -53,11 +53,12 @@ type topologyLauncher interface {
 }
 
 type Forker struct {
-	Host     Host
-	launcher topologyLauncher
-	wait     func(context.Context, time.Duration) error
-	deliver  func(context.Context, Prompt, PromptTarget) (PromptResult, error)
-	managed  ManagedCodexLauncher
+	Host               Host
+	launcher           topologyLauncher
+	wait               func(context.Context, time.Duration) error
+	deliver            func(context.Context, Prompt, PromptTarget) (PromptResult, error)
+	managed            ManagedCodexLauncher
+	openCodeTUIReserve func() (int, error)
 }
 
 func NewForker(host Host) Forker {
@@ -103,6 +104,13 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	before, err := f.Host.find(ctx, request.Source.PaneID)
 	if err != nil || !sameForkSource(request.Source, before) {
 		return ForkResult{}, fmt.Errorf("fork source: %w", ErrStaleReport)
+	}
+	if kind == "opencode" {
+		endpointArgs, endpointErr := openCodeTUIEndpointArgs(f.openCodeTUIReserve)
+		if endpointErr != nil {
+			return ForkResult{}, fmt.Errorf("fork OpenCode TUI: %w", endpointErr)
+		}
+		argv = append(argv, endpointArgs...)
 	}
 	var binding *ordinaryCodexBinding
 	if request.Prompt != nil && kind == "codex" {

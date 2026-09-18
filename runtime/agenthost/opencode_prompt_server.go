@@ -179,6 +179,17 @@ func reserveOpenCodePromptPort() (int, error) {
 	return reserveOpenCodePromptPortWith(net.Listen)
 }
 
+func openCodeTUIEndpointArgs(reserve func() (int, error)) ([]string, error) {
+	if reserve == nil {
+		reserve = reserveOpenCodePromptPort
+	}
+	port, err := reserve()
+	if err != nil || port < 1 || port > 65535 {
+		return nil, errors.New("reserve OpenCode TUI port failed")
+	}
+	return []string{"--hostname", "127.0.0.1", "--port", strconv.Itoa(port)}, nil
+}
+
 func reserveOpenCodePromptPortWith(listen func(string, string) (net.Listener, error)) (int, error) {
 	listener, err := listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -146,6 +146,7 @@ func TestNativeStarterCreatesFreshOpenCodeSessionThroughOwnedServer(t *testing.T
 	starter.launcher = topology
 	starter.wait = func(context.Context, time.Duration) error { return nil }
 	starter.openCodeServer, starter.openCodeSessions = server, sessions
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4322)
 	result, err := starter.Start(context.Background(), NativeStartRequest{
 		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
 		Argv:   []string{"opencode", "--model", "provider/model"}, Directory: "/tmp/project", Placement: sessionhost.NewTab,
@@ -154,7 +155,7 @@ func TestNativeStarterCreatesFreshOpenCodeSessionThroughOwnedServer(t *testing.T
 	if err != nil || !sameImmutable(result.Agent, child) || result.Created != created || server.starts != 1 || server.stops != 1 || sessions.creates != 1 || sessions.deletes != 0 {
 		t.Fatalf("result=%+v server=%+v sessions=%+v error=%v", result, server, sessions, err)
 	}
-	wantArgv := []string{"opencode", "--model", "provider/model", "--session", "ses_new"}
+	wantArgv := []string{"opencode", "--model", "provider/model", "--session", "ses_new", "--hostname", "127.0.0.1", "--port", "4322"}
 	if len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, wantArgv) {
 		t.Fatalf("launch=%+v", topology.requests)
 	}
@@ -169,12 +170,29 @@ func TestNativeStarterOpenCodeIdentityFailureDeletesOnlyCreatedSessionAndTarget(
 	topology := &fakeTopology{created: created}
 	starter := NewNativeStarter(Host{Runner: &scriptedRunner{results: []command.Result{listForkResult(t), listForkResult(t, wrong)}}, Session: "named"})
 	starter.launcher, starter.openCodeServer, starter.openCodeSessions = topology, server, sessions
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4322)
 	result, err := starter.Start(context.Background(), NativeStartRequest{
 		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
 		Argv:   []string{"opencode"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, StartOpenCodeServer: true,
 	})
 	if !errors.Is(err, ErrStaleReport) || result.Created.PaneID != "" || server.stops != 1 || sessions.deletes != 1 || sessions.lastDeleted != "ses_expected" || !reflect.DeepEqual(topology.cleanupCalls, []sessionhost.CreatedTarget{created}) {
 		t.Fatalf("result=%+v server=%+v sessions=%+v cleanup=%+v error=%v", result, server, sessions, topology.cleanupCalls, err)
+	}
+}
+
+func TestNativeStarterOpenCodeTUIReservationFailureDeletesOnlyPrecreatedSession(t *testing.T) {
+	topology := &fakeTopology{}
+	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
+	starter := NewNativeStarter(Host{Runner: &scriptedRunner{results: []command.Result{listForkResult(t)}}, Session: "named"})
+	starter.launcher, starter.openCodeSessions = topology, sessions
+	starter.openCodeTUIReserve = func() (int, error) { return 0, errors.New("unavailable") }
+	_, err := starter.Start(context.Background(), NativeStartRequest{
+		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"opencode"}, Directory: "/tmp/project", Placement: sessionhost.NewTab,
+		OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"},
+	})
+	if err == nil || sessions.creates != 1 || sessions.deletes != 1 || sessions.lastDeleted != "ses_created" || len(topology.requests) != 0 {
+		t.Fatalf("sessions=%+v launches=%+v error=%v", sessions, topology.requests, err)
 	}
 }
 

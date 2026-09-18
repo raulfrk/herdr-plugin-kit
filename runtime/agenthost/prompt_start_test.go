@@ -99,6 +99,7 @@ func TestPromptStarterOpenCodePrecreatesOwnedSessionAndInjectsOnlyItsID(t *testi
 	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}, Session: ""})
 	starter.launcher, starter.openCodeSessions = topology, sessions
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4097)
 	starter.wait = func(context.Context, time.Duration) error { return nil }
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
@@ -112,7 +113,7 @@ func TestPromptStarterOpenCodePrecreatesOwnedSessionAndInjectsOnlyItsID(t *testi
 	if err != nil || result.State != PromptAcknowledged || sessions.creates != 1 || sessions.deletes != 0 {
 		t.Fatalf("result=%+v sessions=%+v error=%v", result, sessions, err)
 	}
-	want := []string{"opencode", "--mini", "--session", "ses_created"}
+	want := []string{"opencode", "--mini", "--session", "ses_created", "--hostname", "127.0.0.1", "--port", "4097"}
 	if len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, want) {
 		t.Fatalf("launches=%+v", topology.requests)
 	}
@@ -128,6 +129,7 @@ func TestPromptStarterOwnsShortLivedOpenCodeServerButPreservesStartedTarget(t *t
 	server := &fakeOpenCodePromptServerLauncher{server: OpenCodeServer{URL: "http://127.0.0.1:49152", Directory: "/tmp/project"}}
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
 	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(49153)
 	starter.wait = func(context.Context, time.Duration) error { return nil }
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
@@ -172,6 +174,7 @@ func TestPromptStarterOwnedOpenCodeStopFailureKeepsAcknowledgedTarget(t *testing
 	server := &fakeOpenCodePromptServerLauncher{server: OpenCodeServer{URL: "http://127.0.0.1:49152", Directory: "/tmp/project"}, stopErr: errors.New("stop failed")}
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
 	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(49153)
 	starter.wait = func(context.Context, time.Duration) error { return nil }
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
@@ -191,6 +194,7 @@ func TestPromptStarterRejectsOpenCodeDirectoryMismatchBeforeCreation(t *testing.
 	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
 	starter := NewPromptStarter(Host{Runner: &promptRunner{}})
 	starter.launcher, starter.openCodeSessions = topology, sessions
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4097)
 	prompt, _ := PreparePrompt("hello")
 	_, err := starter.Start(context.Background(), prompt, PromptStartRequest{
 		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
@@ -414,6 +418,7 @@ func TestPromptStarterOpenCodeLaunchFailureDeletesOnlyPrecreatedSession(t *testi
 	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
 	starter := NewPromptStarter(Host{Runner: &promptRunner{}})
 	starter.launcher, starter.openCodeSessions = topology, sessions
+	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4097)
 	prompt, _ := PreparePrompt("hello")
 	_, err := starter.Start(context.Background(), prompt, PromptStartRequest{
 		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
@@ -422,6 +427,23 @@ func TestPromptStarterOpenCodeLaunchFailureDeletesOnlyPrecreatedSession(t *testi
 	})
 	if err == nil || sessions.creates != 1 || sessions.deletes != 1 || sessions.lastDeleted != "ses_created" || sessions.deleteWait < 4*time.Second || sessions.deleteWait > promptCleanupTimeout {
 		t.Fatalf("sessions=%+v error=%v", sessions, err)
+	}
+}
+
+func TestPromptStarterOpenCodeTUIReservationFailureDeletesOnlyPrecreatedSession(t *testing.T) {
+	topology := &fakeTopology{}
+	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}
+	starter := NewPromptStarter(Host{Runner: &promptRunner{}})
+	starter.launcher, starter.openCodeSessions = topology, sessions
+	starter.openCodeTUIReserve = func() (int, error) { return 0, errors.New("unavailable") }
+	prompt, _ := PreparePrompt("hello")
+	result, err := starter.Start(context.Background(), prompt, PromptStartRequest{
+		Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"opencode"}, Directory: "/tmp/project", Placement: sessionhost.NewTab,
+		OpenCodeServer: OpenCodeServer{URL: "http://127.0.0.1:4096", Directory: "/tmp/project"},
+	})
+	if err == nil || result.State != PromptNotAttempted || sessions.creates != 1 || sessions.deletes != 1 || sessions.lastDeleted != "ses_created" || len(topology.requests) != 0 {
+		t.Fatalf("result=%+v sessions=%+v launches=%+v error=%v", result, sessions, topology.requests, err)
 	}
 }
 
