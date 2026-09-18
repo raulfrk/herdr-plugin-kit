@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,9 +61,12 @@ func fixedOpenCodeTUIReserve(port int) func() (int, error) {
 }
 
 func TestOpenCodeTUIEndpointArgsAreLiteralAndBounded(t *testing.T) {
-	args, err := openCodeTUIEndpointArgs(fixedOpenCodeTUIReserve(49153))
-	if err != nil || !reflect.DeepEqual(args, []string{"--hostname", "127.0.0.1", "--port", "49153"}) {
-		t.Fatalf("args=%q error=%v", args, err)
+	for _, port := range []int{1, 49153, 65535} {
+		args, err := openCodeTUIEndpointArgs(fixedOpenCodeTUIReserve(port))
+		want := []string{"--hostname", "127.0.0.1", "--port", strconv.Itoa(port)}
+		if err != nil || !reflect.DeepEqual(args, want) {
+			t.Fatalf("port=%d args=%q error=%v", port, args, err)
+		}
 	}
 	for _, reserve := range []func() (int, error){
 		func() (int, error) { return 0, nil },

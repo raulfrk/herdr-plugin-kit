@@ -743,6 +743,30 @@ func TestOpenCodeEmptyComposerAcceptsBoundedWrappedStatus(t *testing.T) {
 	}
 }
 
+func TestOpenCodeStatusStartAcceptsExactContinuationAndIndexBoundaries(t *testing.T) {
+	lines := []string{
+		openCodeComposerRow("  Build · Model", "sidebar"),
+		openCodeComposerRow("status middle", "sidebar"),
+		openCodeComposerRow("status tail", "sidebar"),
+		"╹▀▀▀",
+	}
+	status, background, ok := openCodeStatusStart(lines, len(lines)-1)
+	if !ok || status != 0 || background != "48;2;30;30;30" {
+		t.Fatalf("status=%d background=%q ok=%t", status, background, ok)
+	}
+}
+
+func TestOpenCodeStatusStartRejectsMissingANSIAndBlankContinuation(t *testing.T) {
+	for _, lines := range [][]string{
+		{"┃  Build · Model", "╹▀▀▀"},
+		{openCodeComposerRow("  Build · Model", "sidebar"), openCodeComposerRow("", ""), "╹▀▀▀"},
+	} {
+		if status, background, ok := openCodeStatusStart(lines, len(lines)-1); ok || status != 0 || background != "" {
+			t.Fatalf("lines=%q status=%d background=%q ok=%t", lines, status, background, ok)
+		}
+	}
+}
+
 func openCodeEmptyComposerANSI(sidebarText string) string {
 	left := "\x1b[38;2;255;255;255;48;2;10;10;10m  \x1b[0m"
 	border := "\x1b[38;2;92;156;245;48;2;10;10;10m┃\x1b[0m"

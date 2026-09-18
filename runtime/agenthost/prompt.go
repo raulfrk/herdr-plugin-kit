@@ -420,8 +420,10 @@ func openCodeStatusStart(lines []string, bottom int) (int, string, bool) {
 		if background == "" {
 			background = rowBackground
 		}
-		content, found := openCodeBackgroundText(lines[status], background)
-		if !found || strings.TrimSpace(content) == "" {
+		// rowBackground was extracted from this same line, so a matching span
+		// is guaranteed here; only its visible content remains to validate.
+		content, _ := openCodeBackgroundText(lines[status], background)
+		if strings.TrimSpace(content) == "" {
 			return 0, "", false
 		}
 		if strings.HasPrefix(plain, "┃  ") && strings.Count(plain, "·") >= 1 {
