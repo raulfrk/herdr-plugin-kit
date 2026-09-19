@@ -538,13 +538,14 @@ func TestCodexExactMessageAndAggregateTrafficBounds(t *testing.T) {
 			paddedMessage(`{"method":"event"}`, 1<<20),
 			paddedMessage(`{"method":"event"}`, 1<<20),
 			paddedMessage(`{"method":"event"}`, 1<<20),
-			paddedMessage(threadResult(`{"type":"idle"}`), (1<<20)-len(initializeResponse)),
+			paddedMessage(threadResult(`{"type":"idle"}`), 1<<20),
 		}, false},
 		{"over four MiB aggregate", []string{
 			paddedMessage(`{"method":"event"}`, 1<<20),
 			paddedMessage(`{"method":"event"}`, 1<<20),
 			paddedMessage(`{"method":"event"}`, 1<<20),
-			paddedMessage(threadResult(`{"type":"idle"}`), (1<<20)-len(initializeResponse)+1),
+			paddedMessage(`{"method":"event"}`, 1<<20),
+			threadResult(`{"type":"idle"}`),
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -569,7 +570,7 @@ func TestCodexExactMessageAndAggregateTrafficBounds(t *testing.T) {
 			}
 		})
 	}
-	for _, notifications := range []int{62, 63} {
+	for _, notifications := range []int{63, 64} {
 		t.Run(fmt.Sprintf("notification count %d", notifications), func(t *testing.T) {
 			socket := unixServer(t, func(ctx context.Context, c *websocket.Conn) {
 				exchange(t, ctx, c)
@@ -579,7 +580,7 @@ func TestCodexExactMessageAndAggregateTrafficBounds(t *testing.T) {
 				send(t, ctx, c, threadResult(`{"type":"idle"}`))
 			})
 			got, err, _ := assessOn(t, socket)
-			if notifications == 62 {
+			if notifications == 63 {
 				if err != nil || got != (Assessment{Idle, CodexStatus, true}) {
 					t.Fatalf("assessment=%+v error=%v", got, err)
 				}

@@ -60,6 +60,33 @@ func lifecycleConfig() string {
 	return `{"config":{"model":"gpt-5.6-sol","model_reasoning_effort":"medium","approval_policy":"never","sandbox_mode":"danger-full-access","approvals_reviewer":"user","default_permissions":null,"service_tier":null},"origins":{}}`
 }
 
+func TestCodexLifecycleResponseBudgetIsPerCall(t *testing.T) {
+	const calls = 70
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		lifecycleInitialize(t, ctx, conn)
+		for i := 0; i < calls; i++ {
+			request := readRPCRequest(t, ctx, conn, "test/echo")
+			sendRPCResult(t, ctx, conn, request.ID, fmt.Sprintf(`{"value":%d}`, i))
+		}
+	})
+	lifecycle, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.Close()
+	for i := 0; i < calls; i++ {
+		var response struct {
+			Value int `json:"value"`
+		}
+		if err := lifecycle.call(context.Background(), "test/echo", nil, &response); err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		if response.Value != i {
+			t.Fatalf("call %d value=%d, want %d", i+1, response.Value, i)
+		}
+	}
+}
+
 func TestParseCodexConfigAllowsUnsetOverriddenThreadDefaults(t *testing.T) {
 	config := map[string]json.RawMessage{
 		"approvals_reviewer":  json.RawMessage(`"user"`),

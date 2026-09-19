@@ -202,20 +202,20 @@ func readCodex(ctx context.Context, socket, threadID string) (Assessment, error)
 var errCodexProtocol = errors.New("invalid Codex protocol")
 
 type codexReader struct {
-	conn            *websocket.Conn
-	messages, bytes int
-	notify          func(string, json.RawMessage) error
+	conn   *websocket.Conn
+	notify func(string, json.RawMessage) error
 }
 
 func (c *codexReader) response(ctx context.Context, id string) (json.RawMessage, error) {
+	messages, bytes := 0, 0
 	for {
 		kind, data, err := c.conn.Read(ctx)
 		if err != nil {
 			return nil, err
 		}
-		c.messages++
-		c.bytes += len(data)
-		if kind != websocket.MessageText || c.messages > codexMessages || c.bytes > codexTrafficBytes || !utf8.Valid(data) {
+		messages++
+		bytes += len(data)
+		if kind != websocket.MessageText || messages > codexMessages || bytes > codexTrafficBytes || !utf8.Valid(data) {
 			return nil, errCodexProtocol
 		}
 		var message struct {

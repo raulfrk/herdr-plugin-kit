@@ -1310,6 +1310,9 @@ func writeConfig(t *testing.T, data []byte, mode os.FileMode) string {
 	if err := os.WriteFile(path, data, mode); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 
