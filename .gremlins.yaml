@@ -7,8 +7,9 @@ unleash:
     mutant-coverage: 0
   exclude-files:
     - '(^|/)vendor/'
-    - '_generated\\.go$'
-    - '\\.gen\\.go$'
+    - '_generated[.]go$'
+    - '[.]gen[.]go$'
+    - '[.]pb[.]go$'
 
 mutants:
   arithmetic-base:

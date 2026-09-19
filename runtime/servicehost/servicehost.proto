@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package herdr.plugin_kit.servicehost.v1;
+
+option go_package = "github.com/raulfrk/herdr-plugin-kit/runtime/servicehost/internal/servicehostv1";
+
+service Control {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetStatus(GetStatusRequest) returns (StatusSnapshot);
+  rpc WatchStatus(WatchStatusRequest) returns (stream StatusUpdate);
+  rpc Drain(DrainRequest) returns (StatusSnapshot);
+  rpc Resume(ResumeRequest) returns (StatusSnapshot);
+}
+
+message HandshakeRequest {
+  uint32 protocol_version = 1;
+  string client_name = 2;
+}
+
+message HandshakeResponse {
+  uint32 protocol_version = 1;
+  string service_name = 2;
+  string service_version = 3;
+  string epoch = 4;
+  uint64 revision = 5;
+}
+
+message HealthRequest {
+  uint32 protocol_version = 1;
+}
+
+message HealthResponse {
+  HealthState state = 1;
+  bool accepting = 2;
+  string detail = 3;
+  string epoch = 4;
+  uint64 revision = 5;
+}
+
+message GetStatusRequest {
+  uint32 protocol_version = 1;
+}
+
+message DrainRequest {
+  uint32 protocol_version = 1;
+}
+
+message ResumeRequest {
+  uint32 protocol_version = 1;
+}
+
+message WatchStatusRequest {
+  uint32 protocol_version = 1;
+  string epoch = 2;
+  uint64 after_revision = 3;
+}
+
+message StatusSnapshot {
+  string epoch = 1;
+  uint64 revision = 2;
+  HealthState state = 3;
+  bool accepting = 4;
+  string detail = 5;
+}
+
+message StatusUpdate {
+  StatusSnapshot snapshot = 1;
+  bool reset_required = 2;
+}
+
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_STARTING = 1;
+  HEALTH_STATE_READY = 2;
+  HEALTH_STATE_DRAINING = 3;
+  HEALTH_STATE_DEGRADED = 4;
+  HEALTH_STATE_STOPPING = 5;
+}

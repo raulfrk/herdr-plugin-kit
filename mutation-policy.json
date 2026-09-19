@@ -11,6 +11,7 @@
     "runtime/interop/",
     "runtime/keybindinghost/",
     "runtime/sessionhost/",
+    "runtime/servicehost/",
     "internal/scaffold/",
     "ui/snapshot/"
   ],
