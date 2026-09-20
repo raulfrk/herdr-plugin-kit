@@ -52,6 +52,17 @@ func (proofRouteProvider) Invoke(_ context.Context, invocation RouteInvocation) 
 	return RouteExecution{Outcome: RouteCompleted, Focus: RouteFocusPreserved}, nil
 }
 
+func (proofRouteProvider) CatalogV2(ctx context.Context, origin RouteOrigin) (RouteCatalog, error) {
+	return proofRouteProvider{}.Catalog(ctx, origin)
+}
+
+func (proofRouteProvider) InvokeV2(ctx context.Context, invocation RouteInvocation) (RouteExecution, error) {
+	if _, err := (proofRouteProvider{}).Invoke(ctx, invocation); err != nil {
+		return RouteExecution{}, err
+	}
+	return RouteExecution{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-proof-1"}, nil
+}
+
 func TestRouteProviderProcess(t *testing.T) {
 	marker, root := routeHelperArgs(os.Args)
 	if !marker {
@@ -90,7 +101,7 @@ func TestRouteProcessClientCatalogAndInvokeEndToEnd(t *testing.T) {
 		mu.Unlock()
 		return command.Result{Stdout: pluginList}, nil
 	})
-	correlations := []string{"catalog-correlation", "invoke-correlation"}
+	correlations := []string{"catalog-correlation", "invoke-correlation", "catalog-v2-correlation", "invoke-v2-correlation"}
 	client := RouteClient{
 		Caller: RouteProcessCaller{
 			HerdrRunner: herdr, ProviderRunner: command.ExecRunner{StdoutLimit: MaxRouteEnvelopeBytes, StderrLimit: MaxRouteEnvelopeBytes},
@@ -116,6 +127,21 @@ func TestRouteProcessClientCatalogAndInvokeEndToEnd(t *testing.T) {
 	}
 	if result != (RouteInvokeResult{TargetPlugin: "proof.provider", RouteRevision: "rev-proof-1", ActionID: "new", Outcome: RouteCompleted, Focus: RouteFocusPreserved}) {
 		t.Fatalf("result = %+v", result)
+	}
+	rewriteRouteKitFixture(t, root, func(value *manifest.Manifest) {
+		value.Interfaces = append(value.Interfaces, manifest.Interface{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersionV2, Direction: manifest.InterfaceProvides})
+	})
+	client.InterfaceVersion = ActionRouteInterfaceVersionV2
+	catalog, err = client.Catalog(context.Background(), RouteCatalogCall{TargetPlugin: "proof.provider", Origin: origin, Deadline: time.Now().Add(5 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = client.Invoke(context.Background(), RouteInvokeCall{TargetPlugin: "proof.provider", Origin: origin, RouteRevision: catalog.RouteRevision, ActionID: "new", Keys: []string{"p", "n", "a"}, Deadline: time.Now().Add(5 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != RouteAccepted || result.OperationID != "operation-proof-1" || result.Focus != RouteFocusPreserved {
+		t.Fatalf("v2 result = %+v", result)
 	}
 	wantCall := []string{"/opt/herdr", "--session", "proof.named", "plugin", "list", "--json"}
 	for _, got := range herdrCalls {
@@ -288,6 +314,29 @@ func TestRouteProcessDiscoveryRejectsMissingDisabledAndDriftedProviders(t *testi
 			rewriteRouteHerdrFixture(t, root, mutate)
 			assertRouteDiscoveryRejected(t, root, data)
 		})
+	}
+}
+
+func TestRouteProcessDiscoveryRequiresTheRequestedAdvertisedVersion(t *testing.T) {
+	root := t.TempDir()
+	data := writeRouteFixture(t, root, []string{"./provider", "route"})
+	caller := RouteProcessCaller{HerdrRunner: routeCommandRunnerFunc(func(context.Context, string, []string) (command.Result, error) {
+		return command.Result{Stdout: data}, nil
+	}), ProviderRunner: routeSpecRunnerFunc(func(context.Context, command.Spec) (command.Result, error) {
+		t.Fatal("provider executed")
+		return command.Result{}, nil
+	})}
+	if _, _, err := caller.discoverVersion(context.Background(), "proof.provider", ActionRouteInterfaceVersionV2); err == nil {
+		t.Fatal("v2 discovery accepted a v1-only provider")
+	}
+	rewriteRouteKitFixture(t, root, func(value *manifest.Manifest) {
+		value.Interfaces = append(value.Interfaces, manifest.Interface{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersionV2, Direction: manifest.InterfaceProvides})
+	})
+	if _, _, err := caller.discoverVersion(context.Background(), "proof.provider", ActionRouteInterfaceVersionV2); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := caller.discover(context.Background(), "proof.provider"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -873,6 +922,86 @@ func TestRouteClientInvokeRejectsEachResponseIdentityDrift(t *testing.T) {
 	}
 }
 
+func TestRouteClientV2AcceptsOperationIdentityAndV1RejectsItsShape(t *testing.T) {
+	call := RouteInvokeCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "new", Keys: []string{"n"}, Deadline: time.Now().Add(time.Second)}
+	payload, err := json.Marshal(RouteInvokeResult{TargetPlugin: call.TargetPlugin, RouteRevision: call.RouteRevision, ActionID: call.ActionID, Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := callerFunc(func(_ context.Context, request Request) (Response, error) {
+		return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: payload}, nil
+	})
+	client := RouteClient{Caller: caller, InterfaceVersion: ActionRouteInterfaceVersionV2, NewCorrelation: func() (string, error) { return "correlation", nil }}
+	result, err := client.Invoke(context.Background(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != RouteAccepted || result.OperationID != "operation-1" {
+		t.Fatalf("result = %+v", result)
+	}
+	duplicate := bytes.Replace(payload, []byte(`"operation_id":`), []byte(`"operation_id":"other","operation_id":`), 1)
+	client.Caller = callerFunc(func(_ context.Context, request Request) (Response, error) {
+		return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: duplicate}, nil
+	})
+	if _, err := client.Invoke(context.Background(), call); err == nil {
+		t.Fatal("v2 client accepted duplicate operation_id")
+	}
+	client.Caller = caller
+	client.InterfaceVersion = ActionRouteInterfaceVersion
+	if _, err := client.Invoke(context.Background(), call); err == nil {
+		t.Fatal("v1 client accepted a v2 result shape")
+	}
+}
+
+func TestRouteClientV2DoesNotRetryAfterLostInvokeReply(t *testing.T) {
+	call := RouteInvokeCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "new", Keys: []string{"n"}, Deadline: time.Now().Add(time.Second)}
+	calls := 0
+	client := RouteClient{
+		Caller: callerFunc(func(context.Context, Request) (Response, error) {
+			calls++
+			return Response{}, errors.New("reply lost after dispatch")
+		}),
+		InterfaceVersion: ActionRouteInterfaceVersionV2,
+		NewCorrelation:   func() (string, error) { return "correlation", nil },
+	}
+	if _, err := client.Invoke(context.Background(), call); err == nil || calls != 1 {
+		t.Fatalf("error=%v calls=%d, want error and one call", err, calls)
+	}
+}
+
+func TestRouteClientV2AcceptsExactUIHandoff(t *testing.T) {
+	call := RouteInvokeCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "setup", Keys: []string{"s"}, Deadline: time.Now().Add(time.Second)}
+	client := RouteClient{
+		Caller: callerFunc(func(_ context.Context, request Request) (Response, error) {
+			payload, err := json.Marshal(RouteInvokeResult{TargetPlugin: call.TargetPlugin, RouteRevision: call.RouteRevision, ActionID: call.ActionID, Outcome: RouteUIHandoff, Focus: RouteFocusChanged})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: payload}, nil
+		}),
+		InterfaceVersion: ActionRouteInterfaceVersionV2,
+		NewCorrelation:   func() (string, error) { return "correlation", nil },
+	}
+	result, err := client.Invoke(context.Background(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != RouteUIHandoff || result.Focus != RouteFocusChanged || result.OperationID != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	for name, operationID := range map[string]string{"empty": `""`, "null": `null`} {
+		t.Run(name, func(t *testing.T) {
+			client.Caller = callerFunc(func(_ context.Context, request Request) (Response, error) {
+				payload := fmt.Appendf(nil, `{"target_plugin":%q,"route_revision":%q,"action_id":%q,"outcome":"ui_handoff","focus":"changed","operation_id":%s}`, call.TargetPlugin, call.RouteRevision, call.ActionID, operationID)
+				return Response{Version: Version, CorrelationID: request.CorrelationID, Payload: payload}, nil
+			})
+			if _, err := client.Invoke(context.Background(), call); err == nil {
+				t.Fatalf("ui_handoff accepted operation_id=%s", operationID)
+			}
+		})
+	}
+}
+
 func TestRouteClientDefaultCorrelationIsValid(t *testing.T) {
 	client := RouteClient{Caller: callerFunc(func(_ context.Context, request Request) (Response, error) {
 		if err := validateCorrelation(request.CorrelationID); err != nil {
@@ -898,7 +1027,7 @@ func (f callerFunc) Call(ctx context.Context, request Request) (Response, error)
 func TestValidateRouteRequestRejectsEachInterfaceFieldAndMissingPayload(t *testing.T) {
 	for name, mutate := range map[string]func(*Request){
 		"interface id":      func(request *Request) { request.Interface = "other-route" },
-		"interface version": func(request *Request) { request.InterfaceVersion++ },
+		"interface version": func(request *Request) { request.InterfaceVersion = ActionRouteInterfaceVersionV2 + 1 },
 		"missing payload":   func(request *Request) { request.Payload = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -945,6 +1074,28 @@ func TestRouteValidationBoundsAndEnums(t *testing.T) {
 		if err := ValidateRouteExecution(execution); err == nil {
 			t.Fatalf("invalid execution accepted: %+v", execution)
 		}
+	}
+	for _, execution := range []RouteExecution{
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-1"},
+		{Outcome: RouteUIHandoff, Focus: RouteFocusChanged},
+		{Outcome: RouteCompleted, Focus: RouteFocusPreserved},
+	} {
+		if err := ValidateRouteExecutionVersion(ActionRouteInterfaceVersionV2, execution); err != nil {
+			t.Fatalf("valid v2 execution rejected: %+v: %v", execution, err)
+		}
+	}
+	for _, execution := range []RouteExecution{
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved},
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "has space"},
+		{Outcome: RouteCompleted, Focus: RouteFocusPreserved, OperationID: "operation-1"},
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: strings.Repeat("o", maxRouteOperationIDBytes+1)},
+	} {
+		if err := ValidateRouteExecutionVersion(ActionRouteInterfaceVersionV2, execution); err == nil {
+			t.Fatalf("invalid v2 execution accepted: %+v", execution)
+		}
+	}
+	if err := ValidateRouteExecution(RouteExecution{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-1"}); err == nil {
+		t.Fatal("v1 accepted an asynchronous result")
 	}
 	invocation := RouteInvocation{Origin: routeOrigin(), RouteRevision: "rev-1", ActionID: "new", Keys: []string{"p", "n"}}
 	if err := ValidateRouteInvocation(invocation); err != nil {
@@ -1063,8 +1214,22 @@ func TestActionRouteDeclarationIsFixedAndIndependent(t *testing.T) {
 	if contract != (manifest.Interface{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersion, Direction: manifest.InterfaceProvides}) {
 		t.Fatalf("contract = %+v", contract)
 	}
+	versionedAction, contracts, err := ActionRouteDeclarations([]string{"./plugin", "action", "route"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContracts := []manifest.Interface{
+		{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersion, Direction: manifest.InterfaceProvides},
+		{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersionV2, Direction: manifest.InterfaceProvides},
+	}
+	if !reflect.DeepEqual(versionedAction, action) || !reflect.DeepEqual(contracts, wantContracts) {
+		t.Fatalf("versioned action=%+v contracts=%+v", versionedAction, contracts)
+	}
 	if _, _, err := ActionRouteDeclaration(nil); err == nil {
 		t.Fatal("empty declaration accepted")
+	}
+	if _, _, err := ActionRouteDeclarations(nil); err == nil {
+		t.Fatal("empty versioned declaration accepted")
 	}
 }
 
@@ -1112,6 +1277,42 @@ func TestRouteDispatchRejectsStaleMissingAndUnavailableBeforeEffects(t *testing.
 	}
 }
 
+func TestRouteDispatchSelectsVersionBeforeAsynchronousEffects(t *testing.T) {
+	provider := &versionedRouteProvider{}
+	request := validRouteRequest(t, RouteMethodInvoke)
+	request.Payload, _ = json.Marshal(routeInvokePayload{Origin: routeOrigin(), RouteRevision: "rev-async-1", ActionID: "async", Keys: []string{"a"}})
+
+	legacy := DispatchRoute(context.Background(), request, time.Now(), provider)
+	if legacy.Error == nil || legacy.Error.Category != Unavailable || provider.v1Invocations != 0 || provider.v2Invocations != 0 {
+		t.Fatalf("v1 response=%+v v1_invocations=%d v2_invocations=%d", legacy, provider.v1Invocations, provider.v2Invocations)
+	}
+
+	request.InterfaceVersion = ActionRouteInterfaceVersionV2
+	versioned := DispatchRoute(context.Background(), request, time.Now(), provider)
+	if versioned.Error != nil || provider.v1Invocations != 0 || provider.v2Invocations != 1 {
+		t.Fatalf("v2 response=%+v v1_invocations=%d v2_invocations=%d", versioned, provider.v1Invocations, provider.v2Invocations)
+	}
+	var result RouteInvokeResult
+	if err := decodeRouteInvokeResult(ActionRouteInterfaceVersionV2, versioned.Payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != RouteAccepted || result.OperationID != "operation-1" || result.Focus != RouteFocusPreserved {
+		t.Fatalf("v2 result = %+v", result)
+	}
+
+	request.Payload, _ = json.Marshal(routeInvokePayload{Origin: routeOrigin(), RouteRevision: "stale", ActionID: "async", Keys: []string{"a"}})
+	stale := DispatchRoute(context.Background(), request, time.Now(), provider)
+	if stale.Error == nil || stale.Error.Category != Unavailable || provider.v2Invocations != 1 {
+		t.Fatalf("stale response=%+v v2_invocations=%d", stale, provider.v2Invocations)
+	}
+
+	request.Payload, _ = json.Marshal(routeInvokePayload{Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "new", Keys: []string{"n"}})
+	unsupported := DispatchRoute(context.Background(), request, time.Now(), &countingRouteProvider{})
+	if unsupported.Error == nil || unsupported.Error.Category != Internal {
+		t.Fatalf("v2 request without v2 provider = %+v", unsupported)
+	}
+}
+
 type countingRouteProvider struct{ invocations int }
 
 func (*countingRouteProvider) Catalog(context.Context, RouteOrigin) (RouteCatalog, error) {
@@ -1121,6 +1322,29 @@ func (*countingRouteProvider) Catalog(context.Context, RouteOrigin) (RouteCatalo
 func (p *countingRouteProvider) Invoke(context.Context, RouteInvocation) (RouteExecution, error) {
 	p.invocations++
 	return RouteExecution{Outcome: RouteCompleted, Focus: RouteFocusPreserved}, nil
+}
+
+type versionedRouteProvider struct {
+	v1Invocations int
+	v2Invocations int
+}
+
+func (*versionedRouteProvider) Catalog(context.Context, RouteOrigin) (RouteCatalog, error) {
+	return RouteCatalog{RouteRevision: "rev-async-1", Actions: []RouteAction{{ActionID: "async", Label: "Async", SuggestedPath: []string{"a"}, Available: false, Reason: "requires action-route v2"}}}, nil
+}
+
+func (p *versionedRouteProvider) Invoke(context.Context, RouteInvocation) (RouteExecution, error) {
+	p.v1Invocations++
+	return RouteExecution{Outcome: RouteCompleted, Focus: RouteFocusPreserved}, nil
+}
+
+func (*versionedRouteProvider) CatalogV2(context.Context, RouteOrigin) (RouteCatalog, error) {
+	return RouteCatalog{RouteRevision: "rev-async-1", Actions: []RouteAction{{ActionID: "async", Label: "Async", SuggestedPath: []string{"a"}, Available: true}}}, nil
+}
+
+func (p *versionedRouteProvider) InvokeV2(context.Context, RouteInvocation) (RouteExecution, error) {
+	p.v2Invocations++
+	return RouteExecution{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-1"}, nil
 }
 
 type errorRouteProvider struct{ err error }

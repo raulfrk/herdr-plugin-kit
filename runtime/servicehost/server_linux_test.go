@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -101,6 +103,47 @@ func TestServerClientStatusLifecycle(t *testing.T) {
 	}
 	if err := second.Close(); err != nil {
 		t.Fatalf("close second client: %v", err)
+	}
+}
+
+func TestServerRegistrarAndClientConnectionCarryProductService(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "runtime", "service.sock")
+	server, err := NewServer(ServerConfig{
+		SocketPath: socketPath, ProtocolVersion: 1, ServiceName: "test-service", ServiceVersion: "1.2.3",
+		InitialState: HealthReady, InitialAccepting: true, InitialDetail: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	product := health.NewServer()
+	product.SetServingStatus("example.product.v1.Operations", healthv1.HealthCheckResponse_SERVING)
+	healthv1.RegisterHealthServer(server.Registrar(), product)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	client := dialTestClient(t, socketPath, 1)
+	t.Cleanup(func() { _ = client.Close() })
+	callCtx, cancelCall := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelCall()
+	response, err := healthv1.NewHealthClient(client.Conn()).Check(callCtx, &healthv1.HealthCheckRequest{Service: "example.product.v1.Operations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetStatus() != healthv1.HealthCheckResponse_SERVING {
+		t.Fatalf("product service status = %v", response.GetStatus())
 	}
 }
 

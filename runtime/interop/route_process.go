@@ -55,7 +55,7 @@ func (c RouteProcessCaller) Call(ctx context.Context, request Request) (Response
 	}
 	callCtx, cancel := context.WithDeadline(ctx, request.Deadline)
 	defer cancel()
-	root, argv, err := c.discover(callCtx, request.TargetPlugin)
+	root, argv, err := c.discoverVersion(callCtx, request.TargetPlugin, request.InterfaceVersion)
 	if err != nil {
 		return Response{}, err
 	}
@@ -84,6 +84,10 @@ func (c RouteProcessCaller) Call(ctx context.Context, request Request) (Response
 }
 
 func (c RouteProcessCaller) discover(ctx context.Context, target string) (string, []string, error) {
+	return c.discoverVersion(ctx, target, ActionRouteInterfaceVersion)
+}
+
+func (c RouteProcessCaller) discoverVersion(ctx context.Context, target string, interfaceVersion uint32) (string, []string, error) {
 	if err := manifest.ValidateID("target_plugin", target); err != nil {
 		return "", nil, err
 	}
@@ -137,12 +141,12 @@ func (c RouteProcessCaller) discover(ctx context.Context, target string) (string
 	}
 	provided := 0
 	for _, contract := range kit.Interfaces {
-		if contract.ID == ActionRouteInterface && contract.Version == ActionRouteInterfaceVersion && contract.Direction == manifest.InterfaceProvides {
+		if contract.ID == ActionRouteInterface && contract.Version == interfaceVersion && contract.Direction == manifest.InterfaceProvides {
 			provided++
 		}
 	}
 	if provided != 1 {
-		return "", nil, errors.New("provider does not advertise exactly one action-route v1 interface")
+		return "", nil, fmt.Errorf("provider does not advertise exactly one action-route v%d interface", interfaceVersion)
 	}
 	var declared *manifest.Action
 	for index := range kit.Actions {

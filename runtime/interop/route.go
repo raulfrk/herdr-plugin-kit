@@ -16,17 +16,19 @@ import (
 )
 
 const (
-	ActionRouteInterface               = "action-route"
-	ActionRouteInterfaceVersion uint32 = 1
-	ActionRouteActionID                = "route"
-	MaxRouteActions                    = 256
-	MaxRouteKeys                       = 8
-	MaxRouteSiblings                   = 36
-	MaxRouteEnvelopeBytes              = 64 << 10
-	maxRouteLabelBytes                 = 128
-	maxRouteReasonBytes                = 512
-	maxRouteRevisionBytes              = 128
-	maxRouteOriginBytes                = 128
+	ActionRouteInterface                 = "action-route"
+	ActionRouteInterfaceVersion   uint32 = 1
+	ActionRouteInterfaceVersionV2 uint32 = 2
+	ActionRouteActionID                  = "route"
+	MaxRouteActions                      = 256
+	MaxRouteKeys                         = 8
+	MaxRouteSiblings                     = 36
+	MaxRouteEnvelopeBytes                = 64 << 10
+	maxRouteLabelBytes                   = 128
+	maxRouteReasonBytes                  = 512
+	maxRouteRevisionBytes                = 128
+	maxRouteOriginBytes                  = 128
+	maxRouteOperationIDBytes             = 128
 )
 
 const (
@@ -67,6 +69,8 @@ const (
 	RouteCompleted RouteOutcome = "completed"
 	RouteRejected  RouteOutcome = "rejected"
 	RouteFailed    RouteOutcome = "failed"
+	RouteAccepted  RouteOutcome = "accepted"
+	RouteUIHandoff RouteOutcome = "ui_handoff"
 )
 
 type RouteFocus string
@@ -77,13 +81,22 @@ const (
 )
 
 type RouteExecution struct {
-	Outcome RouteOutcome `json:"outcome"`
-	Focus   RouteFocus   `json:"focus"`
+	Outcome     RouteOutcome `json:"outcome"`
+	Focus       RouteFocus   `json:"focus"`
+	OperationID string       `json:"operation_id,omitempty"`
 }
 
 type RouteProvider interface {
 	Catalog(context.Context, RouteOrigin) (RouteCatalog, error)
 	Invoke(context.Context, RouteInvocation) (RouteExecution, error)
+}
+
+// RouteProviderV2 keeps the v1 provider path separate so a v1 request cannot
+// enter a v2-only asynchronous operation before its result is validated.
+type RouteProviderV2 interface {
+	RouteProvider
+	CatalogV2(context.Context, RouteOrigin) (RouteCatalog, error)
+	InvokeV2(context.Context, RouteInvocation) (RouteExecution, error)
 }
 
 type RouteCatalogCall struct {
@@ -113,6 +126,7 @@ type RouteInvokeResult struct {
 	ActionID      string       `json:"action_id"`
 	Outcome       RouteOutcome `json:"outcome"`
 	Focus         RouteFocus   `json:"focus"`
+	OperationID   string       `json:"operation_id,omitempty"`
 }
 
 type routeCatalogPayload struct {
@@ -127,8 +141,9 @@ type routeInvokePayload struct {
 }
 
 type RouteClient struct {
-	Caller         Caller
-	NewCorrelation func() (string, error)
+	Caller           Caller
+	NewCorrelation   func() (string, error)
+	InterfaceVersion uint32
 }
 
 func (c RouteClient) Catalog(ctx context.Context, call RouteCatalogCall) (RouteCatalogResult, error) {
@@ -196,13 +211,13 @@ func (c RouteClient) Invoke(ctx context.Context, call RouteInvokeCall) (RouteInv
 		return RouteInvokeResult{}, response.Error
 	}
 	var result RouteInvokeResult
-	if err := decodeRouteInvokeResult(response.Payload, &result); err != nil {
+	if err := decodeRouteInvokeResult(request.InterfaceVersion, response.Payload, &result); err != nil {
 		return RouteInvokeResult{}, err
 	}
 	if result.TargetPlugin != call.TargetPlugin || result.RouteRevision != call.RouteRevision || result.ActionID != call.ActionID {
 		return RouteInvokeResult{}, errors.New("invoke response identity changed")
 	}
-	if err := ValidateRouteExecution(RouteExecution{Outcome: result.Outcome, Focus: result.Focus}); err != nil {
+	if err := ValidateRouteExecutionVersion(request.InterfaceVersion, RouteExecution{Outcome: result.Outcome, Focus: result.Focus, OperationID: result.OperationID}); err != nil {
 		return RouteInvokeResult{}, err
 	}
 	return result, nil
@@ -217,7 +232,11 @@ func (c RouteClient) request(target, method string, deadline time.Time, payload 
 	if err != nil {
 		return Request{}, fmt.Errorf("create correlation: %w", err)
 	}
-	request := Request{Version: Version, TargetPlugin: target, Interface: ActionRouteInterface, InterfaceVersion: ActionRouteInterfaceVersion, Method: method, CorrelationID: id, Deadline: deadline, Payload: payload}
+	interfaceVersion := c.InterfaceVersion
+	if interfaceVersion == 0 {
+		interfaceVersion = ActionRouteInterfaceVersion
+	}
+	request := Request{Version: Version, TargetPlugin: target, Interface: ActionRouteInterface, InterfaceVersion: interfaceVersion, Method: method, CorrelationID: id, Deadline: deadline, Payload: payload}
 	if err := validateRouteRequest(context.Background(), request, time.Now()); err != nil {
 		return Request{}, err
 	}
@@ -246,7 +265,7 @@ func DispatchRoute(ctx context.Context, request Request, now time.Time, provider
 				response.Error = toCallError(err, InvalidRequest)
 				return response
 			}
-			catalog, err := provider.Catalog(callCtx, payload.Origin)
+			catalog, err := routeProviderCatalog(callCtx, request.InterfaceVersion, provider, payload.Origin)
 			if err != nil {
 				response.Error = routeProviderError(err)
 				return response
@@ -267,7 +286,7 @@ func DispatchRoute(ctx context.Context, request Request, now time.Time, provider
 				return response
 			}
 			invocation := RouteInvocation(payload)
-			catalog, err := provider.Catalog(callCtx, invocation.Origin)
+			catalog, err := routeProviderCatalog(callCtx, request.InterfaceVersion, provider, invocation.Origin)
 			if err != nil {
 				response.Error = routeProviderError(err)
 				return response
@@ -299,16 +318,16 @@ func DispatchRoute(ctx context.Context, request Request, now time.Time, provider
 				response.Error = &CallError{Category: Unavailable, Message: message}
 				return response
 			}
-			execution, err := provider.Invoke(callCtx, invocation)
+			execution, err := routeProviderInvoke(callCtx, request.InterfaceVersion, provider, invocation)
 			if err != nil {
 				response.Error = routeProviderError(err)
 				return response
 			}
-			if err := ValidateRouteExecution(execution); err != nil {
+			if err := ValidateRouteExecutionVersion(request.InterfaceVersion, execution); err != nil {
 				response.Error = toCallError(err, Internal)
 				return response
 			}
-			response.Payload, err = json.Marshal(RouteInvokeResult{TargetPlugin: request.TargetPlugin, RouteRevision: invocation.RouteRevision, ActionID: invocation.ActionID, Outcome: execution.Outcome, Focus: execution.Focus})
+			response.Payload, err = json.Marshal(RouteInvokeResult{TargetPlugin: request.TargetPlugin, RouteRevision: invocation.RouteRevision, ActionID: invocation.ActionID, Outcome: execution.Outcome, Focus: execution.Focus, OperationID: execution.OperationID})
 			if err != nil {
 				response.Error = toCallError(err, Internal)
 			}
@@ -318,6 +337,28 @@ func DispatchRoute(ctx context.Context, request Request, now time.Time, provider
 			return response
 		}
 	}))
+}
+
+func routeProviderCatalog(ctx context.Context, version uint32, provider RouteProvider, origin RouteOrigin) (RouteCatalog, error) {
+	if version == ActionRouteInterfaceVersion {
+		return provider.Catalog(ctx, origin)
+	}
+	versioned, ok := provider.(RouteProviderV2)
+	if !ok {
+		return RouteCatalog{}, errors.New("action-route v2 provider is not implemented")
+	}
+	return versioned.CatalogV2(ctx, origin)
+}
+
+func routeProviderInvoke(ctx context.Context, version uint32, provider RouteProvider, invocation RouteInvocation) (RouteExecution, error) {
+	if version == ActionRouteInterfaceVersion {
+		return provider.Invoke(ctx, invocation)
+	}
+	versioned, ok := provider.(RouteProviderV2)
+	if !ok {
+		return RouteExecution{}, errors.New("action-route v2 provider is not implemented")
+	}
+	return versioned.InvokeV2(ctx, invocation)
 }
 
 func ServeRoute(ctx context.Context, reader io.Reader, writer io.Writer, now time.Time, provider RouteProvider) error {
@@ -359,7 +400,8 @@ func validateRouteRequest(ctx context.Context, request Request, now time.Time) e
 	if err := ValidateRequest(ctx, request, now); err != nil {
 		return err
 	}
-	if request.Interface != ActionRouteInterface || request.InterfaceVersion != ActionRouteInterfaceVersion {
+	if request.Interface != ActionRouteInterface ||
+		(request.InterfaceVersion != ActionRouteInterfaceVersion && request.InterfaceVersion != ActionRouteInterfaceVersionV2) {
 		return errors.New("unsupported action-route interface")
 	}
 	if len(request.Payload) == 0 {
@@ -486,11 +528,44 @@ func ValidateRouteInvocation(invocation RouteInvocation) error {
 }
 
 func ValidateRouteExecution(execution RouteExecution) error {
-	if execution.Outcome != RouteCompleted && execution.Outcome != RouteRejected && execution.Outcome != RouteFailed {
-		return fmt.Errorf("invalid route outcome %q", execution.Outcome)
+	return ValidateRouteExecutionVersion(ActionRouteInterfaceVersion, execution)
+}
+
+func ValidateRouteExecutionVersion(version uint32, execution RouteExecution) error {
+	legacy := execution.Outcome == RouteCompleted || execution.Outcome == RouteRejected || execution.Outcome == RouteFailed
+	switch version {
+	case ActionRouteInterfaceVersion:
+		if !legacy {
+			return fmt.Errorf("invalid action-route v1 outcome %q", execution.Outcome)
+		}
+	case ActionRouteInterfaceVersionV2:
+		if !legacy && execution.Outcome != RouteAccepted && execution.Outcome != RouteUIHandoff {
+			return fmt.Errorf("invalid action-route v2 outcome %q", execution.Outcome)
+		}
+	default:
+		return fmt.Errorf("unsupported action-route interface version %d", version)
+	}
+	if execution.Outcome == RouteAccepted {
+		if err := validateRouteOperationID(execution.OperationID); err != nil {
+			return err
+		}
+	} else if execution.OperationID != "" {
+		return errors.New("operation_id is only valid for an accepted route")
 	}
 	if execution.Focus != RouteFocusPreserved && execution.Focus != RouteFocusChanged {
 		return fmt.Errorf("invalid route focus %q", execution.Focus)
+	}
+	return nil
+}
+
+func validateRouteOperationID(value string) error {
+	if value == "" || len(value) > maxRouteOperationIDBytes {
+		return fmt.Errorf("operation_id must be 1-%d printable ASCII bytes without spaces", maxRouteOperationIDBytes)
+	}
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return fmt.Errorf("operation_id must be 1-%d printable ASCII bytes without spaces", maxRouteOperationIDBytes)
+		}
 	}
 	return nil
 }
@@ -526,7 +601,8 @@ var (
 	routeCallErrorFields      = []string{"category", "message"}
 	routeCatalogResultFields  = []string{"target_plugin", "route_revision", "actions"}
 	routeActionFields         = []string{"action_id", "label", "suggested_path", "available", "reason"}
-	routeInvokeResultFields   = []string{"target_plugin", "route_revision", "action_id", "outcome", "focus"}
+	routeInvokeResultFieldsV1 = []string{"target_plugin", "route_revision", "action_id", "outcome", "focus"}
+	routeInvokeResultFieldsV2 = []string{"target_plugin", "route_revision", "action_id", "outcome", "focus", "operation_id"}
 )
 
 func decodeRouteEnvelopeResponse(data []byte, response *Response) error {
@@ -587,8 +663,32 @@ func decodeRouteCatalogResult(data []byte, result *RouteCatalogResult) error {
 	return decodeExactJSON(data, routeCatalogResultFields, result)
 }
 
-func decodeRouteInvokeResult(data []byte, result *RouteInvokeResult) error {
-	return decodeExactJSON(data, routeInvokeResultFields, result)
+func decodeRouteInvokeResult(version uint32, data []byte, result *RouteInvokeResult) error {
+	fields := routeInvokeResultFieldsV1
+	if version == ActionRouteInterfaceVersionV2 {
+		fields = routeInvokeResultFieldsV2
+	}
+	objects, err := exactJSONObject(data, fields)
+	if err != nil {
+		return err
+	}
+	if err := decodeExactJSON(data, fields, result); err != nil {
+		return err
+	}
+	if version != ActionRouteInterfaceVersionV2 {
+		return nil
+	}
+	operationID, present := objects["operation_id"]
+	if result.Outcome == RouteAccepted {
+		if !present || string(operationID) == "null" {
+			return errors.New("accepted route result requires operation_id")
+		}
+		return nil
+	}
+	if present {
+		return errors.New("operation_id is only valid for an accepted route")
+	}
+	return nil
 }
 
 func readRouteEnvelope(reader io.Reader) ([]byte, error) {
@@ -660,13 +760,26 @@ func exactJSONObject(data []byte, fields []string) (map[string]json.RawMessage, 
 }
 
 func ActionRouteDeclaration(command []string) (manifest.Action, manifest.Interface, error) {
-	action := manifest.Action{ID: ActionRouteActionID, Title: "Route plugin actions", Contexts: []string{"global"}, Command: append([]string(nil), command...)}
-	contract := manifest.Interface{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersion, Direction: manifest.InterfaceProvides}
-	probe := manifest.Manifest{PluginID: "route.probe", Name: "Route probe", Version: "0", Executable: commandAt(command, 0), Actions: []manifest.Action{action}, Interfaces: []manifest.Interface{contract}}
-	if err := probe.Validate(); err != nil {
-		return manifest.Action{}, manifest.Interface{}, fmt.Errorf("action-route declaration: %w", err)
+	action, contracts, err := ActionRouteDeclarations(command)
+	if err != nil {
+		return manifest.Action{}, manifest.Interface{}, err
 	}
-	return action, contract, nil
+	return action, contracts[0], nil
+}
+
+// ActionRouteDeclarations advertises the byte-compatible v1 protocol and the
+// opt-in v2 asynchronous result protocol through one fixed Herdr action.
+func ActionRouteDeclarations(command []string) (manifest.Action, []manifest.Interface, error) {
+	action := manifest.Action{ID: ActionRouteActionID, Title: "Route plugin actions", Contexts: []string{"global"}, Command: append([]string(nil), command...)}
+	contracts := []manifest.Interface{
+		{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersion, Direction: manifest.InterfaceProvides},
+		{ID: ActionRouteInterface, Version: ActionRouteInterfaceVersionV2, Direction: manifest.InterfaceProvides},
+	}
+	probe := manifest.Manifest{PluginID: "route.probe", Name: "Route probe", Version: "0", Executable: commandAt(command, 0), Actions: []manifest.Action{action}, Interfaces: contracts}
+	if err := probe.Validate(); err != nil {
+		return manifest.Action{}, nil, fmt.Errorf("action-route declaration: %w", err)
+	}
+	return action, append([]manifest.Interface(nil), contracts...), nil
 }
 
 func commandAt(command []string, index int) string {
