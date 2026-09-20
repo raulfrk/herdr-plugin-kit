@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,10 +49,15 @@ var exampleItems = []interaction.Item{
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	os.Exit(mainExit(os.Args[1:], os.Stderr))
+}
+
+func mainExit(args []string, stderr io.Writer) int {
+	if err := run(args); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func run(args []string) error {
@@ -60,11 +66,9 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "ui", "debug":
-		recovery := len(args) == 2 && args[1] == "--default-keymap"
-		if len(args) > 2 || (len(args) == 2 && !recovery) {
-			return errors.New("usage: plugin ui|debug [--default-keymap]")
-		}
-		return runUI(args[0] == "debug" || os.Getenv("HERDR_PLUGIN_START_VIEW") == "debug", recovery)
+		debug, recovery, err := uiOptions(args)
+		if err != nil { return err }
+		return runUI(debug, recovery)
 	case "action":
 		if len(args) != 2 {
 			return errors.New("usage: plugin action open|debug|health")
@@ -75,7 +79,19 @@ func run(args []string) error {
 	}
 }
 
+func uiOptions(args []string) (debug, recovery bool, err error) {
+	recovery = len(args) == 2 && args[1] == "--default-keymap"
+	if len(args) > 2 || (len(args) == 2 && !recovery) {
+		return false, false, errors.New("usage: plugin ui|debug [--default-keymap]")
+	}
+	return args[0] == "debug" || os.Getenv("HERDR_PLUGIN_START_VIEW") == "debug", recovery, nil
+}
+
 func runUI(debug, recovery bool) (result error) {
+	return runUIWithIO(debug, recovery, nil, nil)
+}
+
+func runUIWithIO(debug, recovery bool, input io.Reader, output io.Writer) (result error) {
 	resources, err := openResources()
 	if err != nil {
 		return err
@@ -119,7 +135,9 @@ func runUI(debug, recovery bool) (result error) {
 	})
 	if err != nil { return err }
 	defer func() { result = errors.Join(result, surface.Close()) }()
-	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: id, Theme: palette, Events: recording, Keymap: surface.Runtime()}, surface)
+	program, err := shell.NewProgram(shell.ProgramOptions{
+		PluginID: id, Theme: palette, Events: recording, Keymap: surface.Runtime(), Input: input, Output: output,
+	}, surface)
 	if err != nil {
 		return err
 	}
@@ -178,6 +196,10 @@ func cursorOffset(query string, cursor interaction.Cursor) (int, error) {
 }
 
 func runAction(action string) error {
+	return runActionTo(action, os.Stdout)
+}
+
+func runActionTo(action string, output io.Writer) error {
 	switch action {
 	case "open", "debug":
 		herdr := os.Getenv("HERDR_BIN_PATH")
@@ -203,7 +225,7 @@ func runAction(action string) error {
 		if _, err := runtimeDirectory("HERDR_PLUGIN_STATE_DIR"); err != nil {
 			return err
 		}
-		return json.NewEncoder(os.Stdout).Encode(healthResponse())
+		return json.NewEncoder(output).Encode(healthResponse())
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}

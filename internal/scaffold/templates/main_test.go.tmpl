@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/raulfrk/herdr-plugin-kit/diagnostics"
 	"github.com/raulfrk/herdr-plugin-kit/documentstore"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
 	"github.com/raulfrk/herdr-plugin-kit/ui/debugui"
 	"github.com/raulfrk/herdr-plugin-kit/ui/interaction"
 	"github.com/raulfrk/herdr-plugin-kit/ui/keymap"
@@ -30,6 +31,90 @@ import (
 type observedSurface struct {
 	keymapui.MappedSurface
 	states chan diagnostics.VisualState
+}
+
+func TestGeneratedCommandDispatchAndUIStartup(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing command"},
+		{name: "unknown command", args: []string{"unknown"}},
+		{name: "extra UI argument", args: []string{"ui", "extra"}},
+		{name: "too many UI arguments", args: []string{"debug", "--default-keymap", "extra"}},
+		{name: "missing action", args: []string{"action"}},
+		{name: "extra action", args: []string{"action", "health", "extra"}},
+		{name: "unknown action", args: []string{"action", "unknown"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if exit := mainExit(test.args, &stderr); exit != 1 || stderr.Len() == 0 {
+				t.Fatalf("mainExit(%q) = %d, %q", test.args, exit, stderr.String())
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, startView         string
+		arguments               []string
+		wantDebug, wantRecovery bool
+	}{
+		{name: "main UI", arguments: []string{"ui"}},
+		{name: "debug command", arguments: []string{"debug"}, wantDebug: true},
+		{name: "debug environment", startView: "debug", arguments: []string{"ui"}, wantDebug: true},
+		{name: "recovery", arguments: []string{"debug", "--default-keymap"}, wantDebug: true, wantRecovery: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HERDR_PLUGIN_START_VIEW", test.startView)
+			debug, recovery, err := uiOptions(test.arguments)
+			if err != nil || debug != test.wantDebug || recovery != test.wantRecovery {
+				t.Fatalf("uiOptions(%q) = %t, %t, %v", test.arguments, debug, recovery, err)
+			}
+		})
+	}
+
+	t.Run("UI startup and shutdown", func(t *testing.T) {
+		t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+		t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+		done := make(chan error, 1)
+		go func() { done <- runUIWithIO(false, false, bytes.NewReader([]byte{3}), io.Discard) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("generated UI did not stop after Ctrl+C")
+		}
+	})
+}
+
+func TestGeneratedActionValidationAndHealth(t *testing.T) {
+	t.Setenv("HERDR_BIN_PATH", "")
+	if err := runActionTo("open", io.Discard); err == nil {
+		t.Fatal("open action accepted an empty Herdr path")
+	}
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "relative")
+	if err := runActionTo("health", io.Discard); err == nil {
+		t.Fatal("health accepted a relative config directory")
+	}
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", "relative")
+	if err := runActionTo("health", io.Discard); err == nil {
+		t.Fatal("health accepted a relative state directory")
+	}
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+	var output bytes.Buffer
+	if err := runActionTo("health", &output); err != nil {
+		t.Fatal(err)
+	}
+	var response interop.ActionResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil || response.Interface != "health" {
+		t.Fatalf("health output = %#v, %v", response, err)
+	}
+	var stderr bytes.Buffer
+	if exit := mainExit([]string{"action", "health"}, &stderr); exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("health main exit = %d, stderr = %q", exit, stderr.String())
+	}
 }
 
 func (surface *observedSurface) DiagnosticState() diagnostics.VisualState {
@@ -226,7 +311,9 @@ func TestGeneratedSurfacesRenderEveryThemeAndResponsiveBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	router, err := keymapui.New(keymapui.Options{Main: picker, Debug: debugSurface, ConfigDirectory: t.TempDir()})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = router.Close() })
 	initialPalette, _ := theme.Builtin("catppuccin")
 	plugin, _ := diagnostics.NewID(pluginID)
@@ -460,7 +547,9 @@ func TestGeneratedRouterRejectsDisabledActivationAndExportsBoundedReport(t *test
 	}
 	observedDebug := &observedSurface{MappedSurface: debugSurface, states: make(chan diagnostics.VisualState, 64)}
 	router, err := keymapui.New(keymapui.Options{Main: picker, Debug: observedDebug, ConfigDirectory: t.TempDir()})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = router.Close() })
 	palette, _ := theme.Builtin("catppuccin")
 	input, inputWriter := io.Pipe()
@@ -600,7 +689,7 @@ func waitForAction(t *testing.T, recorder *diagnostics.Recorder, action string) 
 }
 
 type testSurface struct {
-	name string
+	name     string
 	results  int
 	resizes  int
 	texts    int
@@ -623,15 +712,22 @@ func (surface *testSurface) Update(_ shell.EventContext, event shell.Event) []sh
 }
 
 func (surface *testSurface) KeymapCatalog() []keymap.Action {
-	return []keymap.Action{{ID: "test.action", Label: "Test", Context: surface.name+".results"}}
+	return []keymap.Action{{ID: "test.action", Label: "Test", Context: surface.name + ".results"}}
 }
-func (surface *testSurface) KeymapContext() keymap.Context { return keymap.Context{ID: surface.name+".results"} }
-func (*testSurface) ActionState(string) keymap.State { return keymap.State{Enabled:true} }
+func (surface *testSurface) KeymapContext() keymap.Context {
+	return keymap.Context{ID: surface.name + ".results"}
+}
+func (*testSurface) ActionState(string) keymap.State { return keymap.State{Enabled: true} }
 func testRouter(t *testing.T, main, debug *testSurface) *keymapui.Surface {
-	t.Helper();main.name="main";debug.name="debug"
-	router,err:=keymapui.New(keymapui.Options{Main:main,Debug:debug,ConfigDirectory:t.TempDir()})
-	if err!=nil{t.Fatal(err)}
-	t.Cleanup(func(){_ = router.Close()});return router
+	t.Helper()
+	main.name = "main"
+	debug.name = "debug"
+	router, err := keymapui.New(keymapui.Options{Main: main, Debug: debug, ConfigDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = router.Close() })
+	return router
 }
 
 func (*testSurface) Render(shell.RenderContext) (*view.Frame, error)     { return nil, nil }
@@ -641,7 +737,7 @@ func (surface *testSurface) SuppressEffectDiagnostics(shell.Effect) bool { retur
 
 func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 	mainSurface, debugSurface := &testSurface{}, &testSurface{}
-	router := testRouter(t,mainSurface,debugSurface)
+	router := testRouter(t, mainSurface, debugSurface)
 	router.Update(shell.EventContext{}, shell.ResizeEvent{Generation: 1})
 	router.Update(shell.EventContext{}, shell.ActionEvent{ID: "keymap.debug"})
 	router.Update(shell.EventContext{}, shell.ResultEvent{})
@@ -660,7 +756,7 @@ func TestRouterDeliversCompletionsAcrossViewSwitches(t *testing.T) {
 
 func TestRouterDelegatesDebugMaintenanceSuppressionWhileMainIsActive(t *testing.T) {
 	mainSurface, debugSurface := &testSurface{}, &testSurface{suppress: true}
-	router := testRouter(t,mainSurface,debugSurface)
+	router := testRouter(t, mainSurface, debugSurface)
 	if !router.SuppressEventDiagnostics(shell.TimerEvent{}) || !router.SuppressEffectDiagnostics(shell.Effect{}) {
 		t.Fatal("main-active router did not delegate maintenance suppression to debug surface")
 	}

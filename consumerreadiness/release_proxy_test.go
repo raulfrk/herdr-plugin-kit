@@ -255,6 +255,21 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention, verify
 	if bytes.Contains(goMod, []byte("replace ")) || bytes.Contains(goMod, []byte("replace\n")) {
 		t.Fatalf("generated consumer contains a replace directive:\n%s", goMod)
 	}
+	if verifyTools {
+		if _, err := os.Stat(filepath.Join(consumer, "mutation-full-baseline.json")); !os.IsNotExist(err) {
+			t.Fatalf("new generated consumer has a historical mutation baseline: %v", err)
+		}
+		releaseCommand(t, consumer, environment, "git", "init", "-q")
+		releaseCommand(t, consumer, environment, "git", "add", "-A")
+		releaseCommand(t, consumer, environment, "git", "-c", "user.name=Codex", "-c", "user.email=codex@localhost", "commit", "-q", "-m", "stable generated starter")
+		fullStart := time.Now()
+		releaseCommand(t, consumer, environment, "make", "mutation-full")
+		fullDuration := time.Since(fullStart)
+		if status := releaseCommand(t, consumer, environment, "git", "status", "--porcelain"); status != "" {
+			t.Fatalf("full mutation changed the generated candidate:\n%s", status)
+		}
+		t.Logf("generated starter full mutation duration=%s", fullDuration)
+	}
 }
 
 func verifyDistributedMutationTooling(t *testing.T, consumer string, environment []string) {
