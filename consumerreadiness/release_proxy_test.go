@@ -231,6 +231,7 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention, verify
 	}
 	releaseCommand(t, root, environment, "go", "run", releaseCandidateModule+"/cmd/herdr-plugin-kit@"+releaseCandidateVersion,
 		"new", "--id", pluginID, "--name", pluginID, "--output", consumer)
+	writeReleaseFile(t, filepath.Join(consumer, "backend_contract_test.go"), []byte(genericBackendConsumerContract))
 	if attention {
 		writeReleaseFile(t, filepath.Join(consumer, "attention_contract_test.go"), []byte(attentionConsumerContract))
 	}
@@ -390,16 +391,126 @@ func releaseCommandBytes(t *testing.T, directory string, environment []string, n
 	return output
 }
 
+const genericBackendConsumerContract = `package attention_contract
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/raulfrk/herdr-plugin-kit/runtime/servicehost"
+	"google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
+)
+
+const productServiceName = "example.product.v1.Operations"
+
+func startGenericBackend(t *testing.T) *servicehost.Client {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "backend.sock")
+	server, err := servicehost.NewServer(servicehost.ServerConfig{
+		SocketPath: socket, ProtocolVersion: 1, ServiceName: "consumer-backend", ServiceVersion: "1.0.0",
+		InitialState: servicehost.HealthReady, InitialAccepting: true, InitialDetail: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	product := health.NewServer()
+	product.SetServingStatus(productServiceName, healthv1.HealthCheckResponse_SERVING)
+	healthv1.RegisterHealthServer(server.Registrar(), product)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve backend: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("backend did not stop")
+		}
+	})
+
+	client, err := servicehost.Dial(context.Background(), servicehost.ClientConfig{
+		SocketPath: socket, ProtocolVersion: 1, ClientName: "consumer-adapter",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+func TestGeneratedConsumerCarriesProductServiceOverGenericBackend(t *testing.T) {
+	client := startGenericBackend(t)
+	response, err := healthv1.NewHealthClient(client.Conn()).Check(context.Background(), &healthv1.HealthCheckRequest{Service: productServiceName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetStatus() != healthv1.HealthCheckResponse_SERVING {
+		t.Fatalf("product service status = %v", response.GetStatus())
+	}
+}
+`
+
 const attentionConsumerContract = `package attention_contract
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/agenthost"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/keybindinghost"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
+
+type attentionRouteProvider struct{ backend healthv1.HealthClient }
+
+func (attentionRouteProvider) Catalog(context.Context, interop.RouteOrigin) (interop.RouteCatalog, error) {
+	return interop.RouteCatalog{RouteRevision: "settings-revision", Actions: []interop.RouteAction{
+		{ActionID: "new-review", Label: "New review", SuggestedPath: []string{"n", "r"}, Available: false, Reason: "requires action-route v2"},
+		{ActionID: "setup", Label: "Open setup", SuggestedPath: []string{"s"}, Available: false, Reason: "requires action-route v2"},
+	}}, nil
+}
+
+func (attentionRouteProvider) Invoke(context.Context, interop.RouteInvocation) (interop.RouteExecution, error) {
+	return interop.RouteExecution{}, errors.New("v1 action is unavailable")
+}
+
+func (attentionRouteProvider) CatalogV2(context.Context, interop.RouteOrigin) (interop.RouteCatalog, error) {
+	return interop.RouteCatalog{RouteRevision: "settings-revision", Actions: []interop.RouteAction{
+		{ActionID: "new-review", Label: "New review", SuggestedPath: []string{"n", "r"}, Available: true},
+		{ActionID: "setup", Label: "Open setup", SuggestedPath: []string{"s"}, Available: true},
+	}}, nil
+}
+
+func (p attentionRouteProvider) InvokeV2(ctx context.Context, invocation interop.RouteInvocation) (interop.RouteExecution, error) {
+	response, err := p.backend.Check(ctx, &healthv1.HealthCheckRequest{Service: productServiceName})
+	if err != nil {
+		return interop.RouteExecution{}, err
+	}
+	if response.GetStatus() != healthv1.HealthCheckResponse_SERVING {
+		return interop.RouteExecution{}, errors.New("backend is unavailable")
+	}
+	if invocation.ActionID == "setup" {
+		return interop.RouteExecution{Outcome: interop.RouteUIHandoff, Focus: interop.RouteFocusChanged}, nil
+	}
+	return interop.RouteExecution{Outcome: interop.RouteAccepted, Focus: interop.RouteFocusPreserved, OperationID: "operation-1"}, nil
+}
+
+type directRouteCaller struct{ provider interop.RouteProvider }
+
+func (c directRouteCaller) Call(ctx context.Context, request interop.Request) (interop.Response, error) {
+	return interop.DispatchRoute(ctx, request, time.Now(), c.provider), nil
+}
 
 func TestAttentionShapedConsumerCompilesSupportedGenericRequests(t *testing.T) {
 	origin := sessionhost.Origin{SessionName: "work", WorkspaceID: "workspace", TabID: "tab", PaneID: "pane"}
@@ -433,9 +544,9 @@ func TestAttentionShapedConsumerCompilesSupportedGenericRequests(t *testing.T) {
 	if len(bindings.Bindings) != 2 {
 		t.Fatalf("profile bindings changed: %+v", bindings)
 	}
-	action, contract, err := interop.ActionRouteDeclaration([]string{"./plugin", "action", "route"})
-	if err != nil || action.ID != interop.ActionRouteActionID || contract.ID != interop.ActionRouteInterface {
-		t.Fatalf("route declaration = %+v, %+v, %v", action, contract, err)
+	action, contracts, err := interop.ActionRouteDeclarations([]string{"./plugin", "action", "route"})
+	if err != nil || action.ID != interop.ActionRouteActionID || len(contracts) != 2 || contracts[0].Version != interop.ActionRouteInterfaceVersion || contracts[1].Version != interop.ActionRouteInterfaceVersionV2 {
+		t.Fatalf("route declaration = %+v, %+v, %v", action, contracts, err)
 	}
 	catalog := interop.RouteCatalog{RouteRevision: "settings-revision", Actions: []interop.RouteAction{
 		{ActionID: "new-review", Label: "New review", SuggestedPath: []string{"n", "r"}, Available: true},
@@ -443,6 +554,32 @@ func TestAttentionShapedConsumerCompilesSupportedGenericRequests(t *testing.T) {
 	}}
 	if err := interop.ValidateRouteCatalog(catalog); err != nil {
 		t.Fatalf("UI-authored route catalog: %v", err)
+	}
+
+	backend := startGenericBackend(t)
+	provider := attentionRouteProvider{backend: healthv1.NewHealthClient(backend.Conn())}
+	route := interop.RouteClient{
+		Caller: directRouteCaller{provider: provider}, InterfaceVersion: interop.ActionRouteInterfaceVersionV2,
+		NewCorrelation: func() (string, error) { return "attention-correlation", nil },
+	}
+	routeOrigin := interop.RouteOrigin{Session: "work", Workspace: "workspace", Tab: "tab", Pane: "pane"}
+	discovered, err := route.Catalog(context.Background(), interop.RouteCatalogCall{TargetPlugin: "attention-shaped", Origin: routeOrigin, Deadline: time.Now().Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := route.Invoke(context.Background(), interop.RouteInvokeCall{TargetPlugin: "attention-shaped", Origin: routeOrigin, RouteRevision: discovered.RouteRevision, ActionID: "new-review", Keys: []string{"n", "r"}, Deadline: time.Now().Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Outcome != interop.RouteAccepted || accepted.OperationID != "operation-1" || accepted.Focus != interop.RouteFocusPreserved {
+		t.Fatalf("accepted route = %+v", accepted)
+	}
+	handoff, err := route.Invoke(context.Background(), interop.RouteInvokeCall{TargetPlugin: "attention-shaped", Origin: routeOrigin, RouteRevision: discovered.RouteRevision, ActionID: "setup", Keys: []string{"s"}, Deadline: time.Now().Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Outcome != interop.RouteUIHandoff || handoff.OperationID != "" || handoff.Focus != interop.RouteFocusChanged {
+		t.Fatalf("UI handoff route = %+v", handoff)
 	}
 }
 `
