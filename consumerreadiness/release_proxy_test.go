@@ -231,9 +231,9 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention, verify
 	}
 	releaseCommand(t, root, environment, "go", "run", releaseCandidateModule+"/cmd/herdr-plugin-kit@"+releaseCandidateVersion,
 		"new", "--id", pluginID, "--name", pluginID, "--output", consumer)
-	writeReleaseFile(t, filepath.Join(consumer, "backend_contract_test.go"), []byte(genericBackendConsumerContract))
+	writeReleaseFile(t, filepath.Join(consumer, "cmd", pluginID, "backend_contract_test.go"), []byte(genericBackendConsumerContract))
 	if attention {
-		writeReleaseFile(t, filepath.Join(consumer, "attention_contract_test.go"), []byte(attentionConsumerContract))
+		writeReleaseFile(t, filepath.Join(consumer, "cmd", pluginID, "attention_contract_test.go"), []byte(attentionConsumerContract))
 	}
 	releaseCommand(t, root, environment, "go", "run", releaseCandidateModule+"/cmd/herdr-plugin-kit@"+releaseCandidateVersion,
 		"validate", consumer)
@@ -391,7 +391,7 @@ func releaseCommandBytes(t *testing.T, directory string, environment []string, n
 	return output
 }
 
-const genericBackendConsumerContract = `package attention_contract
+const genericBackendConsumerContract = `package main
 
 import (
 	"context"
@@ -457,7 +457,7 @@ func TestGeneratedConsumerCarriesProductServiceOverGenericBackend(t *testing.T) 
 }
 `
 
-const attentionConsumerContract = `package attention_contract
+const attentionConsumerContract = `package main
 
 import (
 	"context"
