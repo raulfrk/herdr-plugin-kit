@@ -42,6 +42,24 @@ if [ "$workers" -lt 1 ] || [ "$workers" -gt "$half" ]; then
   exit 2
 fi
 
+patch_hash=$(sha256sum "$repo/testtools/gremlins-constant-coverage.patch")
+patch_hash=${patch_hash%% *}
+gremlins_version="v0.6.0+hpk.constants.$patch_hash"
+artifact_parent="$repo/.artifacts/mutation/$candidate"
+artifact_dir="$artifact_parent/$mode"
+if [ -e "$artifact_dir" ]; then
+  echo "mutation artifacts already exist: $artifact_dir" >&2
+  exit 2
+fi
+set -- preflight --policy mutation-policy.json \
+  --baseline docs/mutation-baseline.md --config .gremlins.yaml \
+  --scope "$mode" --gremlins-version "$gremlins_version"
+if [ "$mode" = full ] && [ -e "$repo/mutation-full-baseline.json" ]; then
+  set -- "$@" --full-baseline mutation-full-baseline.json
+fi
+(cd "$repo" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+  go run ./cmd/mutationgate "$@" >/dev/null)
+
 lock=${TMPDIR:-/tmp}/herdr-plugin-kit-exclusive.lock
 if ! mkdir "$lock" 2>/dev/null; then
   echo "mutation or live-device testing already holds $lock" >&2
@@ -64,9 +82,6 @@ worktree="$run_root/worktree"
 
 gremlins_bin="$run_root/gremlins"
 GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} "$repo/scripts/gremlins-build" "$gremlins_bin"
-patch_hash=$(sha256sum "$repo/testtools/gremlins-constant-coverage.patch")
-patch_hash=${patch_hash%% *}
-gremlins_version="v0.6.0+hpk.constants.$patch_hash"
 
 git -C "$repo" worktree add --detach "$worktree" "$candidate" >/dev/null
 report="$run_root/gremlins.json"
@@ -105,20 +120,26 @@ if [ -n "$(git -C "$worktree" status --porcelain --untracked-files=all)" ]; then
   exit 1
 fi
 gate_status=0
-(cd "$worktree" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} go run ./cmd/mutationgate check \
-  --report "$report" --policy mutation-policy.json \
+set -- check --report "$report" --policy mutation-policy.json \
   --baseline docs/mutation-baseline.md --config .gremlins.yaml \
   --candidate "$candidate" --base "$base" --scope "$mode" \
-  --gremlins-version "$gremlins_version" --output "$gate_report" \
-  2>"$gate_stderr") || gate_status=$?
+  --gremlins-version "$gremlins_version" --output "$gate_report"
+if [ "$mode" = full ] && [ -e "$worktree/mutation-full-baseline.json" ]; then
+  set -- "$@" --full-baseline mutation-full-baseline.json
+fi
+(cd "$worktree" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+  go run ./cmd/mutationgate "$@" 2>"$gate_stderr") || gate_status=$?
 if [ ! -f "$gate_report" ]; then
   printf '%s\n' \
     '{"passed":false,"violations":["mutationgate failed before producing a gate report; see gate.stderr"]}' \
     > "$gate_report"
 fi
 
-artifact_dir="$repo/.artifacts/mutation/$candidate"
-mkdir -p "$artifact_dir"
+mkdir -p "$artifact_parent"
+if ! mkdir "$artifact_dir"; then
+  echo "refusing to overwrite mutation artifacts: $artifact_dir" >&2
+  exit 2
+fi
 install -m 0644 "$report" "$artifact_dir/gremlins.json"
 install -m 0644 "$gate_report" "$artifact_dir/gate.json"
 install -m 0644 "$gate_stderr" "$artifact_dir/gate.stderr"

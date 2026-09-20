@@ -10,8 +10,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Report struct {
@@ -71,25 +74,30 @@ type Metrics struct {
 }
 
 type Result struct {
-	Passed      bool                  `json:"passed"`
-	Run         RunMetadata           `json:"run"`
-	Policy      Policy                `json:"policy"`
-	Critical    Metrics               `json:"critical"`
-	Noncritical Metrics               `json:"noncritical"`
-	Survivors   []MutationDisposition `json:"survivors,omitempty"`
-	Equivalents []Equivalent          `json:"approved_equivalents,omitempty"`
-	Violations  []string              `json:"violations,omitempty"`
+	Passed             bool                    `json:"passed"`
+	AbsolutePassed     *bool                   `json:"absolute_passed,omitempty"`
+	Run                RunMetadata             `json:"run"`
+	Policy             Policy                  `json:"policy"`
+	Critical           Metrics                 `json:"critical"`
+	Noncritical        Metrics                 `json:"noncritical"`
+	Survivors          []MutationDisposition   `json:"survivors,omitempty"`
+	Equivalents        []Equivalent            `json:"approved_equivalents,omitempty"`
+	FullBaseline       *FullBaselineAssessment `json:"full_baseline,omitempty"`
+	AbsoluteViolations []string                `json:"absolute_violations,omitempty"`
+	Violations         []string                `json:"violations,omitempty"`
 }
 
 type RunMetadata struct {
-	Candidate       string `json:"candidate"`
-	Base            string `json:"base,omitempty"`
-	Scope           string `json:"scope"`
-	GoVersion       string `json:"go_version"`
-	GremlinsVersion string `json:"gremlins_version"`
-	ConfigSHA256    string `json:"config_sha256"`
-	PolicySHA256    string `json:"policy_sha256"`
-	BaselineSHA256  string `json:"baseline_sha256"`
+	Candidate          string `json:"candidate"`
+	Base               string `json:"base,omitempty"`
+	Scope              string `json:"scope"`
+	GoVersion          string `json:"go_version"`
+	GremlinsVersion    string `json:"gremlins_version"`
+	ReportSHA256       string `json:"report_sha256"`
+	ConfigSHA256       string `json:"config_sha256"`
+	PolicySHA256       string `json:"policy_sha256"`
+	BaselineSHA256     string `json:"baseline_sha256"`
+	FullBaselineSHA256 string `json:"full_baseline_sha256,omitempty"`
 }
 
 type MutationDisposition struct {
@@ -112,6 +120,128 @@ type Equivalent struct {
 	Hypothesis  string `json:"hypothesis"`
 	Proof       string `json:"proof"`
 	Reviewer    string `json:"reviewer"`
+}
+
+type FullBaseline struct {
+	SchemaVersion   int                   `json:"schema_version"`
+	Candidate       string                `json:"candidate"`
+	ReportSHA256    string                `json:"report_sha256"`
+	ConfigSHA256    string                `json:"config_sha256"`
+	PolicySHA256    string                `json:"policy_sha256"`
+	GoVersion       string                `json:"go_version"`
+	GremlinsVersion string                `json:"gremlins_version"`
+	CriticalDebt    []BaselineDisposition `json:"critical_debt"`
+}
+
+type BaselineDisposition struct {
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Column     int    `json:"column"`
+	Mutant     string `json:"mutant"`
+	Status     string `json:"status"`
+	Owner      string `json:"owner"`
+	SourceHash string `json:"source_sha256"`
+}
+
+type FullBaselineAssessment struct {
+	Candidate    string               `json:"candidate"`
+	ReportSHA256 string               `json:"report_sha256"`
+	CriticalDebt int                  `json:"critical_debt"`
+	Remaining    int                  `json:"remaining"`
+	Resolved     int                  `json:"resolved"`
+	Regressions  []MutationRegression `json:"regressions,omitempty"`
+}
+
+type MutationRegression struct {
+	File           string `json:"file"`
+	Line           int    `json:"line"`
+	Column         int    `json:"column"`
+	Mutant         string `json:"mutant"`
+	BaselineStatus string `json:"baseline_status,omitempty"`
+	CurrentStatus  string `json:"current_status"`
+}
+
+type gremlinsConfig struct {
+	Unleash *struct {
+		Integration        *bool `yaml:"integration"`
+		Workers            *int  `yaml:"workers"`
+		TimeoutCoefficient *int  `yaml:"timeout-coefficient"`
+		Threshold          *struct {
+			Efficacy       *int `yaml:"efficacy"`
+			MutantCoverage *int `yaml:"mutant-coverage"`
+		} `yaml:"threshold"`
+		ExcludeFiles *[]string `yaml:"exclude-files"`
+	} `yaml:"unleash"`
+	Mutants map[string]struct {
+		Enabled *bool `yaml:"enabled"`
+	} `yaml:"mutants"`
+}
+
+func ValidateGremlinsConfig(r io.Reader) error {
+	var config gremlinsConfig
+	decoder := yaml.NewDecoder(r)
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&config); err != nil {
+		return fmt.Errorf("decode Gremlins config: %w", err)
+	}
+	if err := ensureYAMLEOF(decoder); err != nil {
+		return err
+	}
+	if config.Unleash == nil || config.Unleash.Integration == nil ||
+		config.Unleash.Workers == nil || config.Unleash.TimeoutCoefficient == nil ||
+		config.Unleash.Threshold == nil || config.Unleash.Threshold.Efficacy == nil ||
+		config.Unleash.Threshold.MutantCoverage == nil || config.Unleash.ExcludeFiles == nil {
+		return errors.New("Gremlins config is missing required unleash settings")
+	}
+	if *config.Unleash.Integration || *config.Unleash.Workers != 0 ||
+		*config.Unleash.TimeoutCoefficient != 3 || *config.Unleash.Threshold.Efficacy != 0 ||
+		*config.Unleash.Threshold.MutantCoverage != 0 {
+		return errors.New("Gremlins config weakens required unleash settings")
+	}
+	wantExclusions := []string{"(^|/)vendor/", "_generated[.]go$", "[.]gen[.]go$", "[.]pb[.]go$"}
+	if !equalStrings(*config.Unleash.ExcludeFiles, wantExclusions) {
+		return errors.New("Gremlins config must exclude only the approved generated and vendor files")
+	}
+	wantMutants := map[string]bool{
+		"arithmetic-base": true, "conditionals-boundary": true,
+		"conditionals-negation": true, "increment-decrement": true,
+		"invert-assignments": false, "invert-bitwise": false,
+		"invert-bwassign": false, "invert-negatives": true,
+		"invert-logical": true, "invert-loopctrl": false,
+		"remove-self-assignments": false,
+	}
+	if len(config.Mutants) != len(wantMutants) {
+		return errors.New("Gremlins config has an incomplete or unsupported mutator set")
+	}
+	for name, wantEnabled := range wantMutants {
+		mutant, ok := config.Mutants[name]
+		if !ok || mutant.Enabled == nil || *mutant.Enabled != wantEnabled {
+			return fmt.Errorf("Gremlins config has an invalid %s mutator setting", name)
+		}
+	}
+	return nil
+}
+
+func ensureYAMLEOF(decoder *yaml.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("decode trailing Gremlins config: %w", err)
+	}
+	return errors.New("Gremlins config contains multiple YAML documents")
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func ReadReport(r io.Reader) (Report, error) {
@@ -278,6 +408,71 @@ func ensureEOF(dec *json.Decoder) error {
 	return nil
 }
 
+func ReadFullBaseline(r io.Reader) (FullBaseline, error) {
+	type fullBaselineWire struct {
+		SchemaVersion   int                    `json:"schema_version"`
+		Candidate       string                 `json:"candidate"`
+		ReportSHA256    string                 `json:"report_sha256"`
+		ConfigSHA256    string                 `json:"config_sha256"`
+		PolicySHA256    string                 `json:"policy_sha256"`
+		GoVersion       string                 `json:"go_version"`
+		GremlinsVersion string                 `json:"gremlins_version"`
+		CriticalDebt    *[]BaselineDisposition `json:"critical_debt"`
+	}
+	var wire fullBaselineWire
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		return FullBaseline{}, fmt.Errorf("decode full mutation baseline: %w", err)
+	}
+	if err := ensureEOF(dec); err != nil {
+		return FullBaseline{}, err
+	}
+	if wire.CriticalDebt == nil {
+		return FullBaseline{}, errors.New("full mutation baseline requires critical_debt")
+	}
+	baseline := FullBaseline{
+		SchemaVersion: wire.SchemaVersion, Candidate: wire.Candidate,
+		ReportSHA256: wire.ReportSHA256, ConfigSHA256: wire.ConfigSHA256,
+		PolicySHA256: wire.PolicySHA256, GoVersion: wire.GoVersion,
+		GremlinsVersion: wire.GremlinsVersion, CriticalDebt: *wire.CriticalDebt,
+	}
+	if baseline.SchemaVersion != 1 {
+		return FullBaseline{}, errors.New("full mutation baseline schema_version must be 1")
+	}
+	if len(baseline.Candidate) != 40 || !validHex(baseline.Candidate, 20) ||
+		!validHex(baseline.ReportSHA256, sha256.Size) ||
+		!validHex(baseline.ConfigSHA256, sha256.Size) ||
+		!validHex(baseline.PolicySHA256, sha256.Size) ||
+		baseline.GoVersion == "" || baseline.GremlinsVersion == "" {
+		return FullBaseline{}, errors.New("full mutation baseline has invalid provenance")
+	}
+	previous := ""
+	for i := range baseline.CriticalDebt {
+		entry := &baseline.CriticalDebt[i]
+		if entry.File == "" || entry.Line < 1 || entry.Column < 1 || entry.Mutant == "" || entry.Owner == "" ||
+			!validHex(entry.SourceHash, sha256.Size) {
+			return FullBaseline{}, errors.New("full mutation baseline has an invalid debt entry")
+		}
+		entry.Status = normalizeStatus(entry.Status)
+		entry.SourceHash = strings.ToLower(entry.SourceHash)
+		if entry.Status != "LIVED" && entry.Status != "NOT_COVERED" {
+			return FullBaseline{}, errors.New("full mutation baseline debt must be LIVED or NOT_COVERED")
+		}
+		key := mutationKey(entry.File, entry.Line, entry.Column, entry.Mutant)
+		if previous != "" && key <= previous {
+			return FullBaseline{}, errors.New("full mutation baseline debt must be sorted and unique")
+		}
+		previous = key
+	}
+	return baseline, nil
+}
+
+func validHex(value string, size int) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == size
+}
+
 func ReadEquivalents(r io.Reader) ([]Equivalent, error) {
 	var entries []Equivalent
 	scanner := bufio.NewScanner(r)
@@ -341,26 +536,67 @@ func validateEquivalent(entry Equivalent) error {
 	return nil
 }
 
-func Evaluate(root string, report Report, policy Policy, equivalents []Equivalent, scope string) (Result, error) {
-	if scope != "changed" && scope != "full" {
-		return Result{}, errors.New("mutation scope must be changed or full")
-	}
+func equivalentIndex(root string, equivalents []Equivalent) (map[string]Equivalent, error) {
 	equivalentKeys := make(map[string]Equivalent, len(equivalents))
 	for _, entry := range equivalents {
 		path := filepath.Join(root, filepath.FromSlash(entry.File))
 		contents, err := os.ReadFile(path)
 		if err != nil {
-			return Result{}, fmt.Errorf("read equivalent source %q: %w", entry.File, err)
+			return nil, fmt.Errorf("read equivalent source %q: %w", entry.File, err)
 		}
 		actual := fmt.Sprintf("%x", sha256.Sum256(contents))
 		if actual != entry.SourceHash {
-			return Result{}, fmt.Errorf("equivalent source hash mismatch for %s", entry.File)
+			return nil, fmt.Errorf("equivalent source hash mismatch for %s", entry.File)
 		}
 		key := mutationKey(entry.File, entry.Line, entry.Column, entry.Mutant)
 		if _, exists := equivalentKeys[key]; exists {
-			return Result{}, fmt.Errorf("duplicate equivalent approval for %s", key)
+			return nil, fmt.Errorf("duplicate equivalent approval for %s", key)
 		}
 		equivalentKeys[key] = entry
+	}
+	return equivalentKeys, nil
+}
+
+func ValidateEquivalentSources(root string, equivalents []Equivalent) error {
+	_, err := equivalentIndex(root, equivalents)
+	return err
+}
+
+func ValidateFullBaseline(root string, baseline FullBaseline, policy Policy) error {
+	seen := make(map[string]bool, len(baseline.CriticalDebt))
+	fileHashes := make(map[string]string)
+	for _, entry := range baseline.CriticalDebt {
+		key := mutationKey(entry.File, entry.Line, entry.Column, entry.Mutant)
+		if seen[key] {
+			return fmt.Errorf("duplicate full mutation baseline entry: %s", key)
+		}
+		seen[key] = true
+		if !isCritical(entry.File, policy.CriticalPaths) {
+			return fmt.Errorf("full mutation baseline contains noncritical debt: %s", key)
+		}
+		actual, exists := fileHashes[entry.File]
+		if !exists {
+			contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(entry.File)))
+			if err != nil {
+				return fmt.Errorf("read full mutation baseline source %q: %w", entry.File, err)
+			}
+			actual = SHA256(contents)
+			fileHashes[entry.File] = actual
+		}
+		if actual != entry.SourceHash {
+			return fmt.Errorf("full mutation baseline source hash mismatch for %s", entry.File)
+		}
+	}
+	return nil
+}
+
+func Evaluate(root string, report Report, policy Policy, equivalents []Equivalent, scope string) (Result, error) {
+	if scope != "changed" && scope != "full" {
+		return Result{}, errors.New("mutation scope must be changed or full")
+	}
+	equivalentKeys, err := equivalentIndex(root, equivalents)
+	if err != nil {
+		return Result{}, err
 	}
 
 	var critical, noncritical Counts
@@ -381,6 +617,9 @@ func Evaluate(root string, report Report, policy Policy, equivalents []Equivalen
 			switch normalizeStatus(mutant.Status) {
 			case "KILLED":
 				counts.Killed++
+				if _, ok := equivalentKeys[key]; ok {
+					dormant[key] = true
+				}
 			case "LIVED":
 				counts.Lived++
 				if _, ok := equivalentKeys[key]; ok {
@@ -429,11 +668,119 @@ func Evaluate(root string, report Report, policy Policy, equivalents []Equivalen
 		}
 	}
 	result.Violations = append(
-		checkTier("critical", result.Critical, policy.Critical, true),
-		checkTier("noncritical", result.Noncritical, policy.Noncritical, false)...,
+		checkTier("critical", result.Critical, policy.Critical, true, scope == "full"),
+		checkTier("noncritical", result.Noncritical, policy.Noncritical, false, scope == "full")...,
 	)
 	result.Passed = len(result.Violations) == 0
 	return result, nil
+}
+
+func ApplyFullBaseline(root string, result Result, report Report, policy Policy, equivalents []Equivalent, baseline FullBaseline) (Result, error) {
+	if err := ValidateFullBaseline(root, baseline, policy); err != nil {
+		return Result{}, err
+	}
+	baselineDebt := make(map[string]BaselineDisposition, len(baseline.CriticalDebt))
+	for _, entry := range baseline.CriticalDebt {
+		key := mutationKey(entry.File, entry.Line, entry.Column, entry.Mutant)
+		baselineDebt[key] = entry
+	}
+
+	equivalentKeys := make(map[string]bool, len(equivalents))
+	for _, entry := range equivalents {
+		equivalentKeys[mutationKey(entry.File, entry.Line, entry.Column, entry.Mutant)] = true
+	}
+	currentCritical := make(map[string]BaselineDisposition)
+	for _, file := range report.Files {
+		if !isCritical(file.FileName, policy.CriticalPaths) {
+			continue
+		}
+		for _, mutant := range file.Mutations {
+			key := mutationKey(file.FileName, mutant.Line, mutant.Column, mutant.Type)
+			status := normalizeStatus(mutant.Status)
+			currentCritical[key] = BaselineDisposition{
+				File: file.FileName, Line: mutant.Line, Column: mutant.Column,
+				Mutant: mutant.Type, Status: status,
+			}
+		}
+	}
+
+	assessment := FullBaselineAssessment{
+		Candidate: baseline.Candidate, ReportSHA256: baseline.ReportSHA256,
+		CriticalDebt: len(baseline.CriticalDebt),
+	}
+	for key, entry := range baselineDebt {
+		current, exists := currentCritical[key]
+		if !exists {
+			return Result{}, fmt.Errorf("full mutation baseline entry is missing from report: %s", key)
+		}
+		delete(currentCritical, key)
+		if current.Status == "LIVED" && equivalentKeys[key] {
+			assessment.Resolved++
+			continue
+		}
+		if !isCriticalDebtStatus(current.Status) {
+			assessment.Resolved++
+			continue
+		}
+		if criticalDebtRank(current.Status) <= criticalDebtRank(entry.Status) {
+			assessment.Remaining++
+			continue
+		}
+		assessment.Regressions = append(assessment.Regressions, MutationRegression{
+			File: current.File, Line: current.Line, Column: current.Column, Mutant: current.Mutant,
+			BaselineStatus: entry.Status, CurrentStatus: current.Status,
+		})
+	}
+	for key, current := range currentCritical {
+		if current.Status == "LIVED" && equivalentKeys[key] {
+			continue
+		}
+		if !isCriticalDebtStatus(current.Status) {
+			continue
+		}
+		assessment.Regressions = append(assessment.Regressions, MutationRegression{
+			File: current.File, Line: current.Line, Column: current.Column, Mutant: current.Mutant,
+			CurrentStatus: current.Status,
+		})
+	}
+	sort.Slice(assessment.Regressions, func(i, j int) bool {
+		left, right := assessment.Regressions[i], assessment.Regressions[j]
+		return mutationKey(left.File, left.Line, left.Column, left.Mutant) <
+			mutationKey(right.File, right.Line, right.Column, right.Mutant)
+	})
+
+	absolutePassed := result.Passed
+	result.AbsolutePassed = &absolutePassed
+	result.AbsoluteViolations = append([]string(nil), result.Violations...)
+	result.FullBaseline = &assessment
+	result.Violations = checkTier("noncritical", result.Noncritical, policy.Noncritical, false, true)
+	if len(assessment.Regressions) > 0 {
+		result.Violations = append(result.Violations, fmt.Sprintf(
+			"critical: %d mutation disposition regressions from full baseline", len(assessment.Regressions),
+		))
+	}
+	result.Passed = len(result.Violations) == 0
+	return result, nil
+}
+
+func isCriticalDebtStatus(status string) bool {
+	switch status {
+	case "KILLED", "NOT_VIABLE":
+		return false
+	default:
+		return true
+	}
+}
+
+func criticalDebtRank(status string) int {
+	switch normalizeStatus(status) {
+	case "LIVED":
+		return 1
+	case "NOT_COVERED":
+		return 2
+	default:
+		return 3
+	}
 }
 
 func normalizeStatus(status string) string {
@@ -486,8 +833,11 @@ func SHA256(contents []byte) string {
 	return fmt.Sprintf("%x", sha256.Sum256(contents))
 }
 
-func checkTier(name string, metrics Metrics, threshold Threshold, critical bool) []string {
+func checkTier(name string, metrics Metrics, threshold Threshold, critical, forbidSkipped bool) []string {
 	var violations []string
+	if forbidSkipped && metrics.Counts.Skipped > 0 {
+		violations = append(violations, fmt.Sprintf("%s: SKIPPED mutants are forbidden", name))
+	}
 	if metrics.Counts.TimedOut > 0 {
 		violations = append(violations, fmt.Sprintf("%s: TIMED OUT mutants are forbidden", name))
 	}

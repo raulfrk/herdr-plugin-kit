@@ -53,7 +53,34 @@ Equivalent mutants require an exact independently approved row in
 docs/mutation-baseline.md: file, line, column, symbol, mutator, original and
 replacement expressions, source SHA-256, linked hypothesis, proof, and
 reviewer. A source hash mismatch invalidates the approval. Equivalents change
-only the actionable denominator and never rewrite raw Gremlins counts.
+only the actionable denominator and never rewrite raw Gremlins counts. An
+approval may be dormant when the same exact mutant is KILLED by the broader
+full-suite test selection; this is an improvement, not an approval mismatch.
+
+Changed-scope mutation is the per-Bead implementation gate and applies the
+absolute tier thresholds above. Full mutation is a release-level gate. Without
+a `mutation-full-baseline.json`, it applies the same absolute thresholds. When
+a reviewed baseline exists, full mutation still reports those absolute
+thresholds but, until the recorded critical debt is retired, compares critical
+dispositions with that baseline: an existing `NOT_COVERED` mutant may improve to
+`LIVED`, and existing debt may become KILLED or NOT_VIABLE. A baseline entry
+missing from the current report makes the report incomplete and fails closed;
+it is not treated as resolved. A new critical `LIVED`, `NOT_COVERED`,
+`TIMED_OUT`, `SKIPPED`, or unknown disposition and any worsening of existing
+critical debt fail. Full mutation also rejects `SKIPPED` dispositions at both
+tiers. The noncritical tier always retains its absolute 85% adjusted-efficacy
+and 90% coverage thresholds.
+
+The full baseline binds its exact originating candidate and raw report hash,
+the Gremlins configuration and policy hashes, tool versions, and every debt
+entry's package owner and source-file SHA-256. Source drift invalidates the
+allowance before Gremlins is built or run. The baseline is never refreshed
+automatically. A reviewed, explicit, downward-only refresh may remove resolved
+debt or reconcile an intentional policy/configuration change, but may not
+absorb a regression or fuzzily remap a mutation. The owning debt Bead remains open
+until every critical survivor is killed or independently approved and every
+critical uncovered mutant is covered, at which point a final exact-candidate
+full run must meet the absolute 100%/100% critical target.
 
 ## Reproducibility and isolation
 
@@ -116,20 +143,27 @@ reported the mutant as `TIMED OUT` and completed in 6.3 seconds at coefficient
 baseline this bounds a stuck worker at roughly 93 seconds. `TIMED OUT` remains
 a hard gate failure at every tier.
 
-After each run, before/after SHA-256 manifests for every tracked file must
+Before the exclusive lock, worktree, or Gremlins build, `mutationgate
+preflight` validates the local configuration, policy, equivalent approvals,
+tool versions, and any full baseline source bindings. It performs no mutation
+work. After each run, before/after SHA-256 manifests for every tracked file must
 match and the worktree must contain no tracked or untracked drift. The Gremlins
 report, gate report, gate stderr, source manifests, and their SHA-256 manifest
-are copied to the ignored .artifacts/mutation/<candidate-commit>/ directory.
+are copied to the ignored
+`.artifacts/mutation/<candidate-commit>/<changed-or-full>/` directory. The
+runner refuses to overwrite an existing scope result for the same candidate.
 If the gate fails before producing its normal report, the runner writes a
 machine-readable failed result pointing to the preserved stderr. Normal gate
-reports record tool versions, candidate, scope/base, configuration hashes,
+reports record the raw report hash, tool versions, candidate, scope/base,
+configuration and baseline hashes, absolute and regression outcomes,
 thresholds, survivors, and approved-equivalent dispositions.
 
-Run targeted mutation tests for every bead with
-make mutation-changed BASE=<commit>, then downstream tests after merge. Run
-make mutation-full before the final acceptance bead and again after its final
-code commit, before live proof and release. Any later production change
-requires another full run.
+Run targeted mutation tests for every Bead with
+`make mutation-changed BASE=<commit>`, then downstream tests after merge. Run
+`make mutation-full` once the release candidate, affected live evidence, and
+review corrections have settled. Rerun it only when a later production,
+test-selection, tool, configuration, or policy change can affect its result.
+The final accepted full evidence must bind the exact release candidate.
 
 Wall-clock SLO tests run through `make test-timing` in an isolated package
 process. `make test` runs that lane after the functional suite. Coverage and

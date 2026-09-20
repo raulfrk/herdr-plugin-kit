@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,14 +22,16 @@ func main() {
 }
 
 func run(args []string, stdout io.Writer) error {
-	if len(args) == 0 || args[0] != "check" {
-		return errors.New("usage: mutationgate check --report FILE --policy FILE --baseline FILE [--output FILE]")
+	if len(args) == 0 || (args[0] != "check" && args[0] != "preflight") {
+		return errors.New("usage: mutationgate check --report FILE [options] | mutationgate preflight [options]")
 	}
-	flags := flag.NewFlagSet("check", flag.ContinueOnError)
+	command := args[0]
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	reportPath := flags.String("report", "", "Gremlins JSON report")
 	policyPath := flags.String("policy", "mutation-policy.json", "mutation policy")
 	baselinePath := flags.String("baseline", "docs/mutation-baseline.md", "equivalent-mutant approvals")
+	fullBaselinePath := flags.String("full-baseline", "", "release-level full mutation debt baseline")
 	outputPath := flags.String("output", "", "machine-readable gate result")
 	configPath := flags.String("config", ".gremlins.yaml", "Gremlins configuration")
 	candidate := flags.String("candidate", "", "tested candidate commit")
@@ -38,36 +41,30 @@ func run(args []string, stdout io.Writer) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if *reportPath == "" {
+	if command == "check" && *reportPath == "" {
 		return errors.New("--report is required")
 	}
-
-	reportFile, err := os.Open(*reportPath)
-	if err != nil {
-		return fmt.Errorf("open report: %w", err)
+	if *scope != "changed" && *scope != "full" {
+		return errors.New("--scope must be changed or full")
 	}
-	defer reportFile.Close()
-	report, err := mutation.ReadReport(reportFile)
+	if *fullBaselinePath != "" && *scope != "full" {
+		return errors.New("--full-baseline requires --scope full")
+	}
+
+	policyContents, err := os.ReadFile(*policyPath)
+	if err != nil {
+		return fmt.Errorf("read policy: %w", err)
+	}
+	policy, err := mutation.ReadPolicy(bytes.NewReader(policyContents))
 	if err != nil {
 		return err
 	}
 
-	policyFile, err := os.Open(*policyPath)
+	baselineContents, err := os.ReadFile(*baselinePath)
 	if err != nil {
-		return fmt.Errorf("open policy: %w", err)
+		return fmt.Errorf("read baseline: %w", err)
 	}
-	defer policyFile.Close()
-	policy, err := mutation.ReadPolicy(policyFile)
-	if err != nil {
-		return err
-	}
-
-	baselineFile, err := os.Open(*baselinePath)
-	if err != nil {
-		return fmt.Errorf("open baseline: %w", err)
-	}
-	defer baselineFile.Close()
-	equivalents, err := mutation.ReadEquivalents(baselineFile)
+	equivalents, err := mutation.ReadEquivalents(bytes.NewReader(baselineContents))
 	if err != nil {
 		return err
 	}
@@ -76,27 +73,88 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
-	result, err := mutation.Evaluate(filepath.Clean(root), report, policy, equivalents, *scope)
+	root = filepath.Clean(root)
+	configContents, err := os.ReadFile(*configPath)
+	if err != nil {
+		return fmt.Errorf("read Gremlins config: %w", err)
+	}
+	if err := mutation.ValidateGremlinsConfig(bytes.NewReader(configContents)); err != nil {
+		return err
+	}
+	configHash := mutation.SHA256(configContents)
+	policyHash := mutation.SHA256(policyContents)
+	baselineHash := mutation.SHA256(baselineContents)
+	if err := mutation.ValidateEquivalentSources(root, equivalents); err != nil {
+		return err
+	}
+	fullBaselineHash := ""
+	var fullBaseline mutation.FullBaseline
+	if *fullBaselinePath != "" {
+		fullBaselineContents, err := os.ReadFile(*fullBaselinePath)
+		if err != nil {
+			return fmt.Errorf("read full mutation baseline: %w", err)
+		}
+		fullBaseline, err = mutation.ReadFullBaseline(bytes.NewReader(fullBaselineContents))
+		if err != nil {
+			return err
+		}
+		if fullBaseline.ConfigSHA256 != configHash {
+			return errors.New("full mutation baseline Gremlins config hash does not match current config")
+		}
+		if fullBaseline.PolicySHA256 != policyHash {
+			return errors.New("full mutation baseline policy hash does not match current policy")
+		}
+		if fullBaseline.GoVersion != runtime.Version() {
+			return errors.New("full mutation baseline Go version does not match current toolchain")
+		}
+		if fullBaseline.GremlinsVersion != *gremlinsVersion {
+			return errors.New("full mutation baseline Gremlins version does not match current tool")
+		}
+		if err := mutation.ValidateFullBaseline(root, fullBaseline, policy); err != nil {
+			return err
+		}
+		fullBaselineHash = mutation.SHA256(fullBaselineContents)
+	}
+	if command == "preflight" {
+		encoded, err := json.MarshalIndent(struct {
+			Passed             bool   `json:"passed"`
+			Scope              string `json:"scope"`
+			ConfigSHA256       string `json:"config_sha256"`
+			PolicySHA256       string `json:"policy_sha256"`
+			BaselineSHA256     string `json:"baseline_sha256"`
+			FullBaselineSHA256 string `json:"full_baseline_sha256,omitempty"`
+		}{true, *scope, configHash, policyHash, baselineHash, fullBaselineHash}, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode preflight result: %w", err)
+		}
+		_, err = stdout.Write(append(encoded, '\n'))
+		return err
+	}
+
+	reportContents, err := os.ReadFile(*reportPath)
+	if err != nil {
+		return fmt.Errorf("read report: %w", err)
+	}
+	report, err := mutation.ReadReport(bytes.NewReader(reportContents))
 	if err != nil {
 		return err
 	}
-	configHash, err := fileHash(*configPath)
+	result, err := mutation.Evaluate(root, report, policy, equivalents, *scope)
 	if err != nil {
-		return fmt.Errorf("hash Gremlins config: %w", err)
+		return err
 	}
-	policyHash, err := fileHash(*policyPath)
-	if err != nil {
-		return fmt.Errorf("hash policy: %w", err)
-	}
-	baselineHash, err := fileHash(*baselinePath)
-	if err != nil {
-		return fmt.Errorf("hash baseline: %w", err)
+	if *fullBaselinePath != "" {
+		result, err = mutation.ApplyFullBaseline(root, result, report, policy, equivalents, fullBaseline)
+		if err != nil {
+			return err
+		}
 	}
 	result.Run = mutation.RunMetadata{
 		Candidate: *candidate, Base: *base, Scope: *scope,
 		GoVersion: runtime.Version(), GremlinsVersion: *gremlinsVersion,
 		ConfigSHA256: configHash, PolicySHA256: policyHash,
-		BaselineSHA256: baselineHash,
+		BaselineSHA256: baselineHash, FullBaselineSHA256: fullBaselineHash,
+		ReportSHA256: mutation.SHA256(reportContents),
 	}
 	result.Policy = policy
 	encoded, err := json.MarshalIndent(result, "", "  ")

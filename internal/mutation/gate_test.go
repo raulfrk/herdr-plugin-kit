@@ -21,6 +21,78 @@ func strictPolicy() Policy {
 	}
 }
 
+func fullBaseline(debt ...BaselineDisposition) FullBaseline {
+	for i := range debt {
+		if debt[i].SourceHash == "" {
+			debt[i].SourceHash = strings.Repeat("e", 64)
+		}
+	}
+	return FullBaseline{
+		SchemaVersion: 1, Candidate: strings.Repeat("a", 40),
+		ReportSHA256: strings.Repeat("b", 64), ConfigSHA256: strings.Repeat("c", 64),
+		PolicySHA256: strings.Repeat("d", 64), GoVersion: "go1.27.0",
+		GremlinsVersion: "v0.6.0", CriticalDebt: debt,
+	}
+}
+
+func sourceBoundDebt(t *testing.T, root string, entry BaselineDisposition) BaselineDisposition {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(entry.File))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("package fixture\n")
+	if err := os.WriteFile(path, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry.SourceHash = fmt.Sprintf("%x", sha256.Sum256(contents))
+	return entry
+}
+
+func TestReadFullBaselineValidatesProvenanceAndDebt(t *testing.T) {
+	valid := fullBaseline(BaselineDisposition{
+		File: "internal/a.go", Line: 2, Column: 3, Mutant: "ARITHMETIC_BASE",
+		Status: "lived", Owner: "internal/mutation",
+	})
+	encoded, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadFullBaseline(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CriticalDebt[0].Status != "LIVED" {
+		t.Fatalf("normalized status = %q", got.CriticalDebt[0].Status)
+	}
+
+	invalid := []string{
+		`{}`,
+		`{"schema_version":1,"candidate":"` + strings.Repeat("a", 40) + `","report_sha256":"` + strings.Repeat("b", 64) + `","config_sha256":"` + strings.Repeat("c", 64) + `","policy_sha256":"` + strings.Repeat("d", 64) + `","go_version":"go1.27.0","gremlins_version":"v0.6.0"}`,
+		strings.Replace(string(encoded), `"owner":"internal/mutation"`, `"owner":""`, 1),
+		strings.Replace(string(encoded), `"status":"lived"`, `"status":"TIMED_OUT"`, 1),
+		strings.TrimSuffix(string(encoded), "}") + `,"unexpected":true}`,
+		string(encoded) + `{}`,
+	}
+	for _, input := range invalid {
+		if _, err := ReadFullBaseline(strings.NewReader(input)); err == nil {
+			t.Fatalf("accepted invalid full baseline %s", input)
+		}
+	}
+
+	unsorted := fullBaseline(
+		BaselineDisposition{File: "internal/z.go", Line: 1, Column: 1, Mutant: "A", Status: "LIVED", Owner: "z"},
+		BaselineDisposition{File: "internal/a.go", Line: 1, Column: 1, Mutant: "A", Status: "LIVED", Owner: "a"},
+	)
+	encoded, err = json.Marshal(unsorted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFullBaseline(bytes.NewReader(encoded)); err == nil {
+		t.Fatal("accepted unsorted full baseline")
+	}
+}
+
 func TestReadReportRejectsUnknownFields(t *testing.T) {
 	_, err := ReadReport(strings.NewReader(`{"go_module":"example","files":[],"surprise":true}`))
 	if err == nil {
@@ -310,6 +382,37 @@ func TestEquivalentApprovalAdjustsOnlyActionableMetric(t *testing.T) {
 	}
 }
 
+func TestEquivalentApprovalMayBeDormantWhenMutantIsKilled(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "example.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("package internal\n")
+	if err := os.WriteFile(path, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := Equivalent{
+		File: "internal/example.go", Line: 4, Column: 11, Symbol: "Add",
+		Mutant: "ARITHMETIC_BASE", Original: "a + b", Replacement: "a - b",
+		SourceHash: fmt.Sprintf("%x", sha256.Sum256(source)), Hypothesis: "HYP-MUTATION-01",
+		Proof: "same result", Reviewer: "reviewer@example.invalid",
+	}
+	report := Report{Files: []ReportFile{{
+		FileName: "internal/example.go",
+		Mutations: []ReportMutation{{
+			Type: "ARITHMETIC_BASE", Status: "KILLED", Line: 4, Column: 11,
+		}},
+	}}}
+	result, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Passed || result.Critical.Counts.Equivalent != 0 {
+		t.Fatalf("dormant killed equivalent result = %+v", result)
+	}
+}
+
 func TestEquivalentApprovalDoesNotMatchSkippedMutant(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "internal", "example.go")
@@ -337,6 +440,24 @@ func TestEquivalentApprovalDoesNotMatchSkippedMutant(t *testing.T) {
 	result, err := Evaluate(root, report, strictPolicy(), []Equivalent{equivalent}, "changed")
 	if err != nil || !result.Passed || result.Critical.Counts.Skipped != 1 || result.Critical.Counts.Equivalent != 0 {
 		t.Fatalf("changed-scope dormant approval = %+v, %v", result, err)
+	}
+}
+
+func TestEvaluateRejectsSkippedMutantsOnlyInFullScope(t *testing.T) {
+	report := Report{Files: []ReportFile{{
+		FileName:  "internal/example.go",
+		Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11}},
+	}}}
+	full, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Passed || !strings.Contains(strings.Join(full.Violations, "\n"), "SKIPPED mutants are forbidden") {
+		t.Fatalf("full skipped result = %+v", full)
+	}
+	changed, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "changed")
+	if err != nil || !changed.Passed {
+		t.Fatalf("changed skipped result = %+v, %v", changed, err)
 	}
 }
 
@@ -552,5 +673,143 @@ func TestEvaluateRejectsMissingDuplicateAndUnmatchedApprovals(t *testing.T) {
 	if _, err := Evaluate(root, Report{}, strictPolicy(), []Equivalent{base}, "full"); err == nil ||
 		!strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("unmatched approval error = %v", err)
+	}
+}
+
+func TestApplyFullBaselineAllowsExistingOrImprovedCriticalDebt(t *testing.T) {
+	tests := []struct {
+		name           string
+		baselineStatus string
+		currentStatus  string
+		remaining      int
+		resolved       int
+		absolutePassed bool
+	}{
+		{name: "unchanged lived", baselineStatus: "LIVED", currentStatus: "LIVED", remaining: 1},
+		{name: "covered but lived", baselineStatus: "NOT_COVERED", currentStatus: "LIVED", remaining: 1},
+		{name: "killed", baselineStatus: "LIVED", currentStatus: "KILLED", resolved: 1, absolutePassed: true},
+		{name: "not viable", baselineStatus: "NOT_COVERED", currentStatus: "NOT_VIABLE", resolved: 1, absolutePassed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			entry := sourceBoundDebt(t, root, BaselineDisposition{
+				File: "internal/a.go", Line: 1, Column: 1, Mutant: "ARITHMETIC_BASE",
+				Status: test.baselineStatus, Owner: "internal",
+			})
+			report := Report{Files: []ReportFile{{
+				FileName: entry.File,
+				Mutations: []ReportMutation{{
+					Type: entry.Mutant, Status: test.currentStatus, Line: entry.Line, Column: entry.Column,
+				}},
+			}}}
+			absolute, err := Evaluate(root, report, strictPolicy(), nil, "full")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := ApplyFullBaseline(root, absolute, report, strictPolicy(), nil, fullBaseline(entry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Passed || result.AbsolutePassed == nil || *result.AbsolutePassed != test.absolutePassed ||
+				result.FullBaseline.Remaining != test.remaining || result.FullBaseline.Resolved != test.resolved {
+				t.Fatalf("baseline result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestApplyFullBaselineRejectsNewAndWorsenedCriticalDebt(t *testing.T) {
+	tests := []struct {
+		name           string
+		baselineStatus string
+		currentStatus  string
+	}{
+		{name: "worsened uncovered", baselineStatus: "LIVED", currentStatus: "NOT_COVERED"},
+		{name: "timed out", baselineStatus: "LIVED", currentStatus: "TIMED_OUT"},
+		{name: "unknown", baselineStatus: "LIVED", currentStatus: "future_status"},
+		{name: "skipped", baselineStatus: "LIVED", currentStatus: "SKIPPED"},
+		{name: "new lived", currentStatus: "LIVED"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			var debt []BaselineDisposition
+			if test.baselineStatus != "" {
+				debt = append(debt, sourceBoundDebt(t, root, BaselineDisposition{
+					File: "internal/a.go", Line: 1, Column: 1, Mutant: "ARITHMETIC_BASE",
+					Status: test.baselineStatus, Owner: "internal",
+				}))
+			} else if err := os.MkdirAll(filepath.Join(root, "internal"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			report := Report{Files: []ReportFile{{
+				FileName: "internal/a.go",
+				Mutations: []ReportMutation{{
+					Type: "ARITHMETIC_BASE", Status: test.currentStatus, Line: 1, Column: 1,
+				}},
+			}}}
+			absolute, err := Evaluate(root, report, strictPolicy(), nil, "full")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := ApplyFullBaseline(root, absolute, report, strictPolicy(), nil, fullBaseline(debt...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Passed || len(result.FullBaseline.Regressions) != 1 {
+				t.Fatalf("regression result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestApplyFullBaselineRejectsSourceDriftAndMissingReportEntry(t *testing.T) {
+	root := t.TempDir()
+	entry := sourceBoundDebt(t, root, BaselineDisposition{
+		File: "internal/a.go", Line: 1, Column: 1, Mutant: "ARITHMETIC_BASE",
+		Status: "LIVED", Owner: "internal",
+	})
+	baseline := fullBaseline(entry)
+	if err := os.WriteFile(filepath.Join(root, "internal/a.go"), []byte("package changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFullBaseline(root, Result{}, Report{}, strictPolicy(), nil, baseline); err == nil ||
+		!strings.Contains(err.Error(), "source hash mismatch") {
+		t.Fatalf("source drift error = %v", err)
+	}
+
+	entry = sourceBoundDebt(t, root, entry)
+	if _, err := ApplyFullBaseline(root, Result{}, Report{}, strictPolicy(), nil, fullBaseline(entry)); err == nil ||
+		!strings.Contains(err.Error(), "missing from report") {
+		t.Fatalf("missing report entry error = %v", err)
+	}
+}
+
+func TestApplyFullBaselineStillEnforcesNoncriticalThresholds(t *testing.T) {
+	report := Report{Files: []ReportFile{{
+		FileName:  "pkg/a.go",
+		Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "LIVED", Line: 1, Column: 1}},
+	}}}
+	absolute, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyFullBaseline(t.TempDir(), absolute, report, strictPolicy(), nil, fullBaseline())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Passed || len(result.Violations) == 0 || len(result.FullBaseline.Regressions) != 0 {
+		t.Fatalf("noncritical failure result = %+v", result)
+	}
+}
+
+func TestApplyFullBaselineRejectsNoncriticalBaselineEntry(t *testing.T) {
+	entry := BaselineDisposition{
+		File: "pkg/a.go", Line: 1, Column: 1, Mutant: "ARITHMETIC_BASE",
+		Status: "LIVED", Owner: "pkg",
+	}
+	if _, err := ApplyFullBaseline(t.TempDir(), Result{}, Report{}, strictPolicy(), nil, fullBaseline(entry)); err == nil {
+		t.Fatal("accepted noncritical entry in full baseline")
 	}
 }
