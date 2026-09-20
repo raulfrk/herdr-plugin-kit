@@ -953,6 +953,18 @@ func TestRouteClientV2AcceptsOperationIdentityAndV1RejectsItsShape(t *testing.T)
 	}
 }
 
+func TestDecodeRouteInvokeResultV2RequiresOperationIDFieldForAccepted(t *testing.T) {
+	for name, operationID := range map[string]string{"missing": "", "null": `,"operation_id":null`} {
+		t.Run(name, func(t *testing.T) {
+			payload := fmt.Appendf(nil, `{"target_plugin":"proof.provider","route_revision":"rev-proof-1","action_id":"new","outcome":"accepted","focus":"preserved"%s}`, operationID)
+			var result RouteInvokeResult
+			if err := decodeRouteInvokeResult(ActionRouteInterfaceVersionV2, payload, &result); err == nil {
+				t.Fatalf("decoder accepted %s operation_id", name)
+			}
+		})
+	}
+}
+
 func TestRouteClientV2DoesNotRetryAfterLostInvokeReply(t *testing.T) {
 	call := RouteInvokeCall{TargetPlugin: "proof.provider", Origin: routeOrigin(), RouteRevision: "rev-proof-1", ActionID: "new", Keys: []string{"n"}, Deadline: time.Now().Add(time.Second)}
 	calls := 0
@@ -1077,6 +1089,9 @@ func TestRouteValidationBoundsAndEnums(t *testing.T) {
 	}
 	for _, execution := range []RouteExecution{
 		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "operation-1"},
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: strings.Repeat("o", maxRouteOperationIDBytes)},
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "!"},
+		{Outcome: RouteAccepted, Focus: RouteFocusPreserved, OperationID: "~"},
 		{Outcome: RouteUIHandoff, Focus: RouteFocusChanged},
 		{Outcome: RouteCompleted, Focus: RouteFocusPreserved},
 	} {
