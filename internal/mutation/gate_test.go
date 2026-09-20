@@ -21,6 +21,72 @@ func strictPolicy() Policy {
 	}
 }
 
+const validGremlinsYAML = `unleash:
+  integration: false
+  workers: 0
+  timeout-coefficient: 3
+  threshold:
+    efficacy: 0
+    mutant-coverage: 0
+  exclude-files:
+    - '(^|/)vendor/'
+    - '_generated[.]go$'
+    - '[.]gen[.]go$'
+    - '[.]pb[.]go$'
+mutants:
+  arithmetic-base: {enabled: true}
+  conditionals-boundary: {enabled: true}
+  conditionals-negation: {enabled: true}
+  increment-decrement: {enabled: true}
+  invert-assignments: {enabled: false}
+  invert-bitwise: {enabled: false}
+  invert-bwassign: {enabled: false}
+  invert-negatives: {enabled: true}
+  invert-logical: {enabled: true}
+  invert-loopctrl: {enabled: false}
+  remove-self-assignments: {enabled: false}
+`
+
+func TestValidateGremlinsConfigRejectsMalformedMissingAndWeakenedSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "malformed", input: "unleash: [\n"},
+		{name: "multiple documents", input: validGremlinsYAML + "---\n{}\n"},
+		{name: "malformed trailing document", input: validGremlinsYAML + "---\n[\n"},
+		{name: "missing unleash", input: strings.Replace(validGremlinsYAML, strings.Split(validGremlinsYAML, "mutants:")[0], "", 1)},
+		{name: "missing integration", input: strings.Replace(validGremlinsYAML, "  integration: false\n", "", 1)},
+		{name: "missing workers", input: strings.Replace(validGremlinsYAML, "  workers: 0\n", "", 1)},
+		{name: "missing timeout", input: strings.Replace(validGremlinsYAML, "  timeout-coefficient: 3\n", "", 1)},
+		{name: "missing threshold", input: strings.Replace(validGremlinsYAML, "  threshold:\n    efficacy: 0\n    mutant-coverage: 0\n", "", 1)},
+		{name: "missing efficacy", input: strings.Replace(validGremlinsYAML, "    efficacy: 0\n", "", 1)},
+		{name: "missing coverage", input: strings.Replace(validGremlinsYAML, "    mutant-coverage: 0\n", "", 1)},
+		{name: "missing exclusions", input: strings.Replace(validGremlinsYAML, "  exclude-files:\n    - '(^|/)vendor/'\n    - '_generated[.]go$'\n    - '[.]gen[.]go$'\n    - '[.]pb[.]go$'\n", "", 1)},
+		{name: "integration enabled", input: strings.Replace(validGremlinsYAML, "integration: false", "integration: true", 1)},
+		{name: "fixed workers", input: strings.Replace(validGremlinsYAML, "workers: 0", "workers: 1", 1)},
+		{name: "short timeout", input: strings.Replace(validGremlinsYAML, "timeout-coefficient: 3", "timeout-coefficient: 2", 1)},
+		{name: "engine efficacy", input: strings.Replace(validGremlinsYAML, "efficacy: 0", "efficacy: 85", 1)},
+		{name: "engine coverage", input: strings.Replace(validGremlinsYAML, "mutant-coverage: 0", "mutant-coverage: 90", 1)},
+		{name: "extra exclusion", input: strings.Replace(validGremlinsYAML, "    - '[.]pb[.]go$'", "    - '[.]pb[.]go$'\n    - 'handwritten[.]go$'", 1)},
+		{name: "changed exclusion", input: strings.Replace(validGremlinsYAML, "_generated[.]go$", "generated[.]go$", 1)},
+		{name: "missing mutator", input: strings.Replace(validGremlinsYAML, "  arithmetic-base: {enabled: true}\n", "", 1)},
+		{name: "unknown mutator", input: strings.Replace(validGremlinsYAML, "arithmetic-base:", "surprise:", 1)},
+		{name: "missing enabled", input: strings.Replace(validGremlinsYAML, "arithmetic-base: {enabled: true}", "arithmetic-base: {}", 1)},
+		{name: "wrong enabled", input: strings.Replace(validGremlinsYAML, "arithmetic-base: {enabled: true}", "arithmetic-base: {enabled: false}", 1)},
+	}
+	if err := ValidateGremlinsConfig(strings.NewReader(validGremlinsYAML)); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateGremlinsConfig(strings.NewReader(test.input)); err == nil {
+				t.Fatal("accepted invalid Gremlins config")
+			}
+		})
+	}
+}
+
 func fullBaseline(debt ...BaselineDisposition) FullBaseline {
 	for i := range debt {
 		if debt[i].SourceHash == "" {
@@ -90,6 +156,44 @@ func TestReadFullBaselineValidatesProvenanceAndDebt(t *testing.T) {
 	}
 	if _, err := ReadFullBaseline(bytes.NewReader(encoded)); err == nil {
 		t.Fatal("accepted unsorted full baseline")
+	}
+}
+
+func TestReadFullBaselineRejectsEveryInvalidProvenanceAndDebtField(t *testing.T) {
+	validDebt := BaselineDisposition{
+		File: "internal/a.go", Line: 2, Column: 3, Mutant: "ARITHMETIC_BASE",
+		Status: "LIVED", Owner: "internal/mutation", SourceHash: strings.Repeat("e", 64),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*FullBaseline)
+	}{
+		{name: "candidate length", mutate: func(b *FullBaseline) { b.Candidate = strings.Repeat("a", 39) }},
+		{name: "candidate hex", mutate: func(b *FullBaseline) { b.Candidate = strings.Repeat("z", 40) }},
+		{name: "report hash", mutate: func(b *FullBaseline) { b.ReportSHA256 = "bad" }},
+		{name: "config hash", mutate: func(b *FullBaseline) { b.ConfigSHA256 = "bad" }},
+		{name: "policy hash", mutate: func(b *FullBaseline) { b.PolicySHA256 = "bad" }},
+		{name: "Go version", mutate: func(b *FullBaseline) { b.GoVersion = "" }},
+		{name: "Gremlins version", mutate: func(b *FullBaseline) { b.GremlinsVersion = "" }},
+		{name: "file", mutate: func(b *FullBaseline) { b.CriticalDebt[0].File = "" }},
+		{name: "line", mutate: func(b *FullBaseline) { b.CriticalDebt[0].Line = 0 }},
+		{name: "column", mutate: func(b *FullBaseline) { b.CriticalDebt[0].Column = 0 }},
+		{name: "mutant", mutate: func(b *FullBaseline) { b.CriticalDebt[0].Mutant = "" }},
+		{name: "owner", mutate: func(b *FullBaseline) { b.CriticalDebt[0].Owner = "" }},
+		{name: "source hash", mutate: func(b *FullBaseline) { b.CriticalDebt[0].SourceHash = "bad" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			baseline := fullBaseline(validDebt)
+			test.mutate(&baseline)
+			encoded, err := json.Marshal(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadFullBaseline(bytes.NewReader(encoded)); err == nil {
+				t.Fatal("accepted invalid full baseline")
+			}
+		})
 	}
 }
 
@@ -444,20 +548,24 @@ func TestEquivalentApprovalDoesNotMatchSkippedMutant(t *testing.T) {
 }
 
 func TestEvaluateRejectsSkippedMutantsOnlyInFullScope(t *testing.T) {
-	report := Report{Files: []ReportFile{{
-		FileName:  "internal/example.go",
-		Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11}},
-	}}}
-	full, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if full.Passed || !strings.Contains(strings.Join(full.Violations, "\n"), "SKIPPED mutants are forbidden") {
-		t.Fatalf("full skipped result = %+v", full)
-	}
-	changed, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "changed")
-	if err != nil || !changed.Passed {
-		t.Fatalf("changed skipped result = %+v, %v", changed, err)
+	for _, file := range []string{"internal/example.go", "pkg/example.go"} {
+		t.Run(file, func(t *testing.T) {
+			report := Report{Files: []ReportFile{{
+				FileName:  file,
+				Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "SKIPPED", Line: 4, Column: 11}},
+			}}}
+			full, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "full")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if full.Passed || !strings.Contains(strings.Join(full.Violations, "\n"), "SKIPPED mutants are forbidden") {
+				t.Fatalf("full skipped result = %+v", full)
+			}
+			changed, err := Evaluate(t.TempDir(), report, strictPolicy(), nil, "changed")
+			if err != nil || !changed.Passed {
+				t.Fatalf("changed skipped result = %+v, %v", changed, err)
+			}
+		})
 	}
 }
 
@@ -783,6 +891,51 @@ func TestApplyFullBaselineRejectsSourceDriftAndMissingReportEntry(t *testing.T) 
 	if _, err := ApplyFullBaseline(root, Result{}, Report{}, strictPolicy(), nil, fullBaseline(entry)); err == nil ||
 		!strings.Contains(err.Error(), "missing from report") {
 		t.Fatalf("missing report entry error = %v", err)
+	}
+}
+
+func TestApplyFullBaselineTreatsEquivalentLivedMutantsAsResolved(t *testing.T) {
+	root := t.TempDir()
+	entry := sourceBoundDebt(t, root, BaselineDisposition{
+		File: "internal/a.go", Line: 1, Column: 1, Mutant: "ARITHMETIC_BASE",
+		Status: "LIVED", Owner: "internal",
+	})
+	equivalent := Equivalent{File: entry.File, Line: entry.Line, Column: entry.Column, Mutant: entry.Mutant}
+	report := Report{Files: []ReportFile{{
+		FileName:  entry.File,
+		Mutations: []ReportMutation{{Type: entry.Mutant, Status: "LIVED", Line: entry.Line, Column: entry.Column}},
+	}}}
+	absolute := Result{Noncritical: calculate(Counts{})}
+	result, err := ApplyFullBaseline(root, absolute, report, strictPolicy(), []Equivalent{equivalent}, fullBaseline(entry))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Passed || result.FullBaseline.Resolved != 1 || result.FullBaseline.Remaining != 0 {
+		t.Fatalf("baseline equivalent result = %+v", result)
+	}
+
+	result, err = ApplyFullBaseline(root, absolute, report, strictPolicy(), []Equivalent{equivalent}, fullBaseline())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Passed || len(result.FullBaseline.Regressions) != 0 {
+		t.Fatalf("new equivalent result = %+v", result)
+	}
+}
+
+func TestApplyFullBaselineSortsMultipleRegressions(t *testing.T) {
+	report := Report{Files: []ReportFile{
+		{FileName: "internal/z.go", Mutations: []ReportMutation{{Type: "INVERT_LOGICAL", Status: "LIVED", Line: 2, Column: 1}}},
+		{FileName: "internal/a.go", Mutations: []ReportMutation{{Type: "ARITHMETIC_BASE", Status: "NOT_COVERED", Line: 1, Column: 1}}},
+	}}
+	result, err := ApplyFullBaseline(t.TempDir(), Result{}, report, strictPolicy(), nil, fullBaseline())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Passed || len(result.FullBaseline.Regressions) != 2 ||
+		result.FullBaseline.Regressions[0].File != "internal/a.go" ||
+		result.FullBaseline.Regressions[1].File != "internal/z.go" {
+		t.Fatalf("sorted regressions = %+v", result.FullBaseline.Regressions)
 	}
 }
 

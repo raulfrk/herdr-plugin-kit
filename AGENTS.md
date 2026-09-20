@@ -32,6 +32,13 @@ instructions. Preserve the acceptance criteria and thresholds in
    review corrections have settled. Finish with acceptance of the complete
    evidence; do not introduce new scope at this boundary.
 
+At each transition between focused, live, review, broad, and mutation phases,
+reconcile the next action with the active leaf Bead's acceptance criteria and
+latest decision-relevant notes. Record new evidence on that owning leaf. Update
+parent or related Beads only when the evidence changes their own status,
+dependency, acceptance criteria, or release decision; do not duplicate the
+same checkpoint across the graph.
+
 Do not repeat a successful check merely because a commit was created, context
 was compacted, a reviewer was dispatched, or an artifact was renamed. Before
 rerunning it, identify the changed input, failure, or unresolved concern that
