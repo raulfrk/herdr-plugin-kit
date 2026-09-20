@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/raulfrk/herdr-plugin-kit/internal/mutation"
 	"github.com/raulfrk/herdr-plugin-kit/manifest"
 )
 
@@ -43,8 +45,10 @@ func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
 	}
 	slices.Sort(files)
 	want := []string{
-		"LICENSE", "README.md", "cmd/example.search/main.go", "cmd/example.search/main_test.go", "config.example.toml",
-		"go.mod", "herdr-plugin.toml", "plugin-kit.json",
+		".gitignore", ".gremlins.yaml", "LICENSE", "Makefile", "README.md",
+		"cmd/example.search/main.go", "cmd/example.search/main_test.go", "config.example.toml",
+		"docs/mutation-baseline.md", "docs/test-strategy.md", "go.mod", "herdr-plugin.toml",
+		"mutation-policy.json", "plugin-kit.json", "scripts/mutation-run",
 	}
 	if !slices.Equal(files, want) {
 		t.Fatalf("generated files = %v, want %v", files, want)
@@ -85,6 +89,196 @@ func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
 	if !bytes.Equal(license, wantLicense) {
 		t.Fatal("generated license differs from embedded Apache-2.0 text")
 	}
+}
+
+func TestValidateRejectsMissingOrWeakenedMutationContract(t *testing.T) {
+	contract, err := generatedMutationContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	weaken := map[string]func([]byte) []byte{
+		".gitignore": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("/.artifacts/"), []byte("/artifacts/"), 1)
+		},
+		".gremlins.yaml": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("workers: 0"), []byte("workers: 1"), 1)
+		},
+		"Makefile": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("mutation-full:"), []byte("mutation-release:"), 1)
+		},
+		"docs/mutation-baseline.md": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("source SHA-256 is mandatory"), []byte("source SHA-256 is optional"), 1)
+		},
+		"docs/test-strategy.md": func(data []byte) []byte {
+			return bytes.Replace(data, []byte("100% adjusted efficacy"), []byte("99% adjusted efficacy"), 1)
+		},
+		"mutation-policy.json": func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"adjusted_efficacy": 100`), []byte(`"adjusted_efficacy": 99`), 1)
+		},
+		"scripts/mutation-run": func(data []byte) []byte {
+			return append(data, []byte("# bypass\n")...)
+		},
+	}
+	for name := range contract {
+		name := name
+		t.Run(name+" missing", func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "plugin")
+			if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+				t.Fatal(err)
+			}
+			if err := Validate(root); err == nil {
+				t.Fatal("missing mutation contract passed validation")
+			}
+		})
+		t.Run(name+" changed", func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "plugin")
+			if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, filepath.FromSlash(name))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, weaken[name](data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := Validate(root); err == nil {
+				t.Fatal("changed mutation contract passed validation")
+			}
+		})
+	}
+}
+
+func TestValidateAllowsNonWeakeningMutationContractExtensions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugin")
+	if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+		t.Fatal(err)
+	}
+	appendFile := func(name, text string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(name))
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(text); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendFile(".gitignore", "/local-output/\n")
+	appendFile(".gremlins.yaml", "# local explanation\n")
+	appendFile("Makefile", "\n.PHONY: test\ntest:\n\tgo test ./...\n")
+	appendFile("docs/mutation-baseline.md", "\n")
+	appendFile("docs/test-strategy.md", "\n## Local checks\n\nRun project-specific integration checks.\n")
+
+	policyPath := filepath.Join(root, "mutation-policy.json")
+	var policy map[string]any
+	decodeJSONFile(t, policyPath, &policy)
+	policy["critical_paths"] = append(policy["critical_paths"].([]any), "pkg/critical/")
+	policy["noncritical"].(map[string]any)["adjusted_efficacy"] = float64(90)
+	policy["noncritical"].(map[string]any)["mutant_coverage"] = float64(95)
+	writeJSONFile(t, policyPath, policy)
+	if err := Validate(root); err != nil {
+		t.Fatalf("non-weakening mutation contract extensions rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsAdditionalProtectedMakeTargetDefinitions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugin")
+	if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "Makefile")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("\nmutation-full :\n\t@true\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(root); err == nil {
+		t.Fatal("whitespace-variant mutation target override passed validation")
+	}
+}
+
+func TestValidateOptionalFullMutationBaseline(t *testing.T) {
+	newProject := func(t *testing.T) (string, map[string]any) {
+		t.Helper()
+		root := filepath.Join(t.TempDir(), "plugin")
+		if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+			t.Fatal(err)
+		}
+		config, err := os.ReadFile(filepath.Join(root, ".gremlins.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := os.ReadFile(filepath.Join(root, "mutation-policy.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return root, map[string]any{
+			"schema_version": 1,
+			"candidate":      strings.Repeat("a", 40), "report_sha256": strings.Repeat("b", 64),
+			"config_sha256": mutation.SHA256(config), "policy_sha256": mutation.SHA256(policy),
+			"go_version": runtime.Version(), "gremlins_version": "v0.6.0+hpk.constants.fixture",
+			"critical_debt": []any{},
+		}
+	}
+	t.Run("valid empty debt", func(t *testing.T) {
+		root, baseline := newProject(t)
+		writeJSONFile(t, filepath.Join(root, "mutation-full-baseline.json"), baseline)
+		if err := Validate(root); err != nil {
+			t.Fatalf("valid full mutation baseline rejected: %v", err)
+		}
+	})
+	for name, mutate := range map[string]func(string, map[string]any){
+		"config binding": func(_ string, baseline map[string]any) {
+			baseline["config_sha256"] = strings.Repeat("c", 64)
+		},
+		"policy binding": func(_ string, baseline map[string]any) {
+			baseline["policy_sha256"] = strings.Repeat("c", 64)
+		},
+		"toolchain binding": func(_ string, baseline map[string]any) {
+			baseline["go_version"] = "go0.0"
+		},
+		"source binding": func(_ string, baseline map[string]any) {
+			baseline["critical_debt"] = []any{map[string]any{
+				"file": "cmd/example.valid/main.go", "line": 1, "column": 1,
+				"mutant": "ARITHMETIC_BASE", "status": "LIVED", "owner": "cmd/example.valid",
+				"source_sha256": strings.Repeat("d", 64),
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, baseline := newProject(t)
+			mutate(root, baseline)
+			writeJSONFile(t, filepath.Join(root, "mutation-full-baseline.json"), baseline)
+			if err := Validate(root); err == nil {
+				t.Fatal("invalid full mutation baseline passed validation")
+			}
+		})
+	}
+	t.Run("malformed", func(t *testing.T) {
+		root, _ := newProject(t)
+		if err := os.WriteFile(filepath.Join(root, "mutation-full-baseline.json"), []byte("not JSON"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(root); err == nil {
+			t.Fatal("malformed full mutation baseline passed validation")
+		}
+	})
 }
 
 func TestGeneratedProjectBuildsWithoutChangingItsGoMod(t *testing.T) {

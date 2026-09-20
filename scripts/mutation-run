@@ -12,9 +12,11 @@ if [ "$mode" = changed ] && [ -z "$base" ]; then
   exit 2
 fi
 
+tool_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 repo=$(git rev-parse --show-toplevel)
-candidate=$(git rev-parse HEAD)
-if [ -n "$(git status --porcelain)" ]; then
+repo=$(CDPATH= cd -- "$repo" && pwd -P)
+candidate=$(git -C "$repo" rev-parse HEAD)
+if [ -n "$(git -C "$repo" status --porcelain)" ]; then
   echo "mutation testing requires a clean committed candidate" >&2
   exit 2
 fi
@@ -42,7 +44,7 @@ if [ "$workers" -lt 1 ] || [ "$workers" -gt "$half" ]; then
   exit 2
 fi
 
-patch_hash=$(sha256sum "$repo/testtools/gremlins-constant-coverage.patch")
+patch_hash=$(sha256sum "$tool_root/testtools/gremlins-constant-coverage.patch")
 patch_hash=${patch_hash%% *}
 gremlins_version="v0.6.0+hpk.constants.$patch_hash"
 artifact_parent="$repo/.artifacts/mutation/$candidate"
@@ -57,8 +59,30 @@ set -- preflight --policy mutation-policy.json \
 if [ "$mode" = full ] && [ -e "$repo/mutation-full-baseline.json" ]; then
   set -- "$@" --full-baseline mutation-full-baseline.json
 fi
-(cd "$repo" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
-  go run ./cmd/mutationgate "$@" >/dev/null)
+classifier=./cmd/mutationgate
+if [ "$repo" != "$tool_root" ]; then
+  kit_module=github.com/raulfrk/herdr-plugin-kit
+  selected_tool_root=$(cd "$repo" && GOWORK=off GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+    go list -mod=readonly -m -f '{{if .Replace}}HERDR_REPLACED{{else}}{{.Dir}}{{end}}' "$kit_module")
+  if [ "$selected_tool_root" = HERDR_REPLACED ]; then
+    echo "mutation testing requires the pinned Herdr Plugin Kit module without replace" >&2
+    exit 2
+  fi
+  selected_tool_root=$(CDPATH= cd -- "$selected_tool_root" && pwd -P)
+  if [ "$selected_tool_root" != "$tool_root" ]; then
+    echo "mutation runner does not match the selected Herdr Plugin Kit module" >&2
+    exit 2
+  fi
+  kit_version=$(cd "$repo" && GOWORK=off GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+    go list -mod=readonly -m -f '{{.Version}}' "$kit_module")
+  case "$kit_version" in
+    v[0-9]*) ;;
+    *) echo "cannot resolve a pinned Herdr Plugin Kit version" >&2; exit 2 ;;
+  esac
+  classifier="$kit_module/cmd/mutationgate@$kit_version"
+fi
+(cd "$repo" && GOWORK=off GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+  go run "$classifier" "$@" >/dev/null)
 
 lock=${TMPDIR:-/tmp}/herdr-plugin-kit-exclusive.lock
 if ! mkdir "$lock" 2>/dev/null; then
@@ -81,7 +105,7 @@ run_root=$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-kit-mutation.XXXXXX")
 worktree="$run_root/worktree"
 
 gremlins_bin="$run_root/gremlins"
-GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} "$repo/scripts/gremlins-build" "$gremlins_bin"
+GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} sh "$tool_root/scripts/gremlins-build" "$gremlins_bin"
 
 git -C "$repo" worktree add --detach "$worktree" "$candidate" >/dev/null
 report="$run_root/gremlins.json"
@@ -127,8 +151,8 @@ set -- check --report "$report" --policy mutation-policy.json \
 if [ "$mode" = full ] && [ -e "$worktree/mutation-full-baseline.json" ]; then
   set -- "$@" --full-baseline mutation-full-baseline.json
 fi
-(cd "$worktree" && GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
-  go run ./cmd/mutationgate "$@" 2>"$gate_stderr") || gate_status=$?
+(cd "$worktree" && GOWORK=off GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.0} \
+  go run "$classifier" "$@" 2>"$gate_stderr") || gate_status=$?
 if [ ! -f "$gate_report" ]; then
   printf '%s\n' \
     '{"passed":false,"violations":["mutationgate failed before producing a gate report; see gate.stderr"]}' \

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -563,6 +564,10 @@ func ValidateEquivalentSources(root string, equivalents []Equivalent) error {
 }
 
 func ValidateFullBaseline(root string, baseline FullBaseline, policy Policy) error {
+	return ValidateFullBaselineFS(os.DirFS(root), baseline, policy)
+}
+
+func ValidateFullBaselineFS(root fs.FS, baseline FullBaseline, policy Policy) error {
 	seen := make(map[string]bool, len(baseline.CriticalDebt))
 	fileHashes := make(map[string]string)
 	for _, entry := range baseline.CriticalDebt {
@@ -576,7 +581,7 @@ func ValidateFullBaseline(root string, baseline FullBaseline, policy Policy) err
 		}
 		actual, exists := fileHashes[entry.File]
 		if !exists {
-			contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(entry.File)))
+			contents, err := fs.ReadFile(root, filepath.ToSlash(entry.File))
 			if err != nil {
 				return fmt.Errorf("read full mutation baseline source %q: %w", entry.File, err)
 			}

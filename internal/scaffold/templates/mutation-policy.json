@@ -1,0 +1,14 @@
+{
+  "critical_paths": [
+    "cmd/",
+    "internal/"
+  ],
+  "critical": {
+    "adjusted_efficacy": 100,
+    "mutant_coverage": 100
+  },
+  "noncritical": {
+    "adjusted_efficacy": 85,
+    "mutant_coverage": 90
+  }
+}

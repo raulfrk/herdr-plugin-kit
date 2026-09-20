@@ -23,6 +23,8 @@ const (
 	releaseCandidateEnvironment = "HERDR_PLUGIN_KIT_RELEASE_CANDIDATE"
 	releaseCandidateModule      = "github.com/raulfrk/herdr-plugin-kit"
 	releaseCandidateVersion     = "v0.3.0"
+	gremlinsModule              = "github.com/go-gremlins/gremlins"
+	gremlinsVersion             = "v0.6.0"
 )
 
 func TestUnpublishedV030ProxyConsumers(t *testing.T) {
@@ -35,20 +37,25 @@ func TestUnpublishedV030ProxyConsumers(t *testing.T) {
 	}
 	sha := releaseCommand(t, root, nil, "git", "rev-parse", "HEAD")
 	proxy := filepath.Join(t.TempDir(), "proxy")
-	seedDependencyProxy(t, root, proxy)
+	toolSeed := filepath.Join(t.TempDir(), "tool-seed")
+	writeReleaseFile(t, filepath.Join(toolSeed, "go.mod"), []byte(
+		"module example.com/herdr/tool-seed\n\ngo 1.27\n\nrequire "+gremlinsModule+" "+gremlinsVersion+"\n",
+	))
+	seedDependencyProxy(t, proxy, root, toolSeed)
 	publishCandidateToProxy(t, root, proxy)
 
 	for _, consumer := range []struct {
-		name      string
-		pluginID  string
-		attention bool
+		name        string
+		pluginID    string
+		attention   bool
+		verifyTools bool
 	}{
-		{name: "default", pluginID: "release-default"},
+		{name: "default", pluginID: "release-default", verifyTools: true},
 		{name: "attention-shaped", pluginID: "attention-shaped", attention: true},
 	} {
 		consumer := consumer
 		t.Run(consumer.name, func(t *testing.T) {
-			verifyProxyConsumer(t, proxy, consumer.pluginID, consumer.attention)
+			verifyProxyConsumer(t, proxy, consumer.pluginID, consumer.attention, consumer.verifyTools)
 		})
 	}
 	if t.Failed() {
@@ -66,23 +73,24 @@ func releaseRepositoryRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(source), ".."))
 }
 
-func seedDependencyProxy(t *testing.T, root, proxy string) {
+func seedDependencyProxy(t *testing.T, proxy string, roots ...string) {
 	t.Helper()
-	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
-	if err != nil {
-		t.Fatalf("read candidate dependencies: %v", err)
-	}
-	parsed, err := modfile.Parse("go.mod", goMod, nil)
-	if err != nil {
-		t.Fatalf("parse candidate dependencies: %v", err)
-	}
-
-	moduleCache := releaseCommand(t, root, nil, "go", "env", "GOMODCACHE")
-	queue := make([]module.Version, 0, len(parsed.Require))
-	selected := make(map[module.Version]bool, len(parsed.Require))
-	for _, requirement := range parsed.Require {
-		queue = append(queue, requirement.Mod)
-		selected[requirement.Mod] = true
+	moduleCache := releaseCommand(t, roots[0], nil, "go", "env", "GOMODCACHE")
+	var queue []module.Version
+	selected := make(map[module.Version]bool)
+	for _, root := range roots {
+		goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+		if err != nil {
+			t.Fatalf("read dependencies from %s: %v", root, err)
+		}
+		parsed, err := modfile.Parse(filepath.Join(root, "go.mod"), goMod, nil)
+		if err != nil {
+			t.Fatalf("parse dependencies from %s: %v", root, err)
+		}
+		for _, requirement := range parsed.Require {
+			queue = append(queue, requirement.Mod)
+			selected[requirement.Mod] = true
+		}
 	}
 	visited := make(map[module.Version]bool)
 	versions := make(map[string]map[string]bool)
@@ -198,7 +206,7 @@ func publishCandidateToProxy(t *testing.T, root, proxy string) {
 	releaseCommand(t, root, nil, "git", "archive", "--format=zip", "--prefix="+releaseCandidateModule+"@"+releaseCandidateVersion+"/", "--output="+zipPath, "HEAD")
 }
 
-func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
+func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention, verifyTools bool) {
 	t.Helper()
 	root := t.TempDir()
 	consumer := filepath.Join(root, pluginID)
@@ -234,6 +242,9 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
 	if moduleLine != wantModuleLine {
 		t.Fatalf("candidate module = %q, want %q", moduleLine, wantModuleLine)
 	}
+	if verifyTools {
+		verifyDistributedMutationTooling(t, consumer, environment)
+	}
 	releaseCommand(t, consumer, environment, "go", "test", "./...")
 	releaseCommand(t, consumer, environment, "go", "test", "-race", "./...")
 	releaseCommand(t, consumer, environment, "go", "build", "./...")
@@ -244,6 +255,71 @@ func verifyProxyConsumer(t *testing.T, proxy, pluginID string, attention bool) {
 	if bytes.Contains(goMod, []byte("replace ")) || bytes.Contains(goMod, []byte("replace\n")) {
 		t.Fatalf("generated consumer contains a replace directive:\n%s", goMod)
 	}
+}
+
+func verifyDistributedMutationTooling(t *testing.T, consumer string, environment []string) {
+	t.Helper()
+	kitDirectory := releaseCommand(t, consumer, environment, "go", "list", "-mod=readonly", "-m", "-f", "{{.Dir}}", releaseCandidateModule)
+	for _, name := range []string{
+		"scripts/mutation-run", "scripts/gremlins-build", "testtools/gremlins-constant-coverage.patch",
+	} {
+		info, err := os.Stat(filepath.Join(kitDirectory, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatalf("stat distributed mutation asset %s: %v", name, err)
+		}
+		if info.Mode().Perm()&0o222 != 0 {
+			t.Fatalf("distributed mutation asset %s is writable in the module cache", name)
+		}
+	}
+	releaseCommand(t, consumer, environment, "sh", "-n", filepath.Join(kitDirectory, "scripts", "mutation-run"))
+	releaseCommand(t, consumer, environment, "sh", "-n", filepath.Join(consumer, "scripts", "mutation-run"))
+
+	patch := filepath.Join(kitDirectory, "testtools", "gremlins-constant-coverage.patch")
+	patchHash := strings.Fields(releaseCommand(t, consumer, environment, "sha256sum", patch))[0]
+	patchedVersion := gremlinsVersion + "+hpk.constants." + patchHash
+	classifier := releaseCandidateModule + "/cmd/mutationgate@" + releaseCandidateVersion
+
+	preflightStart := time.Now()
+	releaseCommand(t, consumer, environment, "go", "run", classifier,
+		"preflight", "--policy", "mutation-policy.json",
+		"--baseline", "docs/mutation-baseline.md", "--config", ".gremlins.yaml",
+		"--scope", "full", "--gremlins-version", patchedVersion,
+	)
+	preflightDuration := time.Since(preflightStart)
+
+	gremlinsBinary := filepath.Join(t.TempDir(), "gremlins")
+	toolStart := time.Now()
+	releaseCommand(t, consumer, environment, "sh", filepath.Join(kitDirectory, "scripts", "gremlins-build"), gremlinsBinary)
+	toolDuration := time.Since(toolStart)
+	if version := releaseCommand(t, consumer, environment, gremlinsBinary, "--version"); !strings.Contains(version, gremlinsVersion) {
+		t.Fatalf("patched Gremlins version = %q, want it to contain %q", version, gremlinsVersion)
+	}
+
+	report := filepath.Join(t.TempDir(), "gremlins.json")
+	writeReleaseFile(t, report, []byte(`{"go_module":"example.com/herdr/release-default","files":[{"file_name":"cmd/release-default/main.go","mutations":[{"type":"ARITHMETIC_BASE","status":"KILLED","line":1,"column":1}]}],"test_efficacy":100,"mutations_coverage":100,"mutants_total":1,"mutants_killed":1,"mutants_lived":0,"mutants_not_viable":0,"mutants_not_covered":0,"elapsed_time":1,"mutator_statistics":{"arithmetic_base":1}}`))
+	gateReport := filepath.Join(t.TempDir(), "gate.json")
+	classificationStart := time.Now()
+	releaseCommand(t, consumer, environment, "go", "run", classifier,
+		"check", "--report", report, "--policy", "mutation-policy.json",
+		"--baseline", "docs/mutation-baseline.md", "--config", ".gremlins.yaml",
+		"--candidate", strings.Repeat("a", 40), "--base", strings.Repeat("b", 40),
+		"--scope", "changed", "--gremlins-version", patchedVersion, "--output", gateReport,
+	)
+	classificationDuration := time.Since(classificationStart)
+	var result struct {
+		Passed bool `json:"passed"`
+	}
+	data, err := os.ReadFile(gateReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decode generated-consumer classification: %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("generated-consumer classification did not pass: %s", data)
+	}
+	t.Logf("mutation tooling timings: preflight=%s tool_preparation=%s classification=%s", preflightDuration, toolDuration, classificationDuration)
 }
 
 func makeReleaseCacheRemovable(t *testing.T, moduleCache string) {

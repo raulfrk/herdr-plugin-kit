@@ -18,11 +18,13 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/raulfrk/herdr-plugin-kit/internal/mutation"
 	"github.com/raulfrk/herdr-plugin-kit/manifest"
 	"golang.org/x/mod/modfile"
 )
@@ -35,7 +37,7 @@ const (
 	maxFileBytes = 1 << 20
 )
 
-//go:embed templates/LICENSE templates/main.go.tmpl templates/main_test.go.tmpl
+//go:embed templates/*
 var templates embed.FS
 
 type Options struct {
@@ -354,8 +356,10 @@ func generatedManifest(options Options) manifest.Manifest {
 
 func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest) error {
 	commandDirectory := filepath.Join("cmd", options.ID)
-	if err := root.MkdirAll(commandDirectory, 0o755); err != nil {
-		return fmt.Errorf("create command directory: %w", err)
+	for _, directory := range []string{commandDirectory, "docs", "scripts"} {
+		if err := root.MkdirAll(directory, 0o755); err != nil {
+			return fmt.Errorf("create project directory %s: %w", directory, err)
+		}
 	}
 	herdr := generatedHerdrManifest(options)
 	herdrData, err := toml.Marshal(herdr)
@@ -383,6 +387,10 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 	if err != nil {
 		return err
 	}
+	mutationContract, err := generatedMutationContract()
+	if err != nil {
+		return err
+	}
 	buildCommand := generatedBuildCommand("./plugin", options.ID)
 	readme := "# " + options.Name + "\n\n" + options.Description + "\n\n" +
 		"Generated with Herdr Plugin Kit " + KitVersion + ".\n\n" +
@@ -394,7 +402,8 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 		"Recorded shortcuts become bindings when the draft is saved; key-checker input is never saved, and captured values or paste contents are not logged. " +
 		"The Debug UI registers semantic previews and exports a bounded owner-only `debug-report.json`; activation writes an owner-only `last-activation.json` receipt under `HERDR_PLUGIN_STATE_DIR`. " +
 		"Instances sharing configuration must use distinct state directories because diagnostics have one writer per state directory. " +
-		"Copy `config.example.toml` to `HERDR_PLUGIN_CONFIG_DIR/config.toml` for local configuration.\n"
+		"Copy `config.example.toml` to `HERDR_PLUGIN_CONFIG_DIR/config.toml` for local configuration. " +
+		"Run `make mutation-changed BASE=<verified-base-commit>` for implementation work and `make mutation-full` only after a release candidate is otherwise stable; see `docs/test-strategy.md`.\n"
 	files := map[string][]byte{
 		"herdr-plugin.toml":   herdrData,
 		"plugin-kit.json":     manifestData,
@@ -405,12 +414,15 @@ func writeProject(root *os.Root, options Options, kitManifest manifest.Manifest)
 		filepath.Join("cmd", options.ID, "main.go"):      mainData,
 		filepath.Join("cmd", options.ID, "main_test.go"): mainTestData,
 	}
+	for name, data := range mutationContract {
+		files[name] = data
+	}
 	for name, data := range files {
 		if err := writeFile(root, name, data); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
-	return syncDirectory(root, commandDirectory, "cmd", ".")
+	return syncDirectory(root, commandDirectory, "cmd", "docs", "scripts", ".")
 }
 
 func generatedHerdrManifest(options Options) herdrManifest {
@@ -499,6 +511,9 @@ func validateOpened(rootFS *os.Root) error {
 	if err := validateContracts(kitManifest, herdr); err != nil {
 		return err
 	}
+	if err := validateMutationContract(rootFS); err != nil {
+		return err
+	}
 	license, err := readRegular(rootFS, "LICENSE")
 	if err != nil {
 		return err
@@ -567,6 +582,139 @@ func validateOpened(rootFS *os.Root) error {
 	}
 	_, err = readRegular(rootFS, filepath.Join("cmd", kitManifest.PluginID, "main_test.go"))
 	return err
+}
+
+func generatedMutationContract() (map[string][]byte, error) {
+	files := map[string]string{
+		".gitignore":                "templates/gitignore",
+		".gremlins.yaml":            "templates/gremlins.yaml",
+		"Makefile":                  "templates/Makefile",
+		"docs/mutation-baseline.md": "templates/mutation-baseline.md",
+		"docs/test-strategy.md":     "templates/test-strategy.md",
+		"mutation-policy.json":      "templates/mutation-policy.json",
+		"scripts/mutation-run":      "templates/mutation-run.sh",
+	}
+	contract := make(map[string][]byte, len(files))
+	for name, templateName := range files {
+		data, err := templates.ReadFile(templateName)
+		if err != nil {
+			return nil, fmt.Errorf("read mutation contract template %s: %w", templateName, err)
+		}
+		contract[name] = data
+	}
+	return contract, nil
+}
+
+func validateMutationContract(rootFS *os.Root) error {
+	contract, err := generatedMutationContract()
+	if err != nil {
+		return err
+	}
+	contents := make(map[string][]byte, len(contract))
+	for name := range contract {
+		got, err := readRegular(rootFS, name)
+		if err != nil {
+			return err
+		}
+		contents[name] = got
+	}
+	if !bytes.Equal(contents["scripts/mutation-run"], contract["scripts/mutation-run"]) {
+		return errors.New("scripts/mutation-run differs from the generated mutation contract")
+	}
+	if err := mutation.ValidateGremlinsConfig(bytes.NewReader(contents[".gremlins.yaml"])); err != nil {
+		return fmt.Errorf(".gremlins.yaml: %w", err)
+	}
+	policy, err := mutation.ReadPolicy(bytes.NewReader(contents["mutation-policy.json"]))
+	if err != nil {
+		return fmt.Errorf("mutation-policy.json: %w", err)
+	}
+	if policy.Critical.AdjustedEfficacy != 100 || policy.Critical.MutantCoverage != 100 ||
+		policy.Noncritical.AdjustedEfficacy < 85 || policy.Noncritical.MutantCoverage < 90 {
+		return errors.New("mutation-policy.json weakens the generated mutation thresholds")
+	}
+	for _, required := range []string{"cmd/", "internal/"} {
+		if !slices.Contains(policy.CriticalPaths, required) {
+			return fmt.Errorf("mutation-policy.json omits required critical path %q", required)
+		}
+	}
+	if !hasExactLine(contents[".gitignore"], "/.artifacts/") {
+		return errors.New(".gitignore omits mutation artifacts")
+	}
+	makefile := contents["Makefile"]
+	if !bytes.Contains(makefile, contract["Makefile"]) ||
+		countMakeTargetDefinitions(makefile, "mutation-changed") != 1 ||
+		countMakeTargetDefinitions(makefile, "mutation-full") != 1 {
+		return errors.New("Makefile differs from the generated mutation targets")
+	}
+	if !bytes.Contains(contents["docs/test-strategy.md"], contract["docs/test-strategy.md"]) {
+		return errors.New("docs/test-strategy.md omits the generated mutation strategy")
+	}
+	if !bytes.HasPrefix(contents["docs/mutation-baseline.md"], contract["docs/mutation-baseline.md"]) {
+		return errors.New("docs/mutation-baseline.md omits the generated approval contract")
+	}
+	if _, err := mutation.ReadEquivalents(bytes.NewReader(contents["docs/mutation-baseline.md"])); err != nil {
+		return fmt.Errorf("docs/mutation-baseline.md: %w", err)
+	}
+	if err := validateOptionalFullBaseline(rootFS, contents, policy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func countMakeTargetDefinitions(data []byte, target string) int {
+	count := 0
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		left, _, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		for defined := range strings.FieldsSeq(left) {
+			if defined == target {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func validateOptionalFullBaseline(rootFS *os.Root, contents map[string][]byte, policy mutation.Policy) error {
+	const name = "mutation-full-baseline.json"
+	if _, err := rootFS.Lstat(name); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect %s: %w", name, err)
+	}
+	data, err := readRegular(rootFS, name)
+	if err != nil {
+		return err
+	}
+	baseline, err := mutation.ReadFullBaseline(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if baseline.ConfigSHA256 != mutation.SHA256(contents[".gremlins.yaml"]) {
+		return errors.New("mutation-full-baseline.json Gremlins config hash does not match current config")
+	}
+	if baseline.PolicySHA256 != mutation.SHA256(contents["mutation-policy.json"]) {
+		return errors.New("mutation-full-baseline.json policy hash does not match current policy")
+	}
+	if baseline.GoVersion != runtime.Version() {
+		return errors.New("mutation-full-baseline.json Go version does not match current toolchain")
+	}
+	if err := mutation.ValidateFullBaselineFS(rootFS.FS(), baseline, policy); err != nil {
+		return fmt.Errorf("mutation-full-baseline.json: %w", err)
+	}
+	return nil
+}
+
+func hasExactLine(data []byte, want string) bool {
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func productionImports(rootFS *os.Root, entryDirectory, modulePath string) (map[string]bool, error) {
