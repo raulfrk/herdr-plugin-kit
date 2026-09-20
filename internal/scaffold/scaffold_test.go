@@ -192,25 +192,38 @@ func TestValidateAllowsNonWeakeningMutationContractExtensions(t *testing.T) {
 }
 
 func TestValidateRejectsAdditionalProtectedMakeTargetDefinitions(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "plugin")
-	if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(root, "Makefile")
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteString("\nmutation-full :\n\t@true\n"); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := Validate(root); err == nil {
-		t.Fatal("whitespace-variant mutation target override passed validation")
-	}
+	t.Run("additional target", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "plugin")
+		if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "Makefile")
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString("\nmutation-full :\n\t@true\n"); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(root); err == nil {
+			t.Fatal("whitespace-variant mutation target override passed validation")
+		}
+	})
+	t.Run("required recipe drift", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "plugin")
+		if err := Generate(Options{ID: "example.valid", Name: "Valid", Output: root}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "Makefile")
+		mutateTextAll(t, path, "GOTOOLCHAIN ?= go1.27.0", "GOTOOLCHAIN?= go1.27.0")
+		if err := Validate(root); err == nil {
+			t.Fatal("required mutation recipe drift passed validation")
+		}
+	})
 }
 
 func TestValidateOptionalFullMutationBaseline(t *testing.T) {
