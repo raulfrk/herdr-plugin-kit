@@ -91,6 +91,65 @@ func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
 	}
 }
 
+func TestGeneratedMutationWrapperDownloadsPinnedKitBeforeResolvingDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugin")
+	if err := Generate(Options{ID: "example.wrapper", Name: "Wrapper", Output: root}); err != nil {
+		t.Fatal(err)
+	}
+
+	testRoot := t.TempDir()
+	binDir := filepath.Join(testRoot, "bin")
+	kitDir := filepath.Join(testRoot, "kit")
+	marker := filepath.Join(testRoot, "downloaded")
+	result := filepath.Join(testRoot, "result")
+	if err := os.MkdirAll(filepath.Join(kitDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo := `#!/bin/sh
+case " $* " in
+  *" {{if .Replace}}HERDR_REPLACED{{else}}{{.Path}}@{{.Version}}{{end}} "*)
+    echo "github.com/raulfrk/herdr-plugin-kit@v0.3.0" ;;
+  *" mod download github.com/raulfrk/herdr-plugin-kit@v0.3.0 ")
+    : > "$HERDR_TEST_MARKER" ;;
+  *" {{.Dir}} "*)
+    test -f "$HERDR_TEST_MARKER" || exit 91
+    echo "$HERDR_TEST_KIT_DIR" ;;
+  *) echo "unexpected fake go invocation: $*" >&2; exit 92 ;;
+esac
+`
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := `#!/bin/sh
+printf '%s\n' "$*" > "$HERDR_TEST_RESULT"
+`
+	if err := os.WriteFile(filepath.Join(kitDir, "scripts", "mutation-run"), []byte(runner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("sh", filepath.Join(root, "scripts", "mutation-run"), "changed", "verified-base")
+	command.Dir = root
+	command.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"HERDR_TEST_KIT_DIR="+kitDir,
+		"HERDR_TEST_MARKER="+marker,
+		"HERDR_TEST_RESULT="+result,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generated wrapper failed: %v\n%s", err, output)
+	}
+	got, err := os.ReadFile(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "changed verified-base\n" {
+		t.Fatalf("runner arguments = %q", got)
+	}
+}
+
 func TestValidateRejectsMissingOrWeakenedMutationContract(t *testing.T) {
 	contract, err := generatedMutationContract()
 	if err != nil {
