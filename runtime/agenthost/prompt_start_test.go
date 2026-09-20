@@ -413,6 +413,17 @@ func TestValidatePromptStartRejectsInvalidExplicitCodexPolicy(t *testing.T) {
 	}
 }
 
+func TestValidatePromptStartRejectsTimeoutAboveMaximum(t *testing.T) {
+	request := PromptStartRequest{
+		Argv:         []string{"omp"},
+		Directory:    "/tmp/project",
+		ReadyTimeout: MaxForkReadyTimeout + time.Nanosecond,
+	}
+	if _, kind, err := validatePromptStart(request); !errors.Is(err, ErrPromptInvalid) || kind != "" {
+		t.Fatalf("kind=%q error=%v", kind, err)
+	}
+}
+
 func TestPromptStarterOpenCodeLaunchFailureDeletesOnlyPrecreatedSession(t *testing.T) {
 	topology := &fakeTopology{launchErr: errors.New("launch failed")}
 	sessions := &fakeOpenCodePromptSessions{id: "ses_created"}

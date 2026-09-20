@@ -637,6 +637,53 @@ func TestCodexServiceInstallRejectsNativeDaemonAndConflictingFiles(t *testing.T)
 			t.Fatalf("err=%v", err)
 		}
 	})
+	t.Run("native daemon appears after lock beside partial installation", func(t *testing.T) {
+		fixture := newCodexServiceFixture(t)
+		if err := os.Remove(fixture.paths.UnitPath); err != nil {
+			t.Fatal(err)
+		}
+		descriptorBefore, err := os.ReadFile(fixture.paths.DescriptorPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checks := 0
+		fixture.service.nativeDaemonActive = func(context.Context, string) (bool, error) {
+			checks++
+			return checks == 2, nil
+		}
+		fixture.runner.run = func(_ context.Context, executable string, args []string) (command.Result, error) {
+			switch {
+			case executable == fixture.descriptor.Executable && reflect.DeepEqual(args, []string{"--version"}):
+				return command.Result{Stdout: []byte("codex-cli " + SupportedCodexVersion + "\n")}, nil
+			case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "show-environment"}):
+				return command.Result{}, nil
+			case executable == "loginctl" && reflect.DeepEqual(args, []string{"show-user", "1000", "--property=Linger", "--value"}):
+				return command.Result{Stdout: []byte("yes\n")}, nil
+			case executable == "systemd-analyze" && reflect.DeepEqual(args, []string{"verify", fixture.paths.UnitPath}):
+				return command.Result{}, nil
+			case executable == "systemctl" && reflect.DeepEqual(args, codexSystemdShowArgs(fixture.paths.unitName())):
+				return serviceShowForDescriptor(fixture.paths, fixture.descriptor, "active", "running", 42, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+			case executable == "systemctl" && reflect.DeepEqual(args, []string{"--user", "daemon-reload"}):
+				return command.Result{}, nil
+			default:
+				return command.Result{}, errors.New("unexpected command")
+			}
+		}
+
+		if _, err := fixture.service.Install(context.Background(), CodexServiceInstallOptions{Executable: fixture.descriptor.Executable, CodexHome: fixture.descriptor.CodexHome}); !errors.Is(err, ErrCodexServiceMigrationRequired) {
+			t.Fatalf("err=%v", err)
+		}
+		if checks != 2 {
+			t.Fatalf("native-daemon checks=%d, want 2", checks)
+		}
+		if _, err := os.Stat(fixture.paths.UnitPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("partial native-daemon rejection wrote unit: %v", err)
+		}
+		descriptorAfter, err := os.ReadFile(fixture.paths.DescriptorPath)
+		if err != nil || !reflect.DeepEqual(descriptorAfter, descriptorBefore) {
+			t.Fatalf("partial native-daemon rejection changed descriptor err=%v", err)
+		}
+	})
 	t.Run("dropin", func(t *testing.T) {
 		fixture := newCodexServiceInstallFixture(t)
 		fixture.runner.run = fixture.normalInstallRunner()

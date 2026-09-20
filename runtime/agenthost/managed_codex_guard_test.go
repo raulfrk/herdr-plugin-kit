@@ -210,6 +210,31 @@ func TestAwaitSafeSessionChangeRejectsEachStableReadDriftWithoutInput(t *testing
 	}
 }
 
+func TestAwaitSafeSessionChangeRejectsSecondForegroundProcessReplacement(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	process := sessionProcess(source.CWD)
+	replacement := process
+	replacement.PID++
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.topology = &fakeManagedTopology{inspectedSeq: []sessionhost.ForegroundProcess{process, replacement}}
+	if _, err := launcher.awaitSafeSessionChange(context.Background(), source, managedServiceSnapshot()); !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("replacement process error=%v", err)
+	}
+}
+
+func TestValidateSafeSourceRejectsCrossSessionSource(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	source.SessionName = "other"
+	launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+	if err := launcher.validateSafeSource(source, 0); !errors.Is(err, ErrManagedUnsupported) {
+		t.Fatalf("cross-session source error=%v", err)
+	}
+}
+
 func sessionProcess(cwd string) sessionhost.ForegroundProcess {
 	return sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: cwd, Argv: []string{"codex", "--remote", "unix:///tmp/shared.sock"}}
 }

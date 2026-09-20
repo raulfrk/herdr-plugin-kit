@@ -55,3 +55,42 @@ func TestOpenCodePromptSessionRejectsProtocolDrift(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenCodePromptSessionRejectsInformationalCreateResponse(t *testing.T) {
+	const body = `{"id":"ses_created","directory":"/tmp/project","parentID":null}`
+	server := openCodeSwitchingProtocolServer(t, body)
+	configured := OpenCodeServer{URL: server.URL, Directory: "/tmp/project"}
+	status, got, err := openCodeSessionRequest(context.Background(), configured, http.MethodPost, "/session", []byte("{}"))
+	if err != nil || status != http.StatusSwitchingProtocols || string(got) != body {
+		t.Fatalf("switching response status=%d body=%q error=%v", status, got, err)
+	}
+	if _, err := (nativeOpenCodePromptSessions{}).Create(context.Background(), configured); err == nil {
+		t.Fatal("informational create response was accepted")
+	}
+}
+
+func openCodeSwitchingProtocolServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		hijacker, ok := response.(http.Hijacker)
+		if !ok {
+			t.Error("test server does not support connection hijacking")
+			return
+		}
+		connection, buffered, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack response: %v", err)
+			return
+		}
+		defer connection.Close()
+		if _, err := fmt.Fprintf(buffered, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: hpk-test\r\n\r\n%s", body); err != nil {
+			t.Errorf("write switching response: %v", err)
+			return
+		}
+		if err := buffered.Flush(); err != nil {
+			t.Errorf("flush switching response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}

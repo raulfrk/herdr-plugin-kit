@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -129,6 +130,54 @@ func TestValidateRequirementsResponseRejectsEachRelevantPolicyDrift(t *testing.T
 	}
 }
 
+func TestValidateRequirementsResponsePreservesOptionalRequirementBoundaries(t *testing.T) {
+	preflight := managedPreflight("/tmp/project")
+	preflight.ApprovalsReviewer = "user"
+	preflight.DefaultPermissionProfile = "team"
+
+	if err := validateRequirementsResponse(map[string]json.RawMessage{
+		"requirements": json.RawMessage(`{"allowedApprovalPolicies":["never"]}`),
+	}, managedPolicy(), preflight); err != nil {
+		t.Fatalf("optional profile and model requirements error=%v", err)
+	}
+
+	emptyProfile := preflight
+	emptyProfile.DefaultPermissionProfile = ""
+	if err := validateRequirementsResponse(map[string]json.RawMessage{
+		"requirements": json.RawMessage(`{"allowedPermissionProfiles":{"":true}}`),
+	}, managedPolicy(), emptyProfile); err == nil {
+		t.Fatal("empty effective permission profile was allowed")
+	}
+	if err := validateRequirementsResponse(map[string]json.RawMessage{
+		"requirements": json.RawMessage(`{"defaultPermissions":""}`),
+	}, managedPolicy(), emptyProfile); err == nil {
+		t.Fatal("empty required default permission was allowed")
+	}
+	if err := validateRequirementsResponse(map[string]json.RawMessage{
+		"requirements": json.RawMessage(`{"autoReview":[]}`),
+	}, managedPolicy(), preflight); err == nil {
+		t.Fatal("malformed auto-review requirement was allowed")
+	}
+	if err := validateRequirementsResponse(map[string]json.RawMessage{
+		"requirements": json.RawMessage(`{"autoReview":{"requiredOnModels":["other-model"]}}`),
+	}, managedPolicy(), preflight); err != nil {
+		t.Fatalf("unrelated auto-review requirement error=%v", err)
+	}
+}
+
+func TestOptionalCodexRequirementValuesRemainOptional(t *testing.T) {
+	if err := requireAllowedString(nil, "never"); err != nil {
+		t.Fatalf("absent allowed-values requirement error=%v", err)
+	}
+	preflight := managedPreflight("/tmp/project")
+	if err := validateModelRequirements(json.RawMessage(`{}`), managedPolicy(), preflight); err != nil {
+		t.Fatalf("absent new-thread requirement error=%v", err)
+	}
+	if err := validateModelRequirements(json.RawMessage(`{"newThread":{}}`), managedPolicy(), preflight); err != nil {
+		t.Fatalf("absent new-thread field error=%v", err)
+	}
+}
+
 func TestCodexEffectiveResponsePreservesPermissionProfileProvenance(t *testing.T) {
 	extends := "base"
 	reasoning := "medium"
@@ -148,6 +197,11 @@ func TestCodexEffectiveResponsePreservesPermissionProfileProvenance(t *testing.T
 	if err != nil || effective.PermissionProfile != "team" || effective.PermissionProfileExtends != "base" || effective.SandboxMode != "danger-full-access" {
 		t.Fatalf("effective=%+v error=%v", effective, err)
 	}
+	response.ModelProvider = "other"
+	if _, err := response.effective(managedOriginalID); err == nil {
+		t.Fatal("model-provider mismatch accepted")
+	}
+	response.ModelProvider = "openai"
 	response.RuntimeWorkspaceRoots = []string{"relative"}
 	if _, err := response.effective(managedOriginalID); err == nil {
 		t.Fatal("relative runtime root accepted")
@@ -793,6 +847,12 @@ func TestRequiredPolicyComparisonCoversEqualAndRootDrift(t *testing.T) {
 				t.Fatalf("drift=%q", drift)
 			}
 		})
+	}
+}
+
+func TestValidCodexThreadIDAcceptsExactMaximumLength(t *testing.T) {
+	if !validCodexThreadID(strings.Repeat("a", maxIdentityBytes)) {
+		t.Fatal("exact maximum thread ID was rejected")
 	}
 }
 

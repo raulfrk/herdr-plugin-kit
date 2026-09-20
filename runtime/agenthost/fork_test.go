@@ -154,6 +154,13 @@ func TestForkComposesSupportedNativeArgv(t *testing.T) {
 	}
 }
 
+func TestComposeForkArgvRejectsRelativeOMPSourceSession(t *testing.T) {
+	source := forkAgent("omp", "w1:p1", "relative-session.jsonl", "/tmp/project")
+	if _, _, err := composeForkArgv(ForkRequest{Source: source, Profile: ForkProfile{Executable: "omp"}}); !errors.Is(err, ErrUnsupportedFork) {
+		t.Fatalf("relative OMP source error=%v", err)
+	}
+}
+
 func TestForkOptionMatricesRejectOwnedAndAmbiguousArguments(t *testing.T) {
 	tests := []struct {
 		kind, value, executable, socket string

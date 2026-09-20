@@ -456,6 +456,15 @@ func TestEmptyCodexComposerRejectsSingleAndMultilineDrafts(t *testing.T) {
 	}
 }
 
+func TestCodexComposerParsersInspectTheFirstAndOnlyLine(t *testing.T) {
+	if !exactCodexSingleLineDraft("› /status", "/status") {
+		t.Fatal("single-line status draft was rejected")
+	}
+	if composer, ok := codexComposer("› /status"); !ok || composer != "/status" {
+		t.Fatalf("single-line composer=%q ok=%t", composer, ok)
+	}
+}
+
 func TestExactCodexStatusDraftAcceptsObserved01540MenuAndRejectsAmbiguity(t *testing.T) {
 	observed := "header\n\x1b[1m›\x1b[0m /status\n\n  /status      show current session configuration and token usage\n  /\x1b[0m\x1b[1mstatus\x1b[0mline  \x1b[0m\x1b[2mconfigure which items appear in the status line\x1b[0m"
 	compact := "header\n\x1b[1m›\x1b[0m /status\n\n  \x1b[1m\x1b[38;5;6m/status      show current session configuration and token\x1b[0m\n  \x1b[1m\x1b[38;5;6m             usage\x1b[0m"
@@ -640,6 +649,22 @@ func TestDiscoverManagedIdentityAcceptsReportedSessionOnlyAfterStableEmptyCompos
 	}
 }
 
+func TestDiscoverManagedIdentityRejectsSecondNonQuiescentAgentRead(t *testing.T) {
+	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	agent := managedAgent(target, "/tmp/project", managedNewID, false)
+	busy := agent
+	busy.Status = "working"
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, agent), {Stdout: managedEmptyComposer("header")},
+		managedAgentResult(t, busy), {Stdout: managedEmptyComposer("header")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	launcher.topology = &fakeManagedTopology{}
+	if _, _, err := launcher.discoverManagedIdentity(managedIdentityTestContext(t), target, "/tmp/project", []string{"codex"}, managedServiceSnapshot(), managedPolicy()); !errors.Is(err, ErrManagedPaneBusy) {
+		t.Fatalf("non-quiescent second read error=%v", err)
+	}
+}
+
 func TestDiscoverManagedIdentityPreservesSecondAgentReadFailure(t *testing.T) {
 	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
 	agent := managedAgent(target, "/tmp/project", "01a09f5c-37cc-77f1-9409-e9aa070ad8d0", false)
@@ -741,6 +766,26 @@ func TestAwaitStatusDraftRejectsBusyPaneWithoutInput(t *testing.T) {
 	launcher.topology = &fakeManagedTopology{}
 	if err := launcher.awaitStatusDraft(context.Background(), target, "/tmp/project", []string{"codex"}, expected); !errors.Is(err, ErrManagedPaneBusy) || hasPaneInput(runner.calls) {
 		t.Fatalf("error=%v calls=%v", err, runner.calls)
+	}
+}
+
+func TestAwaitStatusDraftRejectsStatusDriftBeforeProcessRecheck(t *testing.T) {
+	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	expected := managedAgent(target, "/tmp/project", managedNewID, false)
+	drifted := expected
+	drifted.Status = "done"
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, drifted), {Stdout: managedStatusDraft("header")},
+		managedAgentResult(t, drifted), {Stdout: managedStatusDraft("header")},
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	topology := &fakeManagedTopology{}
+	launcher.topology = topology
+	if err := launcher.awaitStatusDraft(managedIdentityTestContext(t), target, "/tmp/project", []string{"codex"}, expected); !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("status drift error=%v", err)
+	}
+	if len(topology.verifications) != 0 {
+		t.Fatalf("status drift reached process verification: %q", topology.verifications)
 	}
 }
 
@@ -855,6 +900,27 @@ func TestComposerParsersCoverEmptyAndHomeDisplayBranches(t *testing.T) {
 	text := strings.ReplaceAll(observedManagedStatus(), "/tmp/project", "~")
 	if _, err := parseManagedStatus(text, home, managedServiceSnapshot(), managedPolicy()); err != nil {
 		t.Fatalf("home status error=%v", err)
+	}
+}
+
+func TestReadPaneExtentRejectsMismatchedPaneID(t *testing.T) {
+	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	mismatched := target
+	mismatched.PaneID = "w1:other"
+	runner := &scriptedRunner{results: []command.Result{paneScrollResult(t, mismatched, 10)}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	if _, err := launcher.readPaneExtent(context.Background(), target); !errors.Is(err, ErrManagedStale) {
+		t.Fatalf("mismatched pane error=%v", err)
+	}
+}
+
+func TestReadPaneAcceptsExactManagedByteLimit(t *testing.T) {
+	text := strings.Repeat("x", managedPaneBytes)
+	runner := &scriptedRunner{results: []command.Result{{Stdout: []byte(text)}}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	got, err := launcher.readPaneANSI(context.Background(), "w1:p2", "visible", 1)
+	if err != nil || got != text {
+		t.Fatalf("exact byte limit text length=%d error=%v", len(got), err)
 	}
 }
 

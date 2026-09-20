@@ -435,6 +435,20 @@ func TestDeliverPromptRejectsStaleOrInvalidTargetsBeforeSend(t *testing.T) {
 	}
 }
 
+func TestPromptObserveRejectsDynamicDirectoryDriftBeforeProcessInspection(t *testing.T) {
+	target, wire := validPromptTarget(t)
+	current := wire
+	current.CWD = "/tmp/other"
+	runner := &promptRunner{agent: current}
+	host := newTestCodexPromptHost(Host{Runner: runner}, nil)
+	if _, _, _, err := host.observe(context.Background(), target); !errors.Is(err, ErrPromptStale) {
+		t.Fatalf("dynamic directory drift error=%v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("dynamic directory drift reached process inspection: %q", runner.calls)
+	}
+}
+
 func TestDeliverPromptRejectsInvalidAcknowledgementAsUnknown(t *testing.T) {
 	prompt, err := PreparePrompt("hello")
 	if err != nil {
@@ -740,6 +754,14 @@ func TestOpenCodeEmptyComposerAcceptsBoundedWrappedStatus(t *testing.T) {
 	draft := strings.Replace(wrapped, openCodeComposerRow("", "sidebar"), openCodeComposerRow("draft", "sidebar"), 1)
 	if emptyOpenCodeComposer(draft) {
 		t.Fatal("typed draft above a wrapped status was accepted")
+	}
+}
+
+func TestOpenCodeEmptyComposerCountsBlankRowAtIndexZero(t *testing.T) {
+	lines := strings.Split(openCodeEmptyComposerANSI("sidebar"), "\n")
+	minimal := strings.Join(lines[2:6], "\n")
+	if !emptyOpenCodeComposer(minimal) {
+		t.Fatal("two-row composer beginning at index zero was rejected")
 	}
 }
 

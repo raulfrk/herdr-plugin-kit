@@ -452,10 +452,10 @@ func TestRouteProcessCallerRejectsEachMissingRunnerAndInvalidSession(t *testing.
 			}
 		})
 	}
-	request.Payload, _ = json.Marshal(routeCatalogPayload{Origin: RouteOrigin{Session: "bad session", Workspace: "w1", Tab: "w1:t1", Pane: "w1:p1"}})
+	request.Payload, _ = json.Marshal(routeCatalogPayload{Origin: routeOrigin()})
 	caller := RouteProcessCaller{HerdrRunner: validHerdr, ProviderRunner: validProvider, Session: "bad session"}
-	if _, err := caller.Call(context.Background(), request); err == nil {
-		t.Fatal("invalid session accepted")
+	if _, err := caller.Call(context.Background(), request); err == nil || err.Error() != "invalid session name" {
+		t.Fatalf("invalid configured session error = %v", err)
 	}
 }
 

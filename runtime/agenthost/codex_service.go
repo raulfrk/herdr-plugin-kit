@@ -663,7 +663,7 @@ func systemdEnvironmentContains(value, key, want string) bool {
 // on an unfamiliar escape rather than treating a substring as ownership proof.
 func parseSystemdEnvironment(value string) ([]string, bool) {
 	entries := make([]string, 0, 1)
-	for index := 0; index < len(value); {
+	for index := 0; ; {
 		for index < len(value) && (value[index] == ' ' || value[index] == '\t') {
 			index++
 		}

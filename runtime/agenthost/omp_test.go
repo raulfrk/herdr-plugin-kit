@@ -104,6 +104,13 @@ func TestAssessOMPDistinguishesUnavailableMalformedAndSessionDrift(t *testing.T)
 	}
 }
 
+func TestReadOMPStatusRejectsNULInSessionValue(t *testing.T) {
+	socket := serveOMPResponses(t, `{"version":1,"harness":"omp","session_kind":"path","session_value":"/tmp/\u0000session.jsonl","status":"idle","state_seq":1}`)
+	if _, err := readOMPStatus(context.Background(), socket); err == nil {
+		t.Fatal("NUL-bearing OMP session value was accepted")
+	}
+}
+
 func TestAssessOMPCancellationInterruptsSocketRead(t *testing.T) {
 	target := nativeTarget("omp", "path", "/tmp/session.jsonl")
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "status.sock"))

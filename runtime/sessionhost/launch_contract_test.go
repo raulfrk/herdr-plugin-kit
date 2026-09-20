@@ -72,7 +72,7 @@ func TestLaunchRejectsEachCreationReceiptDrift(t *testing.T) {
 					t.Fatalf("receipt accepted: %v", err)
 				}
 				for _, call := range runner.calls {
-					if len(call) > 2 && call[1] == "pane" && (call[2] == "run" || call[2] == "process-info") {
+					if len(call) > 4 && call[3] == "pane" && (call[4] == "run" || call[4] == "process-info") {
 						t.Fatalf("continued launch after invalid receipt: %q", call)
 					}
 				}

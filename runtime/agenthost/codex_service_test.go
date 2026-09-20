@@ -413,6 +413,30 @@ func TestSystemdEnvironmentContainsOnlyOneExactAssignment(t *testing.T) {
 	}
 }
 
+func TestParseSystemdEnvironmentPreservesWhitespaceAndHexBoundaries(t *testing.T) {
+	entries, ok := parseSystemdEnvironment(" \t")
+	if !ok || len(entries) != 0 {
+		t.Fatalf("whitespace entries=%q ok=%t", entries, ok)
+	}
+	if _, ok := parseSystemdEnvironment(`CODEX_HOME=\x`); ok {
+		t.Fatal("truncated hexadecimal escape was accepted")
+	}
+	entries, ok = parseSystemdEnvironment(`CODEX_HOME=\x20`)
+	if !ok || !reflect.DeepEqual(entries, []string{"CODEX_HOME= "}) {
+		t.Fatalf("terminal hexadecimal escape entries=%q ok=%t", entries, ok)
+	}
+}
+
+func TestCleanAbsoluteRejectsRelativePathsAndAcceptsExactLimit(t *testing.T) {
+	if cleanAbsolute("relative") {
+		t.Fatal("relative path accepted")
+	}
+	exactLimit := "/" + strings.Repeat("a", maxPathBytes-1)
+	if len(exactLimit) != maxPathBytes || !cleanAbsolute(exactLimit) {
+		t.Fatalf("exact path limit accepted=%t length=%d", cleanAbsolute(exactLimit), len(exactLimit))
+	}
+}
+
 func TestCodexUserAgentRequiresExactPinnedVersionToken(t *testing.T) {
 	for _, test := range []struct {
 		userAgent string

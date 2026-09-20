@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -11,6 +12,12 @@ import (
 	"sync"
 	"testing"
 )
+
+type openCodeResponseRoundTripper func(*http.Request) (*http.Response, error)
+
+func (roundTrip openCodeResponseRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
 
 type openCodeFixture struct {
 	t              *testing.T
@@ -32,6 +39,21 @@ type openCodeFixture struct {
 	calls        []string
 	sessionCalls int
 	statusCalls  int
+}
+
+func TestOpenCodePendingRejectsInformationalResponse(t *testing.T) {
+	client := &http.Client{Transport: openCodeResponseRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusSwitchingProtocols,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`[{"sessionID":"ses_target"}]`)),
+			Request:    request,
+		}, nil
+	})}
+	matched, err := openCodePending(context.Background(), client, "http://example.invalid/pending", "ses_target")
+	if err == nil || matched {
+		t.Fatalf("informational pending response matched=%t error=%v", matched, err)
+	}
 }
 
 func TestAssessOpenCodeMapsNativePrecedenceAndStatuses(t *testing.T) {
