@@ -315,7 +315,8 @@ func codexRemoteArgv(argv []string) bool {
 
 func validPromptCodexTarget(target PromptTarget) bool {
 	if target.Agent.Session == nil {
-		return validManagedThreadPrefix(target.codexSessionPrefix) && !codexRemoteArgv(target.Argv) && target.CodexService == (CodexServiceSnapshot{})
+		return (validManagedThreadPrefix(target.codexSessionPrefix) || validManagedStatusThreadPrefix(target.codexSessionPrefix)) &&
+			!codexRemoteArgv(target.Argv) && target.CodexService == (CodexServiceSnapshot{})
 	}
 	if target.codexSessionPrefix != "" || !validManagedSession(target.Agent.Session) {
 		return false

@@ -51,6 +51,7 @@ type managedVerifier interface {
 	Arm() error
 	ConfirmIdentity(context.Context, ManagedOperation, string, string) (codexThreadIdentity, error)
 	ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error)
+	ListThreads(context.Context, string) ([]codexThreadIdentity, error)
 	ReadThread(context.Context, string) (codexThreadIdentity, error)
 	RecheckIdentity(context.Context, string) (codexThreadIdentity, error)
 	ReadEffective(context.Context, string) (EffectiveCodexPolicy, error)
@@ -319,6 +320,14 @@ func (c *codexLifecycle) ReadThread(ctx context.Context, threadID string) (codex
 }
 
 func (c *codexLifecycle) ListCLIThreads(ctx context.Context, cwd string) ([]codexThreadIdentity, error) {
+	return c.listThreads(ctx, cwd, true)
+}
+
+func (c *codexLifecycle) ListThreads(ctx context.Context, cwd string) ([]codexThreadIdentity, error) {
+	return c.listThreads(ctx, cwd, false)
+}
+
+func (c *codexLifecycle) listThreads(ctx context.Context, cwd string, cliOnly bool) ([]codexThreadIdentity, error) {
 	if !cleanAbsolute(cwd) {
 		return nil, ErrManagedStale
 	}
@@ -332,7 +341,10 @@ func (c *codexLifecycle) ListCLIThreads(ctx context.Context, cwd string) ([]code
 	for page := 0; page < maxPages; page++ {
 		params := map[string]any{
 			"cwd": cwd, "limit": 100, "sortKey": "created_at", "sortDirection": "desc",
-			"sourceKinds": []string{"cli"}, "useStateDbOnly": true,
+			"useStateDbOnly": true,
+		}
+		if cliOnly {
+			params["sourceKinds"] = []string{"cli"}
 		}
 		if cursor != nil {
 			params["cursor"] = *cursor

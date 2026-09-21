@@ -83,16 +83,16 @@ func TestOrdinaryCodexBindingObservationRequiresEveryPaneGuard(t *testing.T) {
 }
 
 func TestResolvedOrdinaryIdentityRequiresEveryAuthoritativeField(t *testing.T) {
-	valid := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ForkedFromID: managedSourceID, Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	valid := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ForkedFromID: managedSourceID, ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
 	if !validResolvedOrdinaryIdentity(valid, managedNewID, "/tmp/project", managedSourceID) {
 		t.Fatal("valid identity rejected")
 	}
 	for name, mutate := range map[string]func(*codexThreadIdentity){
-		"id":        func(value *codexThreadIdentity) { value.ID = managedSecondID },
-		"cwd":       func(value *codexThreadIdentity) { value.CWD = "/tmp/other" },
-		"parent":    func(value *codexThreadIdentity) { value.ForkedFromID = managedOriginalID },
-		"model":     func(value *codexThreadIdentity) { value.Model = "" },
-		"reasoning": func(value *codexThreadIdentity) { value.ReasoningEffort = "" },
+		"id":       func(value *codexThreadIdentity) { value.ID = managedSecondID },
+		"cwd":      func(value *codexThreadIdentity) { value.CWD = "/tmp/other" },
+		"parent":   func(value *codexThreadIdentity) { value.ForkedFromID = managedOriginalID },
+		"model":    func(value *codexThreadIdentity) { value.Model = "" },
+		"provider": func(value *codexThreadIdentity) { value.ModelProvider = "other" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -102,22 +102,56 @@ func TestResolvedOrdinaryIdentityRequiresEveryAuthoritativeField(t *testing.T) {
 			}
 		})
 	}
+	withoutReasoning := valid
+	withoutReasoning.ReasoningEffort = ""
+	if !validResolvedOrdinaryIdentity(withoutReasoning, managedNewID, "/tmp/project", managedSourceID) {
+		t.Fatal("identity without optional App Server reasoning rejected")
+	}
 }
 
 func TestResolvedOrdinaryPolicyObservesOrPreservesExactPolicy(t *testing.T) {
 	candidate := codexThreadIdentity{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
-	observed, err := resolvedOrdinaryPolicy(ManagedCodexPolicy{}, candidate)
+	observed, err := resolvedOrdinaryPolicy(ManagedCodexPolicy{}, false, candidate)
 	if err != nil || observed.Model != candidate.Model || observed.ReasoningEffort != candidate.ReasoningEffort {
 		t.Fatalf("observed=%+v error=%v", observed, err)
 	}
 	expected := managedPolicy()
-	preserved, err := resolvedOrdinaryPolicy(expected, candidate)
+	preserved, err := resolvedOrdinaryPolicy(expected, false, candidate)
 	if err != nil || preserved != expected {
 		t.Fatalf("preserved=%+v error=%v", preserved, err)
 	}
+	preserved, err = resolvedOrdinaryPolicy(expected, false, codexThreadIdentity{Model: candidate.Model})
+	if err != nil || preserved != expected {
+		t.Fatalf("preserved without App Server reasoning=%+v error=%v", preserved, err)
+	}
+	if _, err := resolvedOrdinaryPolicy(ManagedCodexPolicy{}, false, codexThreadIdentity{Model: candidate.Model}); !errors.Is(err, ErrManagedPolicyDrift) {
+		t.Fatalf("unobserved missing reasoning error=%v", err)
+	}
 	for _, candidate := range []codexThreadIdentity{{Model: "other", ReasoningEffort: "medium"}, {Model: "gpt-5.6-sol", ReasoningEffort: "high"}} {
-		if _, err := resolvedOrdinaryPolicy(expected, candidate); !errors.Is(err, ErrManagedPolicyDrift) {
+		if _, err := resolvedOrdinaryPolicy(expected, false, candidate); !errors.Is(err, ErrManagedPolicyDrift) {
 			t.Fatalf("candidate=%+v error=%v", candidate, err)
+		}
+	}
+}
+
+func TestResolvedOrdinaryPolicyExpandsCompatibleObservedPrefix(t *testing.T) {
+	expected := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "med"}
+	candidate := codexThreadIdentity{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	resolved, err := resolvedOrdinaryPolicy(expected, true, candidate)
+	if err != nil || resolved != (ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}) {
+		t.Fatalf("resolved=%+v error=%v", resolved, err)
+	}
+	missingReasoning := codexThreadIdentity{Model: "gpt-5.6-sol"}
+	resolved, err = resolvedOrdinaryPolicy(expected, true, missingReasoning)
+	if err != nil || resolved != expected {
+		t.Fatalf("missing reasoning resolved=%+v error=%v", resolved, err)
+	}
+	for _, incompatible := range []codexThreadIdentity{
+		{Model: "gpt-6-astra", ReasoningEffort: "medium"},
+		{Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+	} {
+		if _, err := resolvedOrdinaryPolicy(expected, true, incompatible); !errors.Is(err, ErrManagedPolicyDrift) {
+			t.Fatalf("candidate=%+v error=%v", incompatible, err)
 		}
 	}
 }
@@ -146,6 +180,7 @@ func TestOrdinaryCodexBindingRejectsInvalidOrSourceIdentityBeforeReporting(t *te
 	for _, id := range []string{"", "truncated", managedSourceID} {
 		launcher := NewManagedCodexLauncher(Host{})
 		launcher.topology = &fakeManagedTopology{}
+		launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
 		launcher.discover = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, string, error) {
 			return Agent{}, id, nil
 		}
@@ -156,7 +191,7 @@ func TestOrdinaryCodexBindingRejectsInvalidOrSourceIdentityBeforeReporting(t *te
 	}
 }
 
-func TestOrdinaryCodexBindingUsesPaneDiscoveryWithoutService(t *testing.T) {
+func TestOrdinaryCodexBindingUsesReadyServiceForPaneDiscovery(t *testing.T) {
 	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
 	verifier := &fakeManagedVerifier{}
@@ -176,7 +211,7 @@ func TestOrdinaryCodexBindingUsesPaneDiscoveryWithoutService(t *testing.T) {
 		if len(topology.verifications) != 2 {
 			t.Fatal("identity discovery ran before the exact foreground process settled")
 		}
-		if got != target.Origin || cwd != "/tmp/project" || !reflect.DeepEqual(argv, []string{"codex"}) || gotService != (CodexServiceSnapshot{}) || policy != managedPolicy() {
+		if got != target.Origin || cwd != "/tmp/project" || !reflect.DeepEqual(argv, []string{"codex"}) || gotService != managedServiceSnapshot() || policy != managedPolicy() {
 			t.Fatalf("target=%+v cwd=%q argv=%q service=%+v policy=%+v", got, cwd, argv, gotService, policy)
 		}
 		agent := managedAgent(got, cwd, managedNewID, false)
@@ -195,8 +230,28 @@ func TestOrdinaryCodexBindingUsesPaneDiscoveryWithoutService(t *testing.T) {
 	if len(runner.calls) != 3 || !reflect.DeepEqual(runner.calls[0], wantReport) {
 		t.Fatalf("calls=%q", runner.calls)
 	}
-	if verifier.closed != 0 || service.callCount() != 0 {
+	if verifier.closed != 0 || service.callCount() != 1 {
 		t.Fatalf("closed=%d service=%d error=%v", verifier.closed, service.callCount(), err)
+	}
+}
+
+func TestOrdinaryCodexBindingRequiresReadyServiceBeforeDiscovery(t *testing.T) {
+	serviceErr := errors.New("service unavailable")
+	service := &fakeManagedService{err: serviceErr}
+	launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}})
+	launcher.service = service
+	launcher.topology = &fakeManagedTopology{}
+	discovered := false
+	launcher.discover = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, string, error) {
+		discovered = true
+		return Agent{}, "", nil
+	}
+	binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedNew, readyTimeout: DefaultPromptReadyTimeout}
+	if _, err := binding.Prepare(context.Background(), sessionhost.CreatedTarget{}, "/tmp/project", []string{"codex"}); !errors.Is(err, serviceErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if discovered || service.callCount() != 1 || len(launcher.Host.Runner.(*scriptedRunner).calls) != 0 {
+		t.Fatalf("discovered=%t service=%d", discovered, service.callCount())
 	}
 }
 
@@ -316,6 +371,33 @@ func TestOrdinaryCodexPrefixResolutionBacksOffBeforeRetry(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
 		t.Fatalf("thread-list retry spun without backoff: %v", elapsed)
+	}
+}
+
+func TestOrdinaryCodexResolvesNarrowStatusPrefixBeforeBinding(t *testing.T) {
+	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	unbound.Session = nil
+	bound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	prefix := managedNewID[:len(managedNewID)-10]
+	identity := codexThreadIdentity{ID: managedNewID, CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	verifier := &fakeManagedVerifier{listed: []codexThreadIdentity{identity}, read: []codexThreadIdentity{identity}}
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, unbound), managedAgentResult(t, unbound),
+		{}, managedAgentResult(t, bound), managedAgentResult(t, bound),
+	}}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner})
+	launcher.topology = &fakeManagedTopology{}
+	launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+	launcher.verifiers = fakeManagedVerifierFactory{verifier}
+	binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedNew, readyTimeout: DefaultPromptReadyTimeout}
+	got, policy, err := binding.resolvePersistedIdentity(context.Background(), target, "/tmp/project", []string{"codex"}, ordinaryCodexPreparation{
+		Agent: unbound, Prefix: prefix,
+		Policy: ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "med"}, policyIsPrefix: true,
+	})
+	wantPolicy := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	if err != nil || got.Session == nil || got.Session.Value != managedNewID || policy != wantPolicy || verifier.listCalls != 1 {
+		t.Fatalf("agent=%+v policy=%+v listCalls=%d error=%v", got, policy, verifier.listCalls, err)
 	}
 }
 

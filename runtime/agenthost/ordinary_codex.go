@@ -34,7 +34,7 @@ func (b *ordinaryCodexBinding) BindAfterPrompt(ctx context.Context, target sessi
 }
 
 func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, target sessionhost.CreatedTarget, directory string, argv []string, prepared ordinaryCodexPreparation) (Agent, ManagedCodexPolicy, error) {
-	if !validManagedThreadPrefix(prepared.Prefix) && !validManagedThreadID(prepared.Prefix) {
+	if !validManagedThreadPrefix(prepared.Prefix) && !validManagedStatusThreadPrefix(prepared.Prefix) && !validManagedThreadID(prepared.Prefix) {
 		return Agent{}, ManagedCodexPolicy{}, ErrManagedUnsupported
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, b.readyTimeout)
@@ -62,7 +62,7 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 		}
 		threadID = prepared.Prefix
 		if !validManagedThreadID(threadID) {
-			listed, err := verifier.ListCLIThreads(readyCtx, directory)
+			listed, err := verifier.ListThreads(readyCtx, directory)
 			if err != nil {
 				return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
 			}
@@ -87,7 +87,7 @@ func (b *ordinaryCodexBinding) resolvePersistedIdentity(ctx context.Context, tar
 			if !validResolvedOrdinaryIdentity(candidate, threadID, directory, b.sourceID) {
 				return Agent{}, ManagedCodexPolicy{}, closeVerifier(ErrManagedStale)
 			}
-			prepared.Policy, err = resolvedOrdinaryPolicy(prepared.Policy, candidate)
+			prepared.Policy, err = resolvedOrdinaryPolicy(prepared.Policy, prepared.policyIsPrefix, candidate)
 			if err != nil {
 				return Agent{}, ManagedCodexPolicy{}, closeVerifier(err)
 			}
@@ -127,24 +127,40 @@ func validOrdinaryBindingObservation(prepared ordinaryCodexPreparation, wire wir
 }
 
 func validResolvedOrdinaryIdentity(candidate codexThreadIdentity, threadID, directory, sourceID string) bool {
-	return candidate.ID == threadID && candidate.CWD == directory && candidate.ForkedFromID == sourceID && candidate.Model != "" && candidate.ReasoningEffort != ""
+	return candidate.ID == threadID && candidate.CWD == directory && candidate.ForkedFromID == sourceID && candidate.ModelProvider == "openai" && candidate.Model != ""
 }
 
-func resolvedOrdinaryPolicy(expected ManagedCodexPolicy, candidate codexThreadIdentity) (ManagedCodexPolicy, error) {
+func resolvedOrdinaryPolicy(expected ManagedCodexPolicy, expectedIsPrefix bool, candidate codexThreadIdentity) (ManagedCodexPolicy, error) {
 	observed := ManagedCodexPolicy{Model: candidate.Model, ReasoningEffort: candidate.ReasoningEffort}
 	if expected == (ManagedCodexPolicy{}) {
+		if observed.ReasoningEffort == "" {
+			return ManagedCodexPolicy{}, ErrManagedPolicyDrift
+		}
 		return observed, nil
 	}
-	if observed.Model != expected.Model || observed.ReasoningEffort != expected.ReasoningEffort {
+	if observed.Model != expected.Model {
+		return ManagedCodexPolicy{}, ErrManagedPolicyDrift
+	}
+	if observed.ReasoningEffort == "" {
+		return expected, nil
+	}
+	if expectedIsPrefix {
+		if !strings.HasPrefix(observed.ReasoningEffort, expected.ReasoningEffort) {
+			return ManagedCodexPolicy{}, ErrManagedPolicyDrift
+		}
+		return observed, nil
+	}
+	if observed.ReasoningEffort != expected.ReasoningEffort {
 		return ManagedCodexPolicy{}, ErrManagedPolicyDrift
 	}
 	return expected, nil
 }
 
 type ordinaryCodexPreparation struct {
-	Agent  Agent
-	Prefix string
-	Policy ManagedCodexPolicy
+	Agent          Agent
+	Prefix         string
+	Policy         ManagedCodexPolicy
+	policyIsPrefix bool
 }
 
 func beginOrdinaryCodexBinding(ctx context.Context, launcher ManagedCodexLauncher, operation ManagedOperation, source Agent, directory string, policy ManagedCodexPolicy, observePolicy bool, timeout time.Duration) (*ordinaryCodexBinding, error) {
@@ -191,6 +207,10 @@ func (b *ordinaryCodexBinding) Prepare(ctx context.Context, target sessionhost.C
 	if codexRemoteArgv(argv) {
 		return ordinaryCodexPreparation{}, ErrManagedUnsupported
 	}
+	service, err := b.launcher.serviceClient().Ensure(readyCtx)
+	if err != nil {
+		return ordinaryCodexPreparation{}, err
+	}
 	// Split launch returns after submitting the literal command, before its
 	// shell has necessarily exec'd Codex. Observe the exact process before
 	// applying identity discovery's stricter no-drift guard.
@@ -200,16 +220,15 @@ func (b *ordinaryCodexBinding) Prepare(ctx context.Context, target sessionhost.C
 	var (
 		agent    Agent
 		observed managedStatusObservation
-		err      error
 	)
 	if b.launcher.discoverObserved != nil {
-		agent, observed, err = b.launcher.discoverObserved(readyCtx, target.Origin, directory, argv, CodexServiceSnapshot{}, b.policy)
+		agent, observed, err = b.launcher.discoverObserved(readyCtx, target.Origin, directory, argv, service, b.policy)
 	} else if b.launcher.discover != nil {
 		var identity string
-		agent, identity, err = b.launcher.discover(readyCtx, target.Origin, directory, argv, CodexServiceSnapshot{}, b.policy)
+		agent, identity, err = b.launcher.discover(readyCtx, target.Origin, directory, argv, service, b.policy)
 		observed = managedStatusObservation{identity: identity, policy: b.policy}
 	} else {
-		agent, observed, err = b.launcher.discoverManagedIdentityObservation(readyCtx, target.Origin, directory, argv, CodexServiceSnapshot{}, b.policy, true)
+		agent, observed, err = b.launcher.discoverOrdinaryManagedIdentityObservation(readyCtx, target.Origin, directory, argv, service, b.policy, true)
 	}
 	if err != nil {
 		return ordinaryCodexPreparation{}, err
@@ -217,8 +236,8 @@ func (b *ordinaryCodexBinding) Prepare(ctx context.Context, target sessionhost.C
 	if observed.fromStatus && !validOrdinaryStatusParent(b.operation, b.sourceID, observed.forkedFromPrefix) {
 		return ordinaryCodexPreparation{}, ErrManagedStale
 	}
-	if validManagedThreadPrefix(observed.identity) && observed.policy.Model != "" && observed.policy.ReasoningEffort != "" {
-		prepared := ordinaryCodexPreparation{Agent: agent, Prefix: observed.identity, Policy: observed.policy}
+	if (validManagedThreadPrefix(observed.identity) && observed.policy.Model != "" && observed.policy.ReasoningEffort != "") || validManagedStatusThreadPrefix(observed.identity) {
+		prepared := ordinaryCodexPreparation{Agent: agent, Prefix: observed.identity, Policy: observed.policy, policyIsPrefix: observed.policyIsPrefix}
 		if err := b.recheckForkSource(readyCtx); err != nil {
 			return ordinaryCodexPreparation{}, err
 		}

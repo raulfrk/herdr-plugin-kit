@@ -221,7 +221,7 @@ func TestOrdinaryCodexForkPromptVerifiesPersistedParent(t *testing.T) {
 		Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab,
 		CodexPolicy: managedPolicy(), Prompt: &prompt,
 	})
-	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 1 || verifier.listCalls != 0 || verifier.confirmID != "" {
+	if err != nil || result.Child.Session == nil || result.Child.Session.Value != managedChildID || result.Prompt.State != PromptAcknowledged || service.callCount() != 2 || verifier.listCalls != 0 || verifier.confirmID != "" {
 		t.Fatalf("result=%+v service=%d verifier=%+v calls=%q error=%v", result, service.callCount(), verifier, runner.calls, err)
 	}
 	if len(topology.cleanups) != 0 || len(verifier.deleted) != 0 || verifier.closed != 1 {
@@ -328,7 +328,7 @@ func TestOrdinaryCodexForkPrefixRejectsSourceProcessDriftBeforePrompt(t *testing
 	unbound := managedAgent(created.Origin, source.CWD, managedChildID, false)
 	unbound.Session = nil
 	managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
-	managed.topology = topology
+	managed.service, managed.topology = &fakeManagedService{snapshot: managedServiceSnapshot()}, topology
 	managed.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
 		return unbound, managedStatusObservation{
 			identity: "01a09f5c-37cc-77f1-9409-e9aa070a", forkedFromPrefix: "01a09f5c-37cc-77f1-9409-e9aa070a",

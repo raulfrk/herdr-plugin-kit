@@ -32,7 +32,7 @@ listener or silently disconnects clients.
 For prompt delivery, an ordinary target has a zero `CodexService` snapshot.
 Its exact pane/process, empty composer, and full Herdr hook identity authorize
 one submission without `/status`. When a new zero-turn Codex has no full ID,
-the Kit may capture a guarded UUID prefix containing at least 96 bits from the
+the Kit may capture a guarded UUID prefix containing at least 88 bits from the
 same pane, submit the requested prompt exactly once, and then query this shared
 App Server for CLI conversations. It registers an identity only when exactly
 one full UUID matches that prefix, CWD, model, reasoning effort, and expected

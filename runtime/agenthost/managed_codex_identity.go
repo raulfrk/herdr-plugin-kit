@@ -26,19 +26,21 @@ var (
 	ErrManagedPaneBusy = errors.New("managed Codex pane is not safely idle")
 	ErrManagedNarrow   = errors.New("managed Codex status is incomplete; widen the pane and retry")
 	managedUUID        = regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	managedSessionPart = regexp.MustCompile(`(?m)^\s*│?\s*Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
-	managedForkedPart  = regexp.MustCompile(`(?m)^\s*│?\s*Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})\s*│?\s*$`)
+	managedSessionPart = regexp.MustCompile(`(?m)^\s*│?\s*Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{2,12})\s*│?\s*$`)
+	managedForkedPart  = regexp.MustCompile(`(?m)^\s*│?\s*Forked from:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{2,12})\s*│?\s*$`)
 	managedANSI        = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	managedStatusCmd   = regexp.MustCompile(`(?m)^(?:›[ \t]+)?/status[ \t]*$`)
 	managedStatusModel = regexp.MustCompile(`Model:([A-Za-z0-9][A-Za-z0-9._:/-]*)\(reasoning([A-Za-z0-9][A-Za-z0-9._-]*)(?:,|\))`)
 	managedTitlePart   = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,12})(?:\.\.\.)?$`)
 	managedThreadPart  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4,11}$`)
+	managedDisplayPart = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{2,12}$`)
 )
 
 type managedStatusObservation struct {
 	identity         string
 	forkedFromPrefix string
 	policy           ManagedCodexPolicy
+	policyIsPrefix   bool
 	fromStatus       bool
 }
 
@@ -66,6 +68,10 @@ func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, targe
 
 func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
 	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, false)
+}
+
+func (l ManagedCodexLauncher) discoverOrdinaryManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
+	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, true)
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentityForSource(ctx context.Context, target sessionhost.Origin, cwd string, expected Agent, expectedProcess sessionhost.ForegroundProcess, service CodexServiceSnapshot) (Agent, string, error) {
@@ -353,13 +359,34 @@ func exactCodexSingleLineDraft(text, want string) bool {
 		if menu == compactMenu {
 			return false
 		}
-		return len(rawTail) == 2 &&
-			!strings.ContainsRune(rawTail[0], '\x1b') &&
-			strings.TrimSpace(rawTail[0]) == "/status      show current session configuration and token usage" &&
-			strings.Contains(rawTail[1], "/\x1b[0m\x1b[1mstatus\x1b[0mline") &&
-			strings.Contains(rawTail[1], "\x1b[2mconfigure which items appear in the status line\x1b[0m")
+		return validUnselectedStatusAutocomplete(rawTail, plainTail)
 	}
 	return false
+}
+
+func validUnselectedStatusAutocomplete(rawTail, plainTail []string) bool {
+	const styledStatusline = "/\x1b[0m\x1b[1mstatus\x1b[0mline"
+	styledStart := -1
+	for index, line := range rawTail {
+		if strings.Contains(line, styledStatusline) {
+			styledStart = index
+			break
+		}
+	}
+	if styledStart <= 0 {
+		return false
+	}
+	for _, line := range rawTail[:styledStart] {
+		if strings.ContainsRune(line, '\x1b') {
+			return false
+		}
+	}
+	first := strings.Join(strings.Fields(strings.Join(plainTail[:styledStart], " ")), " ")
+	second := strings.Join(strings.Fields(strings.Join(plainTail[styledStart:], " ")), " ")
+	styled := strings.Join(rawTail[styledStart:], "\n")
+	return first == "/status show current session configuration and token usage" &&
+		second == "/statusline configure which items appear in the status line" &&
+		strings.Contains(styled, "\x1b[2mconfigure")
 }
 
 func (l ManagedCodexLauncher) readManagedAgent(ctx context.Context, target sessionhost.Origin, cwd string) (wireAgent, Agent, error) {
@@ -607,6 +634,10 @@ func parseManagedStatusObservationMode(text, cwd string, service CodexServiceSna
 		marker = 0
 	}
 	block := normalized[marker:]
+	sessionFields := managedStatusFields(block, "Session")
+	if len(sessionFields) > 1 {
+		return managedStatusObservation{}, ErrManagedAmbiguous
+	}
 	partialSessions := managedSessionPart.FindAllStringSubmatch(block, 2)
 	if len(partialSessions) > 1 {
 		return managedStatusObservation{}, ErrManagedAmbiguous
@@ -614,9 +645,12 @@ func parseManagedStatusObservationMode(text, cwd string, service CodexServiceSna
 	identity := ""
 	if len(partialSessions) == 1 && validManagedThreadID(partialSessions[0][1]) {
 		identity = partialSessions[0][1]
-	} else if allowPrefix && len(partialSessions) == 1 && validManagedThreadPrefix(partialSessions[0][1]) {
+	} else if allowPrefix && len(partialSessions) == 1 && validManagedStatusThreadPrefix(partialSessions[0][1]) {
 		identity = partialSessions[0][1]
 	} else if allowPrefix && len(partialSessions) == 0 && validManagedStatusFallback(block, fallbackPrefix) {
+		if len(sessionFields) == 1 && !validManagedDisplayedSessionPrefix(sessionFields[0], fallbackPrefix) {
+			return managedStatusObservation{}, ErrManagedStale
+		}
 		identity = fallbackPrefix
 	} else {
 		return managedStatusObservation{}, ErrManagedNarrow
@@ -680,21 +714,30 @@ func parseManagedStatusObservationMode(text, cwd string, service CodexServiceSna
 		displayCWD = "~" + strings.TrimPrefix(cwd, home)
 	}
 	if !strings.Contains(compact, "OpenAICodex(v"+SupportedCodexVersion+")") ||
-		managedStatusField(block, "Directory") != displayCWD {
+		!managedStatusDirectoryMatches(managedStatusField(block, "Directory"), displayCWD) {
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
 	if len(partialSessions) == 1 && !strings.Contains(compact, "Session:"+identity) {
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
 	models := managedStatusModel.FindAllStringSubmatch(compact, -1)
-	if len(models) != 1 {
+	observedPolicy := ManagedCodexPolicy{}
+	policyIsPrefix := false
+	if len(models) == 1 {
+		observedPolicy = ManagedCodexPolicy{Model: models[0][1], ReasoningEffort: models[0][2]}
+	} else if len(models) == 0 {
+		var ok bool
+		observedPolicy, policyIsPrefix, ok = managedTruncatedPolicy(managedStatusField(block, "Model"), policy)
+		if !ok {
+			return managedStatusObservation{}, ErrManagedNarrow
+		}
+	} else {
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
-	observedPolicy := ManagedCodexPolicy{Model: models[0][1], ReasoningEffort: models[0][2]}
 	if policy != (ManagedCodexPolicy{}) && (observedPolicy.Model != policy.Model || observedPolicy.ReasoningEffort != policy.ReasoningEffort) {
 		return managedStatusObservation{}, ErrManagedNarrow
 	}
-	return managedStatusObservation{identity: identity, forkedFromPrefix: forkedFromPrefix, policy: observedPolicy, fromStatus: true}, nil
+	return managedStatusObservation{identity: identity, forkedFromPrefix: forkedFromPrefix, policy: observedPolicy, policyIsPrefix: policyIsPrefix, fromStatus: true}, nil
 }
 
 func validManagedStatusFallback(block, prefix string) bool {
@@ -707,9 +750,51 @@ func validManagedStatusFallback(block, prefix string) bool {
 	return strings.Contains(block, "╯")
 }
 
+func validManagedDisplayedSessionPrefix(displayed, expected string) bool {
+	return managedDisplayPart.MatchString(displayed) &&
+		(strings.HasPrefix(expected, displayed) || strings.HasPrefix(displayed, expected))
+}
+
+func validManagedStatusThreadPrefix(prefix string) bool {
+	return managedDisplayPart.MatchString(prefix) && !validManagedThreadID(prefix)
+}
+
+func managedStatusDirectoryMatches(displayed, expected string) bool {
+	if displayed == expected {
+		return true
+	}
+	suffix := strings.TrimPrefix(displayed, "…")
+	return suffix != displayed && strings.HasPrefix(suffix, string(filepath.Separator)) && strings.HasSuffix(expected, suffix)
+}
+
+func managedTruncatedPolicy(displayed string, expected ManagedCodexPolicy) (ManagedCodexPolicy, bool, bool) {
+	if expected == (ManagedCodexPolicy{}) {
+		const suffix = " (reasoning med"
+		model := strings.TrimSuffix(displayed, suffix)
+		validModel := model != displayed && model != "" && strings.IndexFunc(model, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/-", r))
+		}) == -1
+		return ManagedCodexPolicy{Model: model, ReasoningEffort: "med"}, true, validModel
+	}
+	prefix := expected.Model + " (reasoning "
+	if !strings.HasPrefix(displayed, prefix) {
+		return ManagedCodexPolicy{}, false, false
+	}
+	reasoning := strings.TrimPrefix(displayed, prefix)
+	return expected, false, len(reasoning) >= 3 && strings.HasPrefix(expected.ReasoningEffort, reasoning)
+}
+
 func managedStatusField(block, label string) string {
+	values := managedStatusFields(block, label)
+	if len(values) != 1 {
+		return ""
+	}
+	return values[0]
+}
+
+func managedStatusFields(block, label string) []string {
 	prefix := label + ":"
-	value := ""
+	var values []string
 	for _, line := range strings.Split(block, "\n") {
 		line = strings.TrimSpace(managedANSI.ReplaceAllString(line, ""))
 		line = strings.TrimSpace(strings.TrimPrefix(line, "│"))
@@ -717,10 +802,7 @@ func managedStatusField(block, label string) string {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		if value != "" {
-			return ""
-		}
-		value = strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		values = append(values, strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	}
-	return value
+	return values
 }

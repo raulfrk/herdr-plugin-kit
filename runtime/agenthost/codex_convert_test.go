@@ -44,6 +44,9 @@ func (f *conversionVerifier) ReadThread(context.Context, string) (codexThreadIde
 func (f *conversionVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
 	return nil, errors.New("unexpected list")
 }
+func (f *conversionVerifier) ListThreads(context.Context, string) ([]codexThreadIdentity, error) {
+	return nil, errors.New("unexpected unfiltered list")
+}
 func (f *conversionVerifier) RecheckIdentity(context.Context, string) (codexThreadIdentity, error) {
 	return codexThreadIdentity{}, errors.New("unexpected recheck")
 }

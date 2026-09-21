@@ -316,6 +316,26 @@ func TestCodexLifecycleListCLIThreadsRejectsInvalidDirectoryBeforeRPC(t *testing
 	}
 }
 
+func TestCodexLifecycleListThreadsKeepsStateFilterWithoutRestrictingSource(t *testing.T) {
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		lifecycleInitialize(t, ctx, conn)
+		request := readRPCRequest(t, ctx, conn, "thread/list")
+		if _, exists := request.Params["sourceKinds"]; exists || string(request.Params["useStateDbOnly"]) != "true" || string(request.Params["cwd"]) != `"/tmp/project"` {
+			t.Fatalf("params=%s", mustJSON(request.Params))
+		}
+		sendRPCResult(t, ctx, conn, request.ID, `{"data":[`+codexListThreadJSON(managedNewID)+`],"nextCursor":null}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	threads, err := verifier.ListThreads(context.Background(), "/tmp/project")
+	if err != nil || len(threads) != 1 || threads[0].ID != managedNewID {
+		t.Fatalf("threads=%+v error=%v", threads, err)
+	}
+}
+
 func TestCodexLifecycleListCLIThreadsRejectsInvalidIdentityOrWrongDirectory(t *testing.T) {
 	for name, thread := range map[string]string{
 		"invalid identity": `{"id":"","cwd":"/tmp/project","modelProvider":"openai"}`,

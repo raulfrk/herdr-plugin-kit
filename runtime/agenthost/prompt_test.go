@@ -216,7 +216,7 @@ func TestDeliverPromptAcceptsGuardedOrdinaryCodexPrefixExactlyOnce(t *testing.T)
 	target.Agent = mustPublic(t, wire)
 	target.Argv = []string{"codex", "--yolo"}
 	target.CodexService = CodexServiceSnapshot{}
-	target.codexSessionPrefix = "01a09f5c-37cc-77f1-9409-e9aa070a"
+	target.codexSessionPrefix = "01a09f5c-37cc-77f1-9409-e9"
 	caller := &recordedPromptCall{receipt: herdrapi.Receipt{State: herdrapi.RequestAcknowledged}, agent: wire}
 	host := NewPromptHost(Host{Runner: &promptRunner{agent: wire, argv: target.Argv}})
 	host.caller = caller
@@ -225,7 +225,7 @@ func TestDeliverPromptAcceptsGuardedOrdinaryCodexPrefixExactlyOnce(t *testing.T)
 	if err != nil || result.State != PromptAcknowledged || result.Agent.Session != nil || caller.calls != 1 {
 		t.Fatalf("result=%+v calls=%d error=%v", result, caller.calls, err)
 	}
-	for _, prefix := range []string{"", "01a09f5c-37cc-77f1-9409-e9a", managedNewID} {
+	for _, prefix := range []string{"", "01a09f5c-37cc-77f1-9409-e", managedNewID} {
 		bad := target
 		bad.codexSessionPrefix = prefix
 		if validPromptCodexTarget(bad) {

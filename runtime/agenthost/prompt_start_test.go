@@ -260,7 +260,7 @@ func TestPromptStarterInvalidOrCancelledInputCreatesNothing(t *testing.T) {
 	}
 }
 
-func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
+func TestPromptStarterOrdinaryCodexUsesPaneBindingWithServiceSnapshot(t *testing.T) {
 	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
 	topology := &fakeManagedTopology{target: created}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
@@ -272,9 +272,9 @@ func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
 	}}
 	managed := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
 	managed.service, managed.topology, managed.verifiers = service, topology, fakeManagedVerifierFactory{verifier}
-	managed.discover = func(_ context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
-		if !reflect.DeepEqual(argv, []string{"codex", "--yolo"}) || service != (CodexServiceSnapshot{}) || policy != (ManagedCodexPolicy{}) {
-			t.Fatalf("argv=%q service=%+v policy=%+v", argv, service, policy)
+	managed.discover = func(_ context.Context, target sessionhost.Origin, cwd string, argv []string, observedService CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
+		if !reflect.DeepEqual(argv, []string{"codex", "--yolo"}) || observedService != service.snapshot || policy != (ManagedCodexPolicy{}) {
+			t.Fatalf("argv=%q service=%+v policy=%+v", argv, observedService, policy)
 		}
 		agent := managedAgent(target, cwd, managedNewID, false)
 		agent.Session = nil
@@ -290,7 +290,7 @@ func TestPromptStarterOrdinaryCodexUsesPaneBindingWithoutService(t *testing.T) {
 		Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
 		Argv:   []string{"codex", "--yolo"}, Directory: "/tmp/project", Placement: sessionhost.NewTab, ObserveCodexPolicy: true,
 	})
-	if err != nil || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || service.callCount() != 0 || verifier.confirmID != "" || result.Target.CodexService != (CodexServiceSnapshot{}) {
+	if err != nil || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || service.callCount() != 1 || verifier.confirmID != "" || result.Target.CodexService != (CodexServiceSnapshot{}) {
 		t.Fatalf("result=%+v service=%d verifier=%+v error=%v", result, service.callCount(), verifier, err)
 	}
 	if len(topology.launches) != 1 || !reflect.DeepEqual(topology.launches[0].Argv, []string{"codex", "--yolo"}) || len(topology.cleanups) != 0 || len(verifier.deleted) != 0 {
@@ -342,7 +342,7 @@ func TestPromptStarterResolvesObservedCodexPrefixAfterOnePrompt(t *testing.T) {
 	if err != nil || deliveries != 1 || result.State != PromptAcknowledged || result.Agent.Session == nil || result.Agent.Session.Value != managedNewID || result.Target.codexSessionPrefix != "" {
 		t.Fatalf("result=%+v deliveries=%d error=%v", result, deliveries, err)
 	}
-	if service.callCount() != 1 || verifier.closed != 1 || len(topology.cleanups) != 0 {
+	if service.callCount() != 2 || verifier.closed != 1 || len(topology.cleanups) != 0 {
 		t.Fatalf("service=%d closed=%d cleanup=%v", service.callCount(), verifier.closed, topology.cleanups)
 	}
 }

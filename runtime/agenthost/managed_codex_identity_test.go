@@ -340,7 +340,7 @@ func TestParseObservedOrdinaryStatusAcceptsOnlyOneStrongUUIDPrefix(t *testing.T)
 		t.Fatalf("observation=%+v error=%v", observed, err)
 	}
 	for _, text := range []string{
-		strings.Replace(base, "1baf1239", "1ba", 1),
+		strings.Replace(base, "1baf1239", "1", 1),
 		base + "\n│ Session: 01a0980a-280c-72c2-8a90-1baf5678 │",
 	} {
 		if _, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, ""); err == nil {
@@ -377,6 +377,39 @@ func TestParseObservedZeroTurnStatusUsesStrongExactTitlePrefix(t *testing.T) {
 	}
 	if _, err := parseManagedStatusObservation(text, "/tmp/project", CodexServiceSnapshot{}, ManagedCodexPolicy{}, false, prefix); err == nil {
 		t.Fatal("accepted fallback prefix when prefix discovery was disabled")
+	}
+}
+
+func TestParseObservedNarrowStatusUsesOnlyCompatibleKnownValues(t *testing.T) {
+	text := `/status
+╭───────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.154.0)                       │
+│  Model:                gpt-5.6-sol (reasoning med │
+│  Directory:            …/herdr-attention-sessions │
+│  Session:              01a0c4e0-c206-7061-a45c-d0 │
+╰───────────────────────────────────────────────────╯`
+	cwd := "/home/raul/projects/herdr-attention-sessions"
+	prefix := "01a0c4e0-c206-7061-a45c-d0abc"
+	displayedPrefix := "01a0c4e0-c206-7061-a45c-d0"
+	policy := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	observed, err := parseManagedStatusObservation(text, cwd, CodexServiceSnapshot{}, policy, true, prefix)
+	if err != nil || observed.identity != displayedPrefix || observed.policy != policy {
+		t.Fatalf("observation=%+v error=%v", observed, err)
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "a45c-d0", "a45c-ff", 1),
+		strings.Replace(text, "…/herdr-attention-sessions", "…/other-sessions", 1),
+		strings.Replace(text, "reasoning med", "reasoning max", 1),
+		text + "\n│ Session: 01a0c4e0-c206-7061-a45c-d0 │",
+	} {
+		if _, err := parseManagedStatusObservation(changed, cwd, CodexServiceSnapshot{}, policy, true, prefix); err == nil {
+			t.Fatalf("accepted incompatible narrow status: %q", changed)
+		}
+	}
+	withoutPolicy, err := parseManagedStatusObservation(text, cwd, CodexServiceSnapshot{}, ManagedCodexPolicy{}, true, prefix)
+	wantObserved := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "med"}
+	if err != nil || withoutPolicy.identity != displayedPrefix || withoutPolicy.policy != wantObserved || !withoutPolicy.policyIsPrefix {
+		t.Fatalf("policy-free observation=%+v error=%v", withoutPolicy, err)
 	}
 }
 
@@ -468,7 +501,8 @@ func TestCodexComposerParsersInspectTheFirstAndOnlyLine(t *testing.T) {
 func TestExactCodexStatusDraftAcceptsObserved01540MenuAndRejectsAmbiguity(t *testing.T) {
 	observed := "header\n\x1b[1m›\x1b[0m /status\n\n  /status      show current session configuration and token usage\n  /\x1b[0m\x1b[1mstatus\x1b[0mline  \x1b[0m\x1b[2mconfigure which items appear in the status line\x1b[0m"
 	compact := "header\n\x1b[1m›\x1b[0m /status\n\n  \x1b[1m\x1b[38;5;6m/status      show current session configuration and token\x1b[0m\n  \x1b[1m\x1b[38;5;6m             usage\x1b[0m"
-	if !exactCodexSingleLineDraft(observed, "/status") || !exactCodexSingleLineDraft(compact, "/status") {
+	narrow := "header\n\x1b[1m›\x1b[0m /status\n\n  /status      show current session configuration and\n               token usage\n  /\x1b[0m\x1b[1mstatus\x1b[0mline  \x1b[0m\x1b[2mconfigure which items appear in the\x1b[0m\n               \x1b[0m\x1b[2mstatus line\x1b[0m"
+	if !exactCodexSingleLineDraft(observed, "/status") || !exactCodexSingleLineDraft(compact, "/status") || !exactCodexSingleLineDraft(narrow, "/status") {
 		t.Fatal("Codex 0.154.0 status menu rejected")
 	}
 	help := strings.Replace(observed, "›\x1b[0m /status\n", "›\x1b[0m /help\n", 1)
@@ -477,8 +511,10 @@ func TestExactCodexStatusDraftAcceptsObserved01540MenuAndRejectsAmbiguity(t *tes
 	}
 	for _, text := range []string{
 		strings.ReplaceAll(observed, "\x1b[0m\x1b[1m", ""),
+		strings.ReplaceAll(narrow, "\x1b[0m\x1b[1m", ""),
 		managedANSI.ReplaceAllString(compact, ""),
 		observed + "\n  extra menu row",
+		narrow + "\n  extra menu row",
 		strings.Replace(observed, "token usage", "token totals", 1),
 	} {
 		if exactCodexSingleLineDraft(text, "/status") {
@@ -560,6 +596,50 @@ func TestDiscoverManagedIdentityPrefixRechecksFinalPaneAndProcess(t *testing.T) 
 	launcher.topology = topology
 	argv := []string{"codex", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock"}
 	agent, observed, err := launcher.discoverManagedIdentityObservation(managedIdentityTestContext(t), target, "/tmp/project", argv, managedServiceSnapshot(), managedPolicy(), true)
+	if err != nil || observed.identity != prefix || agent.Session != nil {
+		t.Fatalf("agent=%+v observation=%+v error=%v", agent, observed, err)
+	}
+	if len(runner.calls) != 16 || len(topology.verifications) != 5 {
+		t.Fatalf("calls=%d verifications=%d", len(runner.calls), len(topology.verifications))
+	}
+}
+
+func TestDiscoverOrdinaryManagedIdentityAllowsLocalStatusWithReadyService(t *testing.T) {
+	target := sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
+	unbound := managedAgent(target, "/tmp/project", "unused", false)
+	unbound.Session = nil
+	prefix := "01a09f5c-37cc-77f1-9409-e9aa070a"
+	withTitle := func(agent Agent) command.Result {
+		wire := wireFromAgent(agent)
+		wire.TerminalTitleStripped = prefix + "..."
+		var response agentInfoResponse
+		response.ID, response.Result.Type, response.Result.Agent = "cli:agent:get", "agent_info", wire
+		return jsonResult(t, response)
+	}
+	status := strings.Replace(observedManagedStatus(), managedNewID, prefix, 1)
+	status = strings.Replace(status, "│ Remote: unix:///tmp/codex-home/app-server-control/app-server-control.sock (v0.154.0) │\n", "", 1)
+	runner := &scriptedRunner{results: []command.Result{
+		managedAgentResult(t, unbound),
+		{Stdout: managedEmptyComposer("header")},
+		paneScrollResult(t, target, 10),
+		{Stdout: []byte("old output")},
+		withTitle(unbound),
+		{Stdout: managedEmptyComposer("header")},
+		{},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		managedAgentResult(t, unbound),
+		{Stdout: managedStatusDraft("header")},
+		{},
+		paneScrollResult(t, target, 40),
+		{Stdout: []byte("old output\n› " + status)},
+		{Stdout: managedEmptyComposer("status block")},
+		withTitle(unbound),
+	}}
+	topology := &fakeManagedTopology{}
+	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+	launcher.topology = topology
+	agent, observed, err := launcher.discoverOrdinaryManagedIdentityObservation(managedIdentityTestContext(t), target, "/tmp/project", []string{"codex", "--yolo"}, managedServiceSnapshot(), managedPolicy(), true)
 	if err != nil || observed.identity != prefix || agent.Session != nil {
 		t.Fatalf("agent=%+v observation=%+v error=%v", agent, observed, err)
 	}

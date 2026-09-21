@@ -134,10 +134,10 @@ func TestOrdinaryCodexLiveBindsPromptedNewAndForkThroughSharedService(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	forkPrompt, _ := PreparePrompt("Reply exactly ORDINARY-FORK-OK.")
+	forkPrompt, _ := PreparePrompt("Reply with exactly this token and nothing else: ORDINARY-FORK-OK")
 	forker := NewForker(host)
 	forker.managed.discoverObserved = func(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
-		agent, observed, err := launcher.discoverManagedIdentityObservation(ctx, target, cwd, argv, service, policy, true)
+		agent, observed, err := launcher.discoverOrdinaryManagedIdentityObservation(ctx, target, cwd, argv, service, policy, true)
 		if err != nil {
 			t.Logf("last discovery observations:\n%s", strings.Join(trace, "\n"))
 			t.Logf("fork discovery expected argv=%q: %v", argv, err)
@@ -163,7 +163,7 @@ func TestOrdinaryCodexLiveBindsPromptedNewAndForkThroughSharedService(t *testing
 	if !validManagedSession(forked.Child.Session) || forked.Child.Session.Value == source.Session.Value || forked.Child.TabID != source.TabID || forked.Child.PaneID == source.PaneID {
 		t.Fatalf("fork did not create distinct same-tab conversation: %+v", forked)
 	}
-	settle(forked.Child.PaneID, "ORDINARY-FORK-OK.")
+	settle(forked.Child.PaneID, "ORDINARY-FORK-OK")
 	current, err := host.find(ctx, source.PaneID)
 	if err != nil || !sameImmutable(source, current) {
 		t.Fatalf("fork source changed: %+v error=%v", current, err)
