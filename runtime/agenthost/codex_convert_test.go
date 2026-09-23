@@ -184,6 +184,15 @@ func TestCodexConverterPreStopCaptureFailureSendsNoInput(t *testing.T) {
 	}
 }
 
+func TestCodexConverterRejectsMismatchedThreadBeforeStoppingSource(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.verifier.identities[0].ID = "different-thread"
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrCodexConversionCapture) || !errors.Is(err, ErrManagedStale) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
+		t.Fatalf("result=%+v error=%v stops=%d runs=%d calls=%d", result, err, len(harness.topology.stops), len(harness.topology.runs), len(harness.runner.calls))
+	}
+}
+
 func TestCodexConverterFallbackFailureIsReportedWithoutAReplacementAttempt(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.verifier.policyErrs = []error{errors.New("capture unavailable")}
@@ -518,6 +527,33 @@ func TestConversionConfirmationTokenRejectsUppercaseHex(t *testing.T) {
 	}
 }
 
+func TestSameFinalConversionIdentityRejectsEachMismatch(t *testing.T) {
+	before := codexThreadIdentity{ID: managedSourceID, CWD: "/tmp/project", ForkedFromID: "parent", ModelProvider: "openai", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}
+	target := managedPreflight(before.CWD).EffectiveCodexPolicy
+	if !sameFinalConversionIdentity(before, before, target) {
+		t.Fatal("matching final identity rejected")
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*codexThreadIdentity)
+	}{
+		{"thread", func(value *codexThreadIdentity) { value.ID = "different-thread" }},
+		{"directory", func(value *codexThreadIdentity) { value.CWD = "/tmp/other" }},
+		{"fork", func(value *codexThreadIdentity) { value.ForkedFromID = "other-parent" }},
+		{"provider", func(value *codexThreadIdentity) { value.ModelProvider = "other" }},
+		{"model", func(value *codexThreadIdentity) { value.Model = "other" }},
+		{"reasoning", func(value *codexThreadIdentity) { value.ReasoningEffort = "high" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			actual := before
+			test.change(&actual)
+			if sameFinalConversionIdentity(actual, before, target) {
+				t.Fatal("mismatched final identity accepted")
+			}
+		})
+	}
+}
+
 func TestCodexConverterPreparesCompleteCustomDisclosureWithoutPaneInput(t *testing.T) {
 	harness := newConversionHarness(t)
 	desired := ManagedCodexPolicy{Model: "gpt-5.6-sol", ReasoningEffort: "high", ApprovalPolicy: "on-request", SandboxMode: "read-only"}
@@ -577,7 +613,7 @@ func TestCodexConverterRejectsUnconfirmedCustomizationBeforeStoppingSource(t *te
 	desired := managedPolicy()
 	desired.ReasoningEffort = "high"
 	request := harness.request()
-	request.Customization = &CodexConversionCustomization{Desired: desired, ConfirmationToken: "wrong"}
+	request.Customization = &CodexConversionCustomization{Desired: desired, ConfirmationToken: strings.Repeat("0", sha256.Size*2)}
 	result, err := harness.converter.Convert(context.Background(), request)
 	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d runs=%d calls=%d", result, err, len(harness.topology.stops), len(harness.topology.runs), len(harness.runner.calls))

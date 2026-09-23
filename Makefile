@@ -1,7 +1,7 @@
 GOTOOLCHAIN ?= go1.27.0
 BASE ?=
 
-.PHONY: test test-timing test-race test-properties test-release-candidate mutation-changed mutation-full
+.PHONY: test test-timing test-race test-properties test-release-candidate mutation-changed mutation-full mutation-full-absolute
 
 test:
 	$(MAKE) test-timing
@@ -27,3 +27,6 @@ mutation-changed:
 
 mutation-full:
 	GOTOOLCHAIN=$(GOTOOLCHAIN) ./scripts/mutation-run full
+
+mutation-full-absolute:
+	GOTOOLCHAIN=$(GOTOOLCHAIN) ./scripts/mutation-run full-absolute

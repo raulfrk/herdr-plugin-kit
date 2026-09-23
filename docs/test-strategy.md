@@ -82,6 +82,14 @@ until every critical survivor is killed or independently approved and every
 critical uncovered mutant is covered, at which point a final exact-candidate
 full run must meet the absolute 100%/100% critical target.
 
+If source drift blocks a baseline preflight, `make mutation-full-absolute`
+runs the full suite without the historical debt allowance and stores separate
+`full-absolute` artifacts. It retains the same clean committed candidate and
+absolute thresholds. A failing result is diagnostic evidence for debt retirement
+or an explicit reviewed baseline reconciliation; it does not refresh the
+baseline or satisfy the release gate. `make mutation-full` continues to reject
+the stale baseline before running Gremlins.
+
 ## Reproducibility and isolation
 
 The unpublished release-candidate gate runs only from a clean committed tree:

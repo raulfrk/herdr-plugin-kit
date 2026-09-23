@@ -4,12 +4,16 @@ set -eu
 mode=${1:-}
 base=${2:-}
 case "$mode" in
-  changed|full) ;;
-  *) echo "usage: mutation-run changed <base-commit> | full" >&2; exit 2 ;;
+  changed|full|full-absolute) ;;
+  *) echo "usage: mutation-run changed <base-commit> | full | full-absolute" >&2; exit 2 ;;
 esac
 if [ "$mode" = changed ] && [ -z "$base" ]; then
   echo "changed mode requires a base commit" >&2
   exit 2
+fi
+scope=$mode
+if [ "$mode" = full-absolute ]; then
+  scope=full
 fi
 
 tool_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -55,7 +59,7 @@ if [ -e "$artifact_dir" ]; then
 fi
 set -- preflight --policy mutation-policy.json \
   --baseline docs/mutation-baseline.md --config .gremlins.yaml \
-  --scope "$mode" --gremlins-version "$gremlins_version"
+  --scope "$scope" --gremlins-version "$gremlins_version"
 if [ "$mode" = full ] && [ -e "$repo/mutation-full-baseline.json" ]; then
   set -- "$@" --full-baseline mutation-full-baseline.json
 fi
@@ -146,7 +150,7 @@ fi
 gate_status=0
 set -- check --report "$report" --policy mutation-policy.json \
   --baseline docs/mutation-baseline.md --config .gremlins.yaml \
-  --candidate "$candidate" --base "$base" --scope "$mode" \
+  --candidate "$candidate" --base "$base" --scope "$scope" \
   --gremlins-version "$gremlins_version" --output "$gate_report"
 if [ "$mode" = full ] && [ -e "$worktree/mutation-full-baseline.json" ]; then
   set -- "$@" --full-baseline mutation-full-baseline.json
