@@ -31,10 +31,26 @@ func SensitiveKeyPatterns() []string { return append([]string(nil), sensitiveKey
 func Redact(text string) string {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		line = redactHeaders(line)
-		line = redactBearer(line)
-		line = redactFlags(line)
-		lines[i] = redactMatches(line, assignment)
+		lower := strings.ToLower(line)
+		sensitiveKeyPossible := strings.Contains(lower, "token") || strings.Contains(lower, "pass") ||
+			strings.Contains(lower, "secret") || strings.Contains(lower, "apikey") ||
+			strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") ||
+			strings.Contains(lower, "privatekey") || strings.Contains(lower, "private_key") ||
+			strings.Contains(lower, "private-key") || strings.Contains(lower, "authorization") ||
+			strings.Contains(lower, "cookie")
+		if strings.Contains(line, ":") && (strings.Contains(lower, "authorization") || strings.Contains(lower, "cookie")) {
+			line = redactHeaders(line)
+		}
+		if strings.Contains(lower, "bearer") {
+			line = redactBearer(line)
+		}
+		if sensitiveKeyPossible && strings.Contains(line, "--") {
+			line = redactFlags(line)
+		}
+		if sensitiveKeyPossible && strings.ContainsAny(line, ":=") {
+			line = redactMatches(line, assignment)
+		}
+		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
 }
