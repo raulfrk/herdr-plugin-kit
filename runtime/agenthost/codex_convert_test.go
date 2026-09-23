@@ -330,6 +330,74 @@ func TestCodexConverterRejectsServiceErrorBeforeIdentityWork(t *testing.T) {
 	}
 }
 
+func TestCodexConverterPrepareCustomizationRejectsInvalidServiceBeforeIdentityWork(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		invalidate func(*conversionHarness) error
+	}{
+		{name: "service error with valid snapshot", invalidate: func(harness *conversionHarness) error {
+			serviceErr := errors.New("service unavailable")
+			harness.service.err = serviceErr
+			return serviceErr
+		}},
+		{name: "stale snapshot without service error", invalidate: func(harness *conversionHarness) error {
+			harness.service.snapshot.SocketPath = ""
+			return nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newConversionHarness(t)
+			serviceErr := test.invalidate(harness)
+			disclosure, err := harness.converter.PrepareCustomization(context.Background(), harness.source, managedPolicy(), 0)
+			if !errors.Is(err, ErrManagedStale) || (serviceErr != nil && !errors.Is(err, serviceErr)) || !reflect.DeepEqual(disclosure, CodexConversionDisclosure{}) {
+				t.Fatalf("disclosure=%+v error=%v", disclosure, err)
+			}
+			if harness.service.callCount() != 1 || harness.verifier.closed != 0 || len(harness.runner.calls) != 0 || len(harness.topology.runs) != 0 || len(harness.topology.stops) != 0 {
+				t.Fatalf("service calls=%d verifier closes=%d commands=%+v runs=%+v stops=%+v", harness.service.callCount(), harness.verifier.closed, harness.runner.calls, harness.topology.runs, harness.topology.stops)
+			}
+		})
+	}
+}
+
+func TestCodexConverterPrepareCustomizationRejectsEachCaptureFailure(t *testing.T) {
+	readErr := errors.New("constraints unavailable")
+	threadErr := errors.New("thread unavailable")
+	historyErr := errors.New("history unavailable")
+	for _, test := range []struct {
+		name    string
+		mutate  func(*conversionHarness)
+		wantErr error
+	}{
+		{name: "constraint read", mutate: func(harness *conversionHarness) {
+			harness.verifier.constraintErrs = []error{readErr}
+		}, wantErr: readErr},
+		{name: "constraint validation", mutate: func(harness *conversionHarness) {
+			harness.verifier.constraints[0].Config["approvals_reviewer"] = json.RawMessage("{")
+		}},
+		{name: "thread read", mutate: func(harness *conversionHarness) {
+			harness.verifier.identityErrs = []error{threadErr}
+		}, wantErr: threadErr},
+		{name: "thread identity", mutate: func(harness *conversionHarness) {
+			harness.verifier.identities[0].ID = "wrong-thread"
+		}, wantErr: ErrManagedStale},
+		{name: "stable history", mutate: func(harness *conversionHarness) {
+			harness.verifier.historyErrs = []error{historyErr}
+		}, wantErr: historyErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newConversionHarness(t)
+			test.mutate(harness)
+			disclosure, err := harness.converter.PrepareCustomization(context.Background(), harness.source, managedPolicy(), 0)
+			if !errors.Is(err, ErrCodexConversionCapture) || (test.wantErr != nil && !errors.Is(err, test.wantErr)) || !reflect.DeepEqual(disclosure, CodexConversionDisclosure{}) {
+				t.Fatalf("disclosure=%+v error=%v, want capture failure with %v", disclosure, err, test.wantErr)
+			}
+			if harness.verifier.closed != 1 || len(harness.runner.calls) != 0 || len(harness.topology.runs) != 0 || len(harness.topology.stops) != 0 {
+				t.Fatalf("verifier closes=%d commands=%+v runs=%+v stops=%+v", harness.verifier.closed, harness.runner.calls, harness.topology.runs, harness.topology.stops)
+			}
+		})
+	}
+}
+
 func TestCodexConversionValidationRequiresResolvableAndBoundSourceIndependently(t *testing.T) {
 	harness := newConversionHarness(t)
 	valid := harness.request()

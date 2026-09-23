@@ -666,6 +666,29 @@ func TestCanonicalExistingDirectory(t *testing.T) {
 	}
 }
 
+func TestEffectiveCodexHomeFallsBackAndRejectsMissingUserHome(t *testing.T) {
+	t.Run("fallback to user home", func(t *testing.T) {
+		userHome := t.TempDir()
+		codexHome := filepath.Join(userHome, ".codex")
+		if err := os.Mkdir(codexHome, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", userHome)
+		t.Setenv("CODEX_HOME", "")
+		got, err := effectiveCodexHome()
+		if err != nil || got != codexHome {
+			t.Fatalf("effective home=%q err=%v, want %q", got, err, codexHome)
+		}
+	})
+	t.Run("missing user home", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("CODEX_HOME", "")
+		if _, err := effectiveCodexHome(); err == nil {
+			t.Fatal("missing user home was accepted")
+		}
+	})
+}
+
 func TestCanonicalNativeDaemonActive(t *testing.T) {
 	// Unix socket paths are limited to 108 bytes on Linux. This test needs a
 	// real socket, including a retained stale inode, so keep its task-owned
