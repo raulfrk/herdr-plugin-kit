@@ -16,7 +16,10 @@ const (
 	MaxForkReadyTimeout     time.Duration = 300_000_000_000 // 5 minutes
 )
 
-var ErrUnsupportedFork = errors.New("unsupported native fork")
+var (
+	ErrUnsupportedFork      = errors.New("unsupported native fork")
+	ErrForkOutcomeUncertain = errors.New("native fork outcome uncertain")
+)
 
 type ForkProfile struct {
 	Executable string
@@ -98,6 +101,11 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("fork: %w", err)
 	}
+	if kind == "opencode" {
+		if err := validateOpenCodeServer(request.OpenCodeServer); err != nil || request.OpenCodeServer.Directory != request.Source.CWD {
+			return ForkResult{}, fmt.Errorf("fork OpenCode source server: %w", ErrUnsupportedFork)
+		}
+	}
 	if request.ObserveCodexPolicy && (kind != "codex" || request.Prompt == nil || request.CodexPolicy != (ManagedCodexPolicy{})) {
 		return ForkResult{}, fmt.Errorf("fork Codex policy: %w", ErrUnsupportedFork)
 	}
@@ -105,12 +113,13 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	if err != nil || !sameForkSource(request.Source, before) {
 		return ForkResult{}, fmt.Errorf("fork source: %w", ErrStaleReport)
 	}
+	var endpointArgs []string
 	if kind == "opencode" {
-		endpointArgs, endpointErr := openCodeTUIEndpointArgs(f.openCodeTUIReserve)
+		var endpointErr error
+		endpointArgs, endpointErr = openCodeTUIEndpointArgs(f.openCodeTUIReserve)
 		if endpointErr != nil {
 			return ForkResult{}, fmt.Errorf("fork OpenCode TUI: %w", endpointErr)
 		}
-		argv = append(argv, endpointArgs...)
 	}
 	var binding *ordinaryCodexBinding
 	if request.Prompt != nil && kind == "codex" {
@@ -123,7 +132,7 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			return ForkResult{}, fmt.Errorf("fork Codex identity: %w", err)
 		}
 	}
-	created, err := f.topology().Launch(ctx, sessionhost.LaunchRequest{
+	launchRequest := sessionhost.LaunchRequest{
 		Origin: sessionhost.Origin{
 			SessionName: request.Source.SessionName,
 			WorkspaceID: request.Source.WorkspaceID,
@@ -133,14 +142,38 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		Argv: argv, Directory: request.Source.CWD, Placement: request.Placement,
 		Direction: request.Direction, TabLabel: request.TabLabel, Focus: false,
 		OMPStatusSocket: request.OMPStatusSocket,
-	})
+	}
+	nativeChildID := ""
+	uncertain := func(cause error) error {
+		if nativeChildID == "" {
+			return cause
+		}
+		return errors.Join(fmt.Errorf("%w: OpenCode child %s", ErrForkOutcomeUncertain, nativeChildID), cause)
+	}
+	if kind == "opencode" {
+		launchRequest.Argv = append(append(append([]string(nil), argv...), "--session", request.Source.Session.Value), endpointArgs...)
+		if err := (sessionhost.Host{Session: f.Host.Session}).ValidateLaunch(launchRequest); err != nil {
+			return ForkResult{}, fmt.Errorf("fork launch: %w", err)
+		}
+		nativeChildID, err = forkOpenCodeSession(ctx, request.OpenCodeServer, request.Source.Session.Value)
+		if err != nil {
+			return ForkResult{}, fmt.Errorf("fork OpenCode session: %w", err)
+		}
+		argv = append(argv, "--session", nativeChildID)
+		argv = append(argv, endpointArgs...)
+		launchRequest.Argv = argv
+		if afterFork, findErr := f.Host.find(ctx, request.Source.PaneID); findErr != nil || !sameForkSource(before, afterFork) {
+			return ForkResult{}, uncertain(fmt.Errorf("fork source changed after native session creation: %w", ErrStaleReport))
+		}
+	}
+	created, err := f.topology().Launch(ctx, launchRequest)
 	if err != nil {
-		return ForkResult{}, fmt.Errorf("fork launch: %w", err)
+		return ForkResult{}, uncertain(fmt.Errorf("fork launch: %w", err))
 	}
 	fail := func(cause error) (ForkResult, error) {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), promptCleanupTimeout)
 		defer cancel()
-		return ForkResult{}, errors.Join(cause, f.topology().Cleanup(cleanupCtx, created))
+		return ForkResult{}, uncertain(errors.Join(cause, f.topology().Cleanup(cleanupCtx, created)))
 	}
 	ompStatusSocket := request.OMPStatusSocket
 	if kind == "omp" && request.Prompt != nil && ompStatusSocket == "" {
@@ -161,6 +194,9 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	}
 	if err != nil {
 		return fail(fmt.Errorf("fork child: %w", err))
+	}
+	if nativeChildID != "" && (child.Session == nil || child.Session.Value != nativeChildID) {
+		return fail(fmt.Errorf("fork child: %w", ErrStaleReport))
 	}
 	after, err := f.Host.find(ctx, request.Source.PaneID)
 	if err != nil || !sameForkSource(before, after) {
@@ -183,13 +219,16 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 			if promptResult.State == PromptNotAttempted {
 				return fail(promptErr)
 			}
-			return result, promptErr
+			return result, uncertain(promptErr)
 		}
 		child, result.Child = promptResult.Agent, promptResult.Agent
+		if nativeChildID != "" && (child.Session == nil || child.Session.Value != nativeChildID) {
+			return result, uncertain(fmt.Errorf("fork prompted child: %w", ErrStaleReport))
+		}
 		if binding != nil && codexPrepared.Prefix != "" {
 			child, err = binding.BindAfterPrompt(ctx, created, request.Source.CWD, argv, codexPrepared)
 			if err != nil {
-				return result, fmt.Errorf("fork Codex identity: %w", err)
+				return result, uncertain(fmt.Errorf("fork Codex identity: %w", err))
 			}
 			result.Child = child
 			result.Prompt.Agent = child
@@ -201,21 +240,21 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		child, err = f.Host.Focus(ctx, child)
 		if err != nil {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, fmt.Errorf("fork focus: %w", err)
+				return result, uncertain(fmt.Errorf("fork focus: %w", err))
 			}
 			return fail(fmt.Errorf("fork focus: %w", err))
 		}
 		result.Child = child
-		if ready, _ := classifyForkChild(request.Source, child, created, kind); !ready {
+		if ready, _ := classifyForkChild(request.Source, child, created, kind); !ready || nativeChildID != "" && (child.Session == nil || child.Session.Value != nativeChildID) {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, fmt.Errorf("fork focus: %w", ErrStaleReport)
+				return result, uncertain(fmt.Errorf("fork focus: %w", ErrStaleReport))
 			}
 			return fail(fmt.Errorf("fork focus: %w", ErrStaleReport))
 		}
 		afterFocus, findErr := f.Host.find(ctx, request.Source.PaneID)
 		if findErr != nil || !sameForkSource(before, afterFocus) {
 			if request.Prompt != nil && result.Prompt.State == PromptAcknowledged {
-				return result, fmt.Errorf("fork source changed after focus: %w", ErrStaleReport)
+				return result, uncertain(fmt.Errorf("fork source changed after focus: %w", ErrStaleReport))
 			}
 			return fail(fmt.Errorf("fork source changed after focus: %w", ErrStaleReport))
 		}
@@ -294,7 +333,6 @@ func composeForkArgv(request ForkRequest) ([]string, string, error) {
 		}
 		argv = append(argv, request.Source.CWD)
 		argv = append(argv, options...)
-		argv = append(argv, "--session", session.Value, "--fork")
 	default:
 		return nil, "", ErrUnsupportedFork
 	}

@@ -2,10 +2,13 @@ package agenthost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCodePromptSessionCreateAndDeleteExactContract(t *testing.T) {
@@ -34,6 +37,91 @@ func TestOpenCodePromptSessionCreateAndDeleteExactContract(t *testing.T) {
 	}
 	if err := sessions.Delete(context.Background(), configured, id); err != nil || requests != 2 {
 		t.Fatalf("requests=%d error=%v", requests, err)
+	}
+}
+
+func TestOpenCodeNativeForkExactContractAndUncertainResponses(t *testing.T) {
+	const sourceID = "ses_source"
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		wantChild  string
+		wantErrors bool
+	}{
+		{name: "valid", status: http.StatusOK, body: `{"id":"ses_child","directory":"/tmp/project","parentID":null}`, wantChild: "ses_child"},
+		{name: "same identity", status: http.StatusOK, body: `{"id":"ses_source","directory":"/tmp/project"}`, wantErrors: true},
+		{name: "wrong directory", status: http.StatusOK, body: `{"id":"ses_child","directory":"/tmp/other"}`, wantErrors: true},
+		{name: "malformed", status: http.StatusOK, body: `{"id":"ses_child"} {}`, wantErrors: true},
+		{name: "empty success", status: http.StatusNoContent, wantErrors: true},
+		{name: "server error after possible creation", status: http.StatusInternalServerError, wantErrors: true},
+		{name: "rejected response not proof of no effect", status: http.StatusBadRequest, wantErrors: true},
+		{name: "redirect not followed", status: http.StatusFound, wantErrors: true},
+		{name: "oversized", status: http.StatusOK, body: strings.Repeat("x", openCodeResponseBytes+1), wantErrors: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests++
+				if request.Method != http.MethodPost || request.URL.Path != "/session/"+sourceID+"/fork" || request.URL.Query().Get("directory") != "/tmp/project" || request.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("unexpected native fork request: %s %s", request.Method, request.URL)
+				}
+				if test.status == http.StatusFound {
+					response.Header().Set("Location", "http://example.com/elsewhere")
+				}
+				response.WriteHeader(test.status)
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			child, err := forkOpenCodeSession(context.Background(), OpenCodeServer{URL: server.URL, Directory: "/tmp/project"}, sourceID)
+			if requests != 1 || child != test.wantChild || (test.wantErrors && !errors.Is(err, ErrForkOutcomeUncertain)) || (!test.wantErrors && err != nil) {
+				t.Fatalf("requests=%d child=%q error=%v", requests, child, err)
+			}
+		})
+	}
+}
+
+func TestOpenCodeNativeForkPreflightAndCanceledRequest(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	configured := OpenCodeServer{URL: server.URL, Directory: "/tmp/project"}
+	if _, err := forkOpenCodeSession(context.Background(), configured, "bad"); err == nil {
+		t.Fatal("invalid source ID reached native API")
+	}
+	if _, err := forkOpenCodeSession(context.Background(), OpenCodeServer{URL: "http://example.com:1234", Directory: "/tmp/project"}, "ses_source"); err == nil {
+		t.Fatal("nonloopback source server reached native API")
+	}
+	preCanceled, cancelPre := context.WithCancel(context.Background())
+	cancelPre()
+	if _, err := forkOpenCodeSession(preCanceled, configured, "ses_source"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrForkOutcomeUncertain) {
+		t.Fatalf("pre-dispatch cancellation=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := forkOpenCodeSession(ctx, configured, "ses_source")
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("native fork request was not dispatched")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrForkOutcomeUncertain) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("dispatched cancellation=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled native fork request did not return")
 	}
 }
 

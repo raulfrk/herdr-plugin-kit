@@ -3,6 +3,8 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -90,9 +92,18 @@ func TestForkCodexPreservesSourceAndCreatesDistinctBackgroundChild(t *testing.T)
 func TestForkOpenCodeAddsOwnedLoopbackEndpointAndPreservesSource(t *testing.T) {
 	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
 	child := forkAgent("opencode", "w1:p2", "ses_child", "/tmp/project")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Method != http.MethodPost || request.URL.Path != "/session/ses_source/fork" || request.URL.Query().Get("directory") != source.CWD {
+			t.Errorf("unexpected OpenCode fork request: %s %s", request.Method, request.URL)
+		}
+		_, _ = response.Write([]byte(`{"id":"ses_child","directory":"/tmp/project","parentID":null}`))
+	}))
+	defer server.Close()
 	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: child.PaneID}}
 	topology := &fakeTopology{created: created}
-	runner := &scriptedRunner{results: []command.Result{listForkResult(t, source), listForkResult(t, child), listForkResult(t, source)}}
+	runner := &scriptedRunner{results: []command.Result{listForkResult(t, source), listForkResult(t, source), listForkResult(t, child), listForkResult(t, source)}}
 	forker := NewForker(Host{Runner: runner, Session: "named"})
 	forker.launcher = topology
 	forker.wait = func(context.Context, time.Duration) error { return nil }
@@ -100,13 +111,111 @@ func TestForkOpenCodeAddsOwnedLoopbackEndpointAndPreservesSource(t *testing.T) {
 
 	result, err := forker.Fork(context.Background(), ForkRequest{
 		Source: source, Profile: ForkProfile{Executable: "opencode", Options: []string{"--mini"}}, Placement: sessionhost.NewPane, Direction: "right",
+		OpenCodeServer: OpenCodeServer{URL: server.URL, Directory: source.CWD},
 	})
 	if err != nil || !sameImmutable(result.Source, source) || !sameImmutable(result.Child, child) || result.Created != created {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
-	want := []string{"opencode", "/tmp/project", "--mini", "--session", "ses_source", "--fork", "--hostname", "127.0.0.1", "--port", "49154"}
-	if len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, want) || len(topology.cleanupCalls) != 0 {
-		t.Fatalf("launch=%+v cleanup=%+v", topology.requests, topology.cleanupCalls)
+	want := []string{"opencode", "/tmp/project", "--mini", "--session", "ses_child", "--hostname", "127.0.0.1", "--port", "49154"}
+	if requests != 1 || len(topology.requests) != 1 || !reflect.DeepEqual(topology.requests[0].Argv, want) || len(topology.cleanupCalls) != 0 {
+		t.Fatalf("API requests=%d launch=%+v cleanup=%+v", requests, topology.requests, topology.cleanupCalls)
+	}
+}
+
+func TestForkOpenCodePostNativeFailuresRemainUncertainWithChildIdentity(t *testing.T) {
+	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
+	created := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2"}}
+	for _, test := range []struct {
+		name        string
+		observed    Agent
+		launchErr   error
+		wantCleanup int
+	}{
+		{name: "launch failed after API fork", launchErr: errors.New("launch failed")},
+		{name: "wrong Herdr child identity", observed: forkAgent("opencode", "w1:p2", "ses_other", "/tmp/project"), wantCleanup: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests++
+				if request.Method != http.MethodPost {
+					t.Errorf("unexpected native API method: %s", request.Method)
+				}
+				_, _ = response.Write([]byte(`{"id":"ses_child","directory":"/tmp/project"}`))
+			}))
+			defer server.Close()
+			topology := &fakeTopology{created: created, launchErr: test.launchErr}
+			results := []command.Result{listForkResult(t, source), listForkResult(t, source)}
+			if test.observed.PaneID != "" {
+				results = append(results, listForkResult(t, test.observed))
+			}
+			forker := NewForker(Host{Runner: &scriptedRunner{results: results}, Session: "named"})
+			forker.launcher = topology
+			forker.wait = func(context.Context, time.Duration) error { return nil }
+			forker.openCodeTUIReserve = fixedOpenCodeTUIReserve(49154)
+			_, err := forker.Fork(context.Background(), ForkRequest{
+				Source: source, Profile: ForkProfile{Executable: "opencode"}, Placement: sessionhost.NewPane, Direction: "right",
+				OpenCodeServer: OpenCodeServer{URL: server.URL, Directory: source.CWD},
+			})
+			if !errors.Is(err, ErrForkOutcomeUncertain) || !strings.Contains(err.Error(), "ses_child") || requests != 1 || len(topology.cleanupCalls) != test.wantCleanup {
+				t.Fatalf("error=%v requests=%d cleanup=%v", err, requests, topology.cleanupCalls)
+			}
+		})
+	}
+}
+
+func TestForkOpenCodeSourceDriftAfterNativeForkNeverLaunches(t *testing.T) {
+	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
+	drifted := forkAgent("opencode", "w1:p1", "ses_other", "/tmp/project")
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte(`{"id":"ses_child","directory":"/tmp/project"}`))
+	}))
+	defer server.Close()
+	topology := &fakeTopology{}
+	forker := NewForker(Host{Runner: &scriptedRunner{results: []command.Result{listForkResult(t, source), listForkResult(t, drifted)}}, Session: "named"})
+	forker.launcher = topology
+	forker.openCodeTUIReserve = fixedOpenCodeTUIReserve(49154)
+	_, err := forker.Fork(context.Background(), ForkRequest{
+		Source: source, Profile: ForkProfile{Executable: "opencode"}, Placement: sessionhost.NewPane, Direction: "right",
+		OpenCodeServer: OpenCodeServer{URL: server.URL, Directory: source.CWD},
+	})
+	if !errors.Is(err, ErrForkOutcomeUncertain) || !strings.Contains(err.Error(), "ses_child") || len(topology.requests) != 0 {
+		t.Fatalf("error=%v launches=%v", err, topology.requests)
+	}
+}
+
+func TestForkOpenCodeInvalidLaunchNeverCreatesNativeChild(t *testing.T) {
+	source := forkAgent("opencode", "w1:p1", "ses_source", "/tmp/project")
+	for _, test := range []struct {
+		name      string
+		placement sessionhost.Placement
+		direction string
+		tabLabel  string
+	}{
+		{name: "missing pane direction", placement: sessionhost.NewPane},
+		{name: "direction on new tab", placement: sessionhost.NewTab, direction: "right"},
+		{name: "oversized tab label", placement: sessionhost.NewTab, tabLabel: strings.Repeat("x", 257)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				requests++
+				_, _ = response.Write([]byte(`{"id":"ses_child","directory":"/tmp/project"}`))
+			}))
+			defer server.Close()
+			topology := &fakeTopology{}
+			forker := NewForker(Host{Runner: &scriptedRunner{results: []command.Result{listForkResult(t, source)}}, Session: "named"})
+			forker.launcher = topology
+			forker.openCodeTUIReserve = fixedOpenCodeTUIReserve(49154)
+			_, err := forker.Fork(context.Background(), ForkRequest{
+				Source: source, Profile: ForkProfile{Executable: "opencode"}, Placement: test.placement,
+				Direction: test.direction, TabLabel: test.tabLabel,
+				OpenCodeServer: OpenCodeServer{URL: server.URL, Directory: source.CWD},
+			})
+			if err == nil || errors.Is(err, ErrForkOutcomeUncertain) || requests != 0 || len(topology.requests) != 0 {
+				t.Fatalf("error=%v API requests=%d launches=%v", err, requests, topology.requests)
+			}
+		})
 	}
 }
 
@@ -141,7 +250,7 @@ func TestForkComposesSupportedNativeArgv(t *testing.T) {
 	}{
 		{"codex", "thread-1", "codex", "", []string{"--sandbox=workspace-write", "--search"}, []string{"codex", "--sandbox=workspace-write", "--search", "-C", "/tmp/project", "fork", "thread-1"}},
 		{"omp", "/tmp/source.jsonl", "/opt/omp", "/tmp/status.sock", []string{"--model", "openai/gpt", "--thinking=max"}, []string{"/opt/omp", "--model", "openai/gpt", "--thinking=max", "--cwd", "/tmp/project", "--fork", "/tmp/source.jsonl"}},
-		{"opencode", "session-1", "opencode", "", []string{"--model=provider/model", "--mini"}, []string{"opencode", "/tmp/project", "--model=provider/model", "--mini", "--session", "session-1", "--fork"}},
+		{"opencode", "session-1", "opencode", "", []string{"--model=provider/model", "--mini"}, []string{"opencode", "/tmp/project", "--model=provider/model", "--mini"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.kind, func(t *testing.T) {

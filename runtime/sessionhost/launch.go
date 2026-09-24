@@ -576,6 +576,13 @@ func (h Host) validateLaunch(request LaunchRequest) error {
 	return nil
 }
 
+// ValidateLaunch checks a launch without creating a Herdr target. Callers
+// with a preceding external effect can reject deterministic launch errors
+// before performing that effect.
+func (h Host) ValidateLaunch(request LaunchRequest) error {
+	return h.validateLaunch(request)
+}
+
 func validateArgv(argv []string, terminalDelivery bool) error {
 	if len(argv) == 0 || len(argv) > MaxArgv {
 		return fmt.Errorf("argv must contain 1 to %d elements", MaxArgv)

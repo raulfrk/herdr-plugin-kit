@@ -4,12 +4,51 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+const openCodeForkRequestTimeout = 10 * time.Second
+
+// forkOpenCodeSession performs one native fork against the caller-verified
+// source listener. Once the request is dispatched, an unsuccessful response
+// cannot establish whether the server created a child, so it is never retried.
+func forkOpenCodeSession(ctx context.Context, server OpenCodeServer, sourceID string) (string, error) {
+	if err := validateOpenCodeServer(server); err != nil {
+		return "", err
+	}
+	if err := validateBounded("OpenCode source session ID", sourceID, maxIdentityBytes, false); err != nil || !strings.HasPrefix(sourceID, "ses_") {
+		return "", errors.New("invalid OpenCode source session ID")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, openCodeForkRequestTimeout)
+	defer cancel()
+	status, body, err := openCodeSessionRequest(requestCtx, server, http.MethodPost, "/session/"+url.PathEscape(sourceID)+"/fork", []byte("{}"))
+	if err != nil {
+		return "", errors.Join(ErrForkOutcomeUncertain, err)
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("%w: OpenCode fork server status %d", ErrForkOutcomeUncertain, status)
+	}
+	var session struct {
+		ID        string `json:"id"`
+		Directory string `json:"directory"`
+	}
+	if err := decodeOpenCode(body, &session); err != nil || !strings.HasPrefix(session.ID, "ses_") || session.ID == sourceID || session.Directory != server.Directory {
+		return "", ErrForkOutcomeUncertain
+	}
+	if err := validateBounded("OpenCode child session ID", session.ID, maxIdentityBytes, false); err != nil {
+		return "", ErrForkOutcomeUncertain
+	}
+	return session.ID, nil
+}
 
 type openCodePromptSessions interface {
 	Create(context.Context, OpenCodeServer) (string, error)

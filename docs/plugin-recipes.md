@@ -268,7 +268,7 @@ selector, source identity, and CWD:
 |---|---|
 | Codex 0.154.0 | allowed options, `-C CWD fork THREAD_ID` |
 | OMP 18.1.18 | allowed options, `--cwd CWD --fork ABSOLUTE_JSONL` |
-| OpenCode 1.18.30 | `CWD`, allowed options, `--session SESSION_ID --fork` |
+| OpenCode 1.18.30 | `CWD`, allowed options, native `session.fork` then `--session CHILD_ID` |
 
 Profiles may contain only the fixed option matrix enforced by
 `ForkProfile.Options`. Model, reasoning, sandbox/approval, and documented
@@ -278,6 +278,14 @@ endpoints, profile/session directories, resume/continue/fork selectors, source
 IDs, and prompt flags are rejected before creation. Codex `--config` accepts
 only `model`, `model_reasoning_effort`, and `service_tier`. Aliases share one
 duplicate key, so `-m one --model two` is rejected.
+
+For OpenCode Fork, provide `ForkRequest.OpenCodeServer` for the exact
+source-owned loopback listener and source CWD, including an unprompted fork.
+The Kit makes one bounded native fork request, validates the distinct returned
+child ID, then attaches the TUI to that ID and verifies Herdr reports it.
+Do not retry an uncertain native response or infer that a failed TUI launch
+removed the native child. `ErrForkOutcomeUncertain` means the caller must retain
+the operation for inspection instead of reporting that nothing was created.
 
 For a prompted ordinary Codex fork, set `ObserveCodexPolicy: true`, leave
 `CodexPolicy` zero, and provide the prepared prompt. The Kit obtains the
