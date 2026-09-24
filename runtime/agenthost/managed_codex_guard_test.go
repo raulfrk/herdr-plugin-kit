@@ -177,6 +177,32 @@ func TestStopForSessionChangeStopsOnlyStableExactProcess(t *testing.T) {
 	}
 }
 
+func TestStopForSessionChangeRefusesVisibleComposerBeforeStop(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	source.Status = "done"
+	clear := command.Result{Stdout: managedEmptyComposer("answer")}
+	draft := command.Result{Stdout: []byte("answer\n› unsent draft\n status")}
+	for _, test := range []struct {
+		name    string
+		results []command.Result
+	}{
+		{"first read", []command.Result{managedAgentResult(t, source), draft}},
+		{"final read", []command.Result{managedAgentResult(t, source), clear, managedAgentResult(t, source), draft}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &scriptedRunner{results: test.results}
+			topology := &fakeManagedTopology{inspected: sessionProcess(source.CWD)}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+			launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher.topology = topology
+			_, err := launcher.StopForSessionChange(context.Background(), source, 0)
+			if !errors.Is(err, ErrCodexConversionComposer) || !errors.Is(err, ErrManagedPaneBusy) || len(topology.stops) != 0 || hasPaneInput(runner.calls) || len(runner.results) != 0 {
+				t.Fatalf("error=%v stops=%+v calls=%+v unused=%+v", err, topology.stops, runner.calls, runner.results)
+			}
+		})
+	}
+}
+
 func TestAwaitSafeSessionChangeRejectsEachStableReadDriftWithoutInput(t *testing.T) {
 	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
 	process := sessionProcess(source.CWD)

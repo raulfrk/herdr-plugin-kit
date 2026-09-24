@@ -25,6 +25,7 @@ const (
 var (
 	ErrCodexConversionCapture  = errors.New("Codex conversion capture failed")
 	ErrCodexConversionFallback = errors.New("Codex conversion restored the ordinary session")
+	ErrCodexConversionComposer = errors.New("Codex conversion composer is not provably empty before stop")
 )
 
 // CodexConversionRequest selects one ordinary Codex TUI in its existing pane.
@@ -731,7 +732,7 @@ func (c CodexConverter) recheckSourceBeforeBinding(ctx context.Context, target s
 			return Agent{}, err
 		}
 		if !emptyCodexComposer(visible) {
-			return Agent{}, ErrManagedPaneBusy
+			return Agent{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
 		}
 		if sample != 0 && !sameManagedPreInputObservation(prior, current) {
 			return Agent{}, ErrManagedStale

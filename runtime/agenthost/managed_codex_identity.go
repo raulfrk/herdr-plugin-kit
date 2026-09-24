@@ -132,6 +132,9 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 				return Agent{}, managedStatusObservation{}, err
 			}
 			if !emptyCodexComposer(visible) {
+				if expectedProcess != nil {
+					return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+				}
 				if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
 					return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 				}
@@ -148,11 +151,14 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 				return Agent{}, managedStatusObservation{}, err
 			}
 			visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-			if err != nil || !emptyCodexComposer(visible) {
-				if err == nil {
-					err = ErrManagedPaneBusy
-				}
+			if err != nil {
 				return Agent{}, managedStatusObservation{}, err
+			}
+			if !emptyCodexComposer(visible) {
+				if expectedProcess != nil {
+					return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+				}
+				return Agent{}, managedStatusObservation{}, ErrManagedPaneBusy
 			}
 			return check, managedStatusObservation{identity: check.Session.Value, policy: policy}, nil
 		}
@@ -161,6 +167,9 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 			return Agent{}, managedStatusObservation{}, err
 		}
 		if !emptyCodexComposer(visible) {
+			if expectedProcess != nil {
+				return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+			}
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
 				return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
 			}
@@ -185,11 +194,14 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 			return Agent{}, managedStatusObservation{}, err
 		}
 		visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-		if err != nil || !emptyCodexComposer(visible) {
-			if err == nil {
-				err = ErrManagedPaneBusy
-			}
+		if err != nil {
 			return Agent{}, managedStatusObservation{}, err
+		}
+		if !emptyCodexComposer(visible) {
+			if expectedProcess != nil {
+				return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+			}
+			return Agent{}, managedStatusObservation{}, ErrManagedPaneBusy
 		}
 		if err := l.runHerdr(ctx, "pane", "send-text", target.PaneID, "/status"); err != nil {
 			return Agent{}, managedStatusObservation{}, err

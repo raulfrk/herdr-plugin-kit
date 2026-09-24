@@ -24,7 +24,7 @@ type ManagedCodexPaneSnapshot struct {
 // managed Codex pane is unfocused, quiescent, and has an empty composer on two
 // consecutive stable reads.
 func (l ManagedCodexLauncher) AwaitSafeSessionChange(ctx context.Context, source Agent, readyTimeout time.Duration) (ManagedCodexPaneSnapshot, error) {
-	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, false)
+	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, false, false)
 }
 
 // AwaitSafeOverlaySessionChange applies the managed Codex session-change
@@ -33,10 +33,10 @@ func (l ManagedCodexLauncher) AwaitSafeSessionChange(ctx context.Context, source
 // both stable reads. The caller must independently prove and retain ownership
 // of that modal; this method performs no input or focus side effect.
 func (l ManagedCodexLauncher) AwaitSafeOverlaySessionChange(ctx context.Context, source Agent, readyTimeout time.Duration) (ManagedCodexPaneSnapshot, error) {
-	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, true)
+	return l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, true, false)
 }
 
-func (l ManagedCodexLauncher) awaitSafeSessionChangeWithFocus(ctx context.Context, source Agent, readyTimeout time.Duration, focused bool) (ManagedCodexPaneSnapshot, error) {
+func (l ManagedCodexLauncher) awaitSafeSessionChangeWithFocus(ctx context.Context, source Agent, readyTimeout time.Duration, focused, refuseComposer bool) (ManagedCodexPaneSnapshot, error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -52,14 +52,14 @@ func (l ManagedCodexLauncher) awaitSafeSessionChangeWithFocus(ctx context.Contex
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, managedReadyTimeout(readyTimeout))
 	defer cancel()
-	return l.awaitSafeSessionChangeFocus(waitCtx, source, service, focused)
+	return l.awaitSafeSessionChangeFocus(waitCtx, source, service, focused, refuseComposer)
 }
 
 // StopForSessionChange performs the same non-disruptive guard and then stops
 // only the exact observed foreground process, returning after the same pane's
 // authoritative shell is ready. No replacement conversation is launched.
 func (l ManagedCodexLauncher) StopForSessionChange(ctx context.Context, source Agent, readyTimeout time.Duration) (ManagedCodexPaneSnapshot, error) {
-	snapshot, err := l.AwaitSafeSessionChange(ctx, source, readyTimeout)
+	snapshot, err := l.awaitSafeSessionChangeWithFocus(ctx, source, readyTimeout, false, true)
 	if err != nil {
 		return ManagedCodexPaneSnapshot{}, err
 	}
@@ -72,10 +72,10 @@ func (l ManagedCodexLauncher) StopForSessionChange(ctx context.Context, source A
 }
 
 func (l ManagedCodexLauncher) awaitSafeSessionChange(ctx context.Context, source Agent, service CodexServiceSnapshot) (ManagedCodexPaneSnapshot, error) {
-	return l.awaitSafeSessionChangeFocus(ctx, source, service, false)
+	return l.awaitSafeSessionChangeFocus(ctx, source, service, false, false)
 }
 
-func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, source Agent, service CodexServiceSnapshot, focused bool) (ManagedCodexPaneSnapshot, error) {
+func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, source Agent, service CodexServiceSnapshot, focused, refuseComposer bool) (ManagedCodexPaneSnapshot, error) {
 	target := sessionhost.Origin{SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID}
 	for {
 		wire, current, err := l.readManagedAgent(ctx, target, source.CWD)
@@ -103,6 +103,9 @@ func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, s
 			return ManagedCodexPaneSnapshot{}, err
 		}
 		if !emptyCodexComposer(visible) {
+			if refuseComposer {
+				return ManagedCodexPaneSnapshot{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+			}
 			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
 				return ManagedCodexPaneSnapshot{}, errors.Join(ErrManagedPaneBusy, err)
 			}
@@ -123,11 +126,14 @@ func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, s
 			return ManagedCodexPaneSnapshot{}, err
 		}
 		visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-		if err != nil || !emptyCodexComposer(visible) {
-			if err == nil {
-				err = ErrManagedPaneBusy
-			}
+		if err != nil {
 			return ManagedCodexPaneSnapshot{}, err
+		}
+		if !emptyCodexComposer(visible) {
+			if refuseComposer {
+				return ManagedCodexPaneSnapshot{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+			}
+			return ManagedCodexPaneSnapshot{}, ErrManagedPaneBusy
 		}
 		return ManagedCodexPaneSnapshot{Agent: second, Process: secondProcess, Service: service}, nil
 	}

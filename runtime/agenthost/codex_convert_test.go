@@ -191,6 +191,46 @@ func TestCodexConverterPreStopCaptureFailureSendsNoInput(t *testing.T) {
 	}
 }
 
+func TestCodexConverterRefusesOrdinaryVisibleDraftBeforeIdentityProbeOrStop(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Session = nil
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	harness.runner.results = []command.Result{
+		managedAgentResult(t, harness.source),
+		{Stdout: []byte("answer\n› unsent draft\n status")},
+	}
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrCodexConversionComposer) || !errors.Is(err, ErrManagedPaneBusy) || !reflect.DeepEqual(result, CodexConversionResult{}) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || hasPaneInput(harness.runner.calls) {
+		t.Fatalf("stops=%+v runs=%+v calls=%+v", harness.topology.stops, harness.topology.runs, harness.runner.calls)
+	}
+	if len(harness.runner.results) != 0 {
+		t.Fatalf("unused probe results=%+v", harness.runner.results)
+	}
+}
+
+func TestCodexConverterRefusesDraftAppearingBeforeIdentityInput(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.source.Session = nil
+	harness.source.Revision, harness.source.StateChangeSeq = 1, 1
+	bound := harness.source
+	bound.Session = &SessionRef{Source: "herdr:codex", Agent: "codex", Kind: "id", Value: managedSourceID}
+	results := conversionDiscoveryResults(t, harness.source, bound)
+	results[5] = command.Result{Stdout: []byte("answer\n› late unsent draft\n status")}
+	harness.runner.results = results[:6]
+
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrCodexConversionComposer) || !errors.Is(err, ErrManagedPaneBusy) || !reflect.DeepEqual(result, CodexConversionResult{}) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || hasPaneInput(harness.runner.calls) || len(harness.runner.results) != 0 {
+		t.Fatalf("stops=%+v runs=%+v calls=%+v unused=%+v", harness.topology.stops, harness.topology.runs, harness.runner.calls, harness.runner.results)
+	}
+}
+
 func TestCodexConverterRejectsMismatchedThreadBeforeStoppingSource(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.verifier.identities[0].ID = "different-thread"
@@ -646,6 +686,9 @@ func TestRecheckSourceBeforeBindingRejectsEveryGuard(t *testing.T) {
 			}
 			if name == "inspect error" && !errors.Is(err, inspectErr) {
 				t.Fatalf("error=%v", err)
+			}
+			if name == "draft" && !errors.Is(err, ErrCodexConversionComposer) {
+				t.Fatalf("draft error=%v", err)
 			}
 			if hasPaneInput(harness.runner.calls) {
 				t.Fatalf("calls=%+v", harness.runner.calls)
