@@ -113,7 +113,11 @@ func TestCodexConverterLiveAutomaticAndConfirmedCustomPreserveConversation(t *te
 					_ = converted.Managed.Cleanup(cleanupCtx)
 				}
 			})
-			wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.SocketPath, "--cd", directory, agent.Session.Value}
+			wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig}
+			if converted.Policy.ServiceTier != "" {
+				wantArgv = append(wantArgv, "-c", "service_tier="+strconv.Quote(converted.Policy.ServiceTier))
+			}
+			wantArgv = append(wantArgv, "--remote", "unix://"+service.SocketPath, "--cd", directory, agent.Session.Value)
 			checkedHistory, historyErr := verifier.ReadStableHistory(ctx, agent.Session.Value)
 			effective, policyErr := verifier.ReadEffective(ctx, agent.Session.Value)
 			closeErr := verifier.Close()
@@ -218,7 +222,11 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 	closeErr := verifier.Close()
 	focusAfter, focusErr := liveFocusedWorkspace(ctx, liveRunner)
 	afterService, serviceErr := launcher.serviceClient().Ensure(ctx)
-	wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.SocketPath, "--cd", directory, threadID}
+	wantArgv := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig}
+	if converted.Policy.ServiceTier != "" {
+		wantArgv = append(wantArgv, "-c", "service_tier="+strconv.Quote(converted.Policy.ServiceTier))
+	}
+	wantArgv = append(wantArgv, "--remote", "unix://"+service.SocketPath, "--cd", directory, threadID)
 	if checkedHistoryErr != nil || closeErr != nil || checkedHistory != history || focusErr != nil || focusAfter != focusBefore || serviceErr != nil || afterService != service || converted.Outcome != CodexConversionManaged || converted.ThreadID != threadID || converted.Agent.Session == nil || converted.Agent.Session.Value != threadID || converted.Agent.PaneID != shell.PaneID || converted.Process.PID == ordinaryProcess.PID || converted.Process.CWD != directory || !reflect.DeepEqual(converted.Argv, wantArgv) {
 		t.Fatalf("converted=%+v historyErr=%v closeErr=%v focus=%q/%q focusErr=%v serviceErr=%v", converted, checkedHistoryErr, closeErr, focusBefore, focusAfter, focusErr, serviceErr)
 	}

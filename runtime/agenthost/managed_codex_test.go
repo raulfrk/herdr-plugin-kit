@@ -720,13 +720,14 @@ func TestManagedCodexResumeRunsExactIDInCallerProvedShell(t *testing.T) {
 	}
 }
 
-func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *testing.T) {
+func TestManagedCodexConversionResumePreservesTierAndReconcilesPolicy(t *testing.T) {
 	launcher, service, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
 	verifier.constraints = conversionConstraints()
 	request.ThreadID, request.Placement = managedOriginalID, ""
 	source := managedPreflight(request.Directory).EffectiveCodexPolicy
 	source.ModelProvider = "openai"
 	source.MultiAgentMode = "explicitRequestOnly"
+	source.ServiceTier = "default"
 	target := source
 	target.SandboxMode = "read-only"
 	target.ReasoningEffort = "high"
@@ -750,10 +751,23 @@ func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{service.snapshot.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", "unix://" + service.snapshot.SocketPath, "--cd", request.Directory, managedOriginalID}
+	want := []string{service.snapshot.Executable, "resume", "-c", managedSkipUpdateConfig, "-c", `service_tier="default"`, "--remote", "unix://" + service.snapshot.SocketPath, "--cd", request.Directory, managedOriginalID}
 	wantDiscovery := ManagedCodexPolicy{Model: source.Model, ReasoningEffort: source.ReasoningEffort, ApprovalPolicy: source.ApprovalPolicy, SandboxMode: source.SandboxMode}
 	if !reflect.DeepEqual(discoveryPolicy, wantDiscovery) || !reflect.DeepEqual(managed.Argv, want) || len(topology.runs) != 1 || !reflect.DeepEqual(topology.runs[0], want) || len(verifier.reconciles) != 1 || requiredPolicyDrift(verifier.reconciles[0], target) != "" || requiredPolicyDrift(managed.Policy, target) != "" {
 		t.Fatalf("managed=%+v discovery=%+v runs=%q reconciles=%+v", managed, discoveryPolicy, topology.runs, verifier.reconciles)
+	}
+}
+
+func TestManagedCodexConversionResumeRejectsUnsafeSourceTierBeforeEnsure(t *testing.T) {
+	for _, tier := range []string{"default; touch /tmp/unsafe", strings.Repeat("a", maxIdentityBytes+1)} {
+		launcher, service, _, _, _, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+		request.ThreadID, request.Placement = managedOriginalID, ""
+		source := managedPreflight(request.Directory).EffectiveCodexPolicy
+		source.ServiceTier = tier
+		request.resumeSourcePolicy, request.resumeTargetPolicy = &source, &source
+		if _, err := launcher.Launch(context.Background(), request); err == nil || service.callCount() != 0 {
+			t.Fatalf("tier=%q error=%v ensure=%d", tier, err, service.callCount())
+		}
 	}
 }
 

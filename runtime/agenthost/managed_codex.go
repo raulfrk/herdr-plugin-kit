@@ -527,6 +527,12 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 	if request.resumeSourcePolicy != nil && (request.Operation != ManagedResume || request.resumeSourcePolicy.CWD != request.Directory || request.resumeTargetPolicy.CWD != request.Directory || !matchesRequestedPolicy(*request.resumeTargetPolicy, request.Policy)) {
 		return errors.New("managed Resume reconciliation policy is invalid")
 	}
+	if request.resumeSourcePolicy != nil {
+		tier := request.resumeSourcePolicy.ServiceTier
+		if tier != "" && (len(tier) > maxIdentityBytes || !managedToken.MatchString(tier)) {
+			return errors.New("managed Resume source service tier is invalid")
+		}
+	}
 	if request.ReadyTimeout < 0 || request.ReadyTimeout > MaxManagedReadyTimeout || request.ReadyTimeout > 0 && request.ReadyTimeout <= 3*time.Second {
 		return errors.New("managed Codex readiness timeout is out of range")
 	}
@@ -657,7 +663,13 @@ func validateManagedExtraArgv(argv []string) error {
 func composeManagedTUIArgv(request ManagedCodexRequest, service CodexServiceSnapshot, sourceID string) []string {
 	remote := "unix://" + service.SocketPath
 	if request.Operation == ManagedResume {
-		return []string{service.Executable, "resume", "-c", managedSkipUpdateConfig, "--remote", remote, "--cd", request.Directory, request.ThreadID}
+		args := []string{service.Executable, "resume", "-c", managedSkipUpdateConfig}
+		if request.resumeSourcePolicy != nil && request.resumeSourcePolicy.ServiceTier != "" {
+			// Codex 0.154.0 remote resume otherwise clears the ordinary
+			// thread's effective tier, including its stock "default" tier.
+			args = append(args, "-c", "service_tier="+strconv.Quote(request.resumeSourcePolicy.ServiceTier))
+		}
+		return append(args, "--remote", remote, "--cd", request.Directory, request.ThreadID)
 	}
 	policy := request.Policy
 	args := []string{service.Executable}
