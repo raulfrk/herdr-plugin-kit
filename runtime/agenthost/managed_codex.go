@@ -162,7 +162,15 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	var preflight codexPreflight
 	if !request.InheritSourcePolicy {
 		preflightCtx, preflightCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
-		preflight, err = verifier.Preflight(preflightCtx, request.Directory, request.Policy)
+		if request.resumeSourcePolicy != nil {
+			var constraints codexConstraintSnapshot
+			constraints, err = verifier.ReadConstraints(preflightCtx, request.Directory)
+			if err == nil {
+				preflight, err = constraints.validateConversion(request.Directory, request.Policy, *request.resumeSourcePolicy)
+			}
+		} else {
+			preflight, err = verifier.Preflight(preflightCtx, request.Directory, request.Policy)
+		}
 		preflightCancel()
 		if err != nil {
 			return fail(fmt.Errorf("managed Codex preflight: %w", classifyManagedPolicyError(err)), verifier)

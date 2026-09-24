@@ -55,6 +55,7 @@ type managedVerifier interface {
 	ReadThread(context.Context, string) (codexThreadIdentity, error)
 	RecheckIdentity(context.Context, string) (codexThreadIdentity, error)
 	ReadEffective(context.Context, string) (EffectiveCodexPolicy, error)
+	ApplyObservedReasoning(context.Context, codexThreadIdentity, ManagedCodexPolicy) (safeNoDispatch bool, err error)
 	ReconcileEffective(context.Context, string, EffectiveCodexPolicy) (EffectiveCodexPolicy, error)
 	ReadStableHistory(context.Context, string) ([32]byte, error)
 	DeleteThread(context.Context, string) error
@@ -210,6 +211,33 @@ func (s codexConstraintSnapshot) validate(cwd string, requested ManagedCodexPoli
 	preflight, err := parseCodexConfig(s.Config, cwd, requested)
 	if err != nil {
 		return codexPreflight{}, err
+	}
+	if err := validateRequirementsResponse(s.Requirements, requested, preflight); err != nil {
+		return codexPreflight{}, err
+	}
+	return preflight, nil
+}
+
+func (s codexConstraintSnapshot) validateConversion(cwd string, requested ManagedCodexPolicy, effective EffectiveCodexPolicy) (codexPreflight, error) {
+	if effective.ApprovalsReviewer != "user" && effective.ApprovalsReviewer != "auto_review" {
+		return codexPreflight{}, ErrManagedUnsupported
+	}
+	config := s.Config
+	if raw := config["approvals_reviewer"]; len(raw) == 0 || string(raw) == "null" {
+		// Only Convert can supply an omitted config default, and only from
+		// the exact stopped thread's effective App Server response.
+		config = make(map[string]json.RawMessage, len(s.Config)+1)
+		for key, value := range s.Config {
+			config[key] = value
+		}
+		config["approvals_reviewer"], _ = json.Marshal(effective.ApprovalsReviewer)
+	}
+	preflight, err := parseCodexConfig(config, cwd, requested)
+	if err != nil {
+		return codexPreflight{}, err
+	}
+	if preflight.ApprovalsReviewer != effective.ApprovalsReviewer {
+		return codexPreflight{}, ErrManagedPolicyDrift
 	}
 	if err := validateRequirementsResponse(s.Requirements, requested, preflight); err != nil {
 		return codexPreflight{}, err
@@ -415,6 +443,55 @@ func (c *codexLifecycle) ReadEffective(ctx context.Context, threadID string) (Ef
 		return EffectiveCodexPolicy{}, err
 	}
 	return effective, nil
+}
+
+// ApplyObservedReasoning records a fresh /status value on a stopped ordinary
+// thread whose App Server record omitted the effort. It changes no permissions.
+// The caller must independently read back identity and stable history even if
+// the update response is lost.
+func (c *codexLifecycle) ApplyObservedReasoning(ctx context.Context, expected codexThreadIdentity, observed ManagedCodexPolicy) (safeNoDispatch bool, resultErr error) {
+	if expected.ReasoningEffort != "" || observed.Model != expected.Model || !supportedObservedCodexEffort(observed.ReasoningEffort) {
+		return false, ErrManagedPolicyDrift
+	}
+	audit, err := newCodexLifecycle(ctx, c.socket)
+	if err != nil {
+		return true, err
+	}
+	defer audit.Close()
+	var response codexEffectiveResponse
+	if err := audit.call(ctx, "thread/resume", struct {
+		ThreadID     string `json:"threadId"`
+		ExcludeTurns bool   `json:"excludeTurns"`
+	}{expected.ID, true}, &response); err != nil {
+		return true, err
+	}
+	defer func() {
+		var unsubscribe struct {
+			Status string `json:"status"`
+		}
+		if err := audit.call(ctx, "thread/unsubscribe", struct {
+			ThreadID string `json:"threadId"`
+		}{expected.ID}, &unsubscribe); err != nil || unsubscribe.Status != "unsubscribed" {
+			if err == nil {
+				err = errCodexProtocol
+			}
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	identity, err := response.Thread.identity()
+	if err != nil || identity.ID != expected.ID || identity.CWD != expected.CWD || identity.ForkedFromID != expected.ForkedFromID || identity.ModelProvider != expected.ModelProvider || identity.Model != "" && identity.Model != expected.Model || identity.ReasoningEffort != "" || response.Model != expected.Model || response.ModelProvider != expected.ModelProvider || response.CWD != expected.CWD || response.ReasoningEffort != nil && *response.ReasoningEffort != "" {
+		return false, ErrManagedPolicyDrift
+	}
+	var updated json.RawMessage
+	if err := audit.call(ctx, "thread/settings/update", map[string]string{
+		"threadId": expected.ID, "model": observed.Model, "effort": observed.ReasoningEffort,
+	}, &updated); err != nil {
+		return false, errors.Join(ErrManagedSettingsUnknown, err)
+	}
+	if string(updated) != "{}" {
+		return false, errors.Join(ErrManagedSettingsUnknown, errCodexProtocol)
+	}
+	return false, nil
 }
 
 func (c *codexLifecycle) ReconcileEffective(ctx context.Context, threadID string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {

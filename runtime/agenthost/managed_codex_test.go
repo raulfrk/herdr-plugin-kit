@@ -133,6 +133,9 @@ func (f *fakeManagedVerifier) ReadEffective(context.Context, string) (EffectiveC
 	}
 	return f.audit, f.auditErr
 }
+func (f *fakeManagedVerifier) ApplyObservedReasoning(context.Context, codexThreadIdentity, ManagedCodexPolicy) (bool, error) {
+	return false, errors.New("unexpected observed reasoning update")
+}
 func (f *fakeManagedVerifier) ReconcileEffective(_ context.Context, _ string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
 	f.reconciles = append(f.reconciles, desired)
 	if reflect.DeepEqual(f.reconcile, EffectiveCodexPolicy{}) {
@@ -719,6 +722,7 @@ func TestManagedCodexResumeRunsExactIDInCallerProvedShell(t *testing.T) {
 
 func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *testing.T) {
 	launcher, service, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	verifier.constraints = conversionConstraints()
 	request.ThreadID, request.Placement = managedOriginalID, ""
 	source := managedPreflight(request.Directory).EffectiveCodexPolicy
 	source.ModelProvider = "openai"
@@ -753,8 +757,28 @@ func TestManagedCodexConversionResumeReconcilesPolicyWithoutArgvOverrides(t *tes
 	}
 }
 
+func TestManagedCodexConversionResumeAcceptsObservedDefaultReviewerInRealLauncher(t *testing.T) {
+	launcher, _, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	request.ThreadID, request.Placement = managedOriginalID, ""
+	topology.target = sessionhost.CreatedTarget{Origin: request.Origin}
+	source := managedPreflight(request.Directory).EffectiveCodexPolicy
+	source.ModelProvider = "openai"
+	source.MultiAgentMode = "explicitRequestOnly"
+	request.resumeSourcePolicy, request.resumeTargetPolicy = &source, &source
+	verifier.constraints = conversionConstraints()
+	delete(verifier.constraints.Config, "approvals_reviewer")
+	verifier.read = []codexThreadIdentity{{ID: managedOriginalID, CWD: request.Directory, ModelProvider: "openai"}}
+	verifier.audits = []EffectiveCodexPolicy{source, source}
+	runner.results = []command.Result{{}, managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false)), managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false)), managedAgentResult(t, managedAgent(request.Origin, request.Directory, managedOriginalID, false))}
+	managed, err := launcher.Launch(context.Background(), request)
+	if err != nil || managed == nil || managed.Operation != ManagedResume || managed.ThreadID != managedOriginalID || len(verifier.policies) != 0 || len(topology.runs) != 1 || requiredPolicyDrift(managed.Policy, source) != "" {
+		t.Fatalf("managed=%+v error=%v preflight calls=%d runs=%q", managed, err, len(verifier.policies), topology.runs)
+	}
+}
+
 func TestManagedCodexConversionResumeUnknownSettingsOutcomeCleansExactAttempt(t *testing.T) {
 	launcher, _, topology, verifier, runner, request := newManagedHarness(t, ManagedResume, managedOriginalID)
+	verifier.constraints = conversionConstraints()
 	request.ThreadID, request.Placement = managedOriginalID, ""
 	source := managedPreflight(request.Directory).EffectiveCodexPolicy
 	source.ModelProvider = "openai"

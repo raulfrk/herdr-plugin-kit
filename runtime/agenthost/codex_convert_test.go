@@ -16,15 +16,18 @@ import (
 )
 
 type conversionVerifier struct {
-	constraints    []codexConstraintSnapshot
-	constraintErrs []error
-	identities     []codexThreadIdentity
-	identityErrs   []error
-	histories      [][32]byte
-	historyErrs    []error
-	policies       []EffectiveCodexPolicy
-	policyErrs     []error
-	closed         int
+	constraints     []codexConstraintSnapshot
+	constraintErrs  []error
+	identities      []codexThreadIdentity
+	identityErrs    []error
+	histories       [][32]byte
+	historyErrs     []error
+	policies        []EffectiveCodexPolicy
+	policyErrs      []error
+	applyErr        error
+	applyNoDispatch bool
+	applied         []ManagedCodexPolicy
+	closed          int
 }
 
 func (f *conversionVerifier) Preflight(context.Context, string, ManagedCodexPolicy) (codexPreflight, error) {
@@ -52,6 +55,10 @@ func (f *conversionVerifier) RecheckIdentity(context.Context, string) (codexThre
 }
 func (f *conversionVerifier) ReadEffective(context.Context, string) (EffectiveCodexPolicy, error) {
 	return popConversion(&f.policies, &f.policyErrs)
+}
+func (f *conversionVerifier) ApplyObservedReasoning(_ context.Context, _ codexThreadIdentity, observed ManagedCodexPolicy) (bool, error) {
+	f.applied = append(f.applied, observed)
+	return f.applyNoDispatch, f.applyErr
 }
 func (f *conversionVerifier) ReconcileEffective(_ context.Context, _ string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
 	return desired, nil
@@ -243,6 +250,132 @@ func TestCodexConverterDiscoversAndBindsMissingOrdinarySessionBeforeStopping(t *
 		t.Fatalf("stops=%+v launches=%+v", harness.topology.stops, harness.launches)
 	}
 	assertConversionDiscoveryCalls(t, harness.runner.calls, harness.source.SessionName)
+}
+
+func stockDefaultConversionHarness(t *testing.T) (*conversionHarness, Agent) {
+	t.Helper()
+	h := newConversionHarness(t)
+	h.source.Revision, h.source.StateChangeSeq = 1, 1
+	bound := h.source
+	h.source.Session = nil
+	raw := h.identity
+	raw.ReasoningEffort = ""
+	h.verifier.identities = []codexThreadIdentity{raw, raw, raw, h.identity, h.identity}
+	h.verifier.histories = [][32]byte{h.history, h.history, h.history, h.history}
+	stock := conversionConstraints()
+	delete(stock.Config, "approvals_reviewer")
+	h.verifier.constraints = []codexConstraintSnapshot{stock, stock}
+	h.runner.results = append(conversionDiscoveryResults(t, h.source, bound), h.runner.results...)
+	return h, bound
+}
+
+func TestCodexConverterNormalizesObservedStockEffortAfterStop(t *testing.T) {
+	h, bound := stockDefaultConversionHarness(t)
+	managed := h.managedResult()
+	managed.Agent = bound
+	h.converter.launch = func(_ context.Context, request ManagedCodexRequest) (*ManagedCodex, error) {
+		h.launches = append(h.launches, request)
+		return managed, nil
+	}
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if err != nil || result.Outcome != CodexConversionManaged || len(h.verifier.applied) != 1 || h.verifier.applied[0].Model != h.identity.Model || h.verifier.applied[0].ReasoningEffort != "medium" || len(h.launches) != 1 || h.launches[0].resumeSourcePolicy == nil || h.launches[0].resumeSourcePolicy.ReasoningEffort != "medium" {
+		t.Fatalf("result=%+v error=%v applied=%+v launches=%+v", result, err, h.verifier.applied, h.launches)
+	}
+	if len(h.topology.stops) != 1 || len(h.topology.runs) != 0 {
+		t.Fatalf("stops=%d ordinary resumes=%d", len(h.topology.stops), len(h.topology.runs))
+	}
+}
+
+func TestCodexConverterStockUpdateFailureUsesReadbackBeforeFallback(t *testing.T) {
+	for _, normalized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("normalized=%t", normalized), func(t *testing.T) {
+			h, bound := stockDefaultConversionHarness(t)
+			h.verifier.applyErr = errors.New("update response lost")
+			if !normalized {
+				h.verifier.identities[3] = h.verifier.identities[2]
+			}
+			fallbackIdentity := h.verifier.identities[3]
+			h.verifier.identities = append(h.verifier.identities[:4], fallbackIdentity, fallbackIdentity)
+			h.verifier.histories = append(h.verifier.histories[:3], h.history, h.history)
+			h.runner.results = append(h.runner.results, managedAgentResult(t, bound), managedAgentResult(t, bound))
+			result, err := h.converter.Convert(context.Background(), h.request())
+			if !errors.Is(err, ErrCodexConversionFallback) || !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != CodexConversionFallback || len(h.topology.runs) != 1 || len(h.launches) != 0 {
+				t.Fatalf("result=%+v error=%v ordinary resumes=%d launches=%d", result, err, len(h.topology.runs), len(h.launches))
+			}
+		})
+	}
+}
+
+func TestCodexConverterStockUpdateAmbiguousReadbackLeavesSourceStopped(t *testing.T) {
+	h, _ := stockDefaultConversionHarness(t)
+	h.verifier.applyErr = errors.New("update response lost")
+	h.verifier.identities[3].Model = "different"
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || len(h.topology.stops) != 1 || len(h.topology.runs) != 0 || len(h.launches) != 0 {
+		t.Fatalf("result=%+v error=%v stops=%d resumes=%d launches=%d", result, err, len(h.topology.stops), len(h.topology.runs), len(h.launches))
+	}
+}
+
+func TestCodexConverterStockUpdateNotDispatchedRestoresExactOrdinaryThreadWithoutAPI(t *testing.T) {
+	h, bound := stockDefaultConversionHarness(t)
+	h.verifier.applyErr = errors.New("app server unavailable before update")
+	h.verifier.applyNoDispatch = true
+	h.verifier.identityErrs = []error{nil, nil, nil, errors.New("app server unavailable")}
+	h.verifier.historyErrs = []error{nil, nil, errors.New("app server unavailable")}
+	h.runner.results = append(h.runner.results, managedAgentResult(t, bound), managedAgentResult(t, bound))
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if !errors.Is(err, ErrCodexConversionFallback) || !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != CodexConversionFallback || len(h.topology.runs) != 1 || len(h.launches) != 0 || h.shellVerifies == 0 {
+		t.Fatalf("result=%+v error=%v ordinary resumes=%d launches=%d shell verifies=%d", result, err, len(h.topology.runs), len(h.launches), h.shellVerifies)
+	}
+	if want := []string{"codex", "resume", "--cd", bound.CWD, managedSourceID}; !reflect.DeepEqual(h.topology.runs[0], want) {
+		t.Fatalf("ordinary fallback argv=%q want=%q", h.topology.runs[0], want)
+	}
+}
+
+func TestCodexConverterNoDispatchDoesNotOverrideKnownReadbackDrift(t *testing.T) {
+	h, _ := stockDefaultConversionHarness(t)
+	h.verifier.applyErr = errors.New("update was not dispatched")
+	h.verifier.applyNoDispatch = true
+	h.verifier.identities[3].Model = "different"
+	h.verifier.historyErrs = []error{nil, nil, errors.New("history unavailable")}
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || len(h.topology.stops) != 1 || len(h.topology.runs) != 0 {
+		t.Fatalf("result=%+v error=%v stops=%d resumes=%d", result, err, len(h.topology.stops), len(h.topology.runs))
+	}
+}
+
+func TestCodexConverterBoundStockThreadWithoutStatusRefusesBeforeStop(t *testing.T) {
+	h := newConversionHarness(t)
+	h.verifier.identities[0].ReasoningEffort = ""
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if !errors.Is(err, ErrManagedNarrow) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 {
+		t.Fatalf("result=%+v error=%v stops=%d resumes=%d", result, err, len(h.topology.stops), len(h.topology.runs))
+	}
+}
+
+func TestValidateObservedConversionIdentityRejectsMissingOrConflictingStatus(t *testing.T) {
+	h := newConversionHarness(t)
+	raw := h.identity
+	raw.ReasoningEffort = ""
+	observed := managedStatusObservation{identity: raw.ID, policy: ManagedCodexPolicy{Model: raw.Model, ReasoningEffort: "medium"}, fromStatus: true}
+	if err := validateObservedConversionIdentity(raw, h.source, raw.ID, observed); err != nil {
+		t.Fatalf("exact observed default rejected: %v", err)
+	}
+	for name, change := range map[string]func(*managedStatusObservation){
+		"missing status":      func(value *managedStatusObservation) { value.fromStatus = false },
+		"prefix effort":       func(value *managedStatusObservation) { value.policyIsPrefix = true },
+		"unsupported effort":  func(value *managedStatusObservation) { value.policy.ReasoningEffort = "invalid" },
+		"different model":     func(value *managedStatusObservation) { value.policy.Model = "other" },
+		"different thread id": func(value *managedStatusObservation) { value.identity = "different" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := observed
+			change(&candidate)
+			if err := validateObservedConversionIdentity(raw, h.source, raw.ID, candidate); err == nil {
+				t.Fatal("unproven effort accepted")
+			}
+		})
+	}
 }
 
 func TestCodexConverterPreparesCustomizationAfterBindingMissingOrdinarySession(t *testing.T) {

@@ -720,6 +720,89 @@ func TestCodexLifecycleEffectiveReadSendsNoOverridesAndUnsubscribes(t *testing.T
 	}
 }
 
+func TestCodexLifecycleAppliesOnlyObservedReasoningOnStoppedThread(t *testing.T) {
+	var connections atomic.Int32
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		index := connections.Add(1)
+		lifecycleInitialize(t, ctx, conn)
+		if index == 1 {
+			_, _, _ = conn.Read(ctx)
+			return
+		}
+		resume := readRPCRequest(t, ctx, conn, "thread/resume")
+		if len(resume.Params) != 2 || string(resume.Params["threadId"]) != `"thread-original"` || string(resume.Params["excludeTurns"]) != "true" {
+			t.Fatalf("resume params=%s", mustJSON(resume.Params))
+		}
+		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","cwd":"/tmp/project","reasoningEffort":null}`
+		sendRPCResult(t, ctx, conn, resume.ID, response)
+		update := readRPCRequest(t, ctx, conn, "thread/settings/update")
+		if len(update.Params) != 3 || string(update.Params["threadId"]) != `"thread-original"` || string(update.Params["model"]) != `"gpt-5.6-sol"` || string(update.Params["effort"]) != `"medium"` {
+			t.Fatalf("unexpected update or privilege override: %s", mustJSON(update.Params))
+		}
+		sendRPCResult(t, ctx, conn, update.ID, `{}`)
+		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
+		sendRPCResult(t, ctx, conn, unsubscribe.ID, `{"status":"unsubscribed"}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	expected := codexThreadIdentity{ID: "thread-original", CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol"}
+	if safeNoDispatch, err := verifier.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: expected.Model, ReasoningEffort: "medium"}); err != nil || safeNoDispatch {
+		t.Fatalf("apply observed reasoning safeNoDispatch=%t error=%v", safeNoDispatch, err)
+	}
+}
+
+func TestCodexLifecycleRejectsContradictoryResumeBeforeSettingsUpdate(t *testing.T) {
+	var connections atomic.Int32
+	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		index := connections.Add(1)
+		lifecycleInitialize(t, ctx, conn)
+		if index == 1 {
+			_, _, _ = conn.Read(ctx)
+			return
+		}
+		resume := readRPCRequest(t, ctx, conn, "thread/resume")
+		response := `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"different","modelProvider":"openai","cwd":"/tmp/project","reasoningEffort":null}`
+		sendRPCResult(t, ctx, conn, resume.ID, response)
+		unsubscribe := readRPCRequest(t, ctx, conn, "thread/unsubscribe")
+		sendRPCResult(t, ctx, conn, unsubscribe.ID, `{"status":"unsubscribed"}`)
+	})
+	verifier, err := newCodexLifecycle(context.Background(), socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	expected := codexThreadIdentity{ID: "thread-original", CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol"}
+	if safeNoDispatch, err := verifier.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: expected.Model, ReasoningEffort: "medium"}); !errors.Is(err, ErrManagedPolicyDrift) || safeNoDispatch {
+		t.Fatalf("contradictory resume safeNoDispatch=%t error=%v", safeNoDispatch, err)
+	}
+}
+
+func TestConversionConstraintsUseOnlyMatchingObservedDefaultReviewer(t *testing.T) {
+	snapshot := codexConstraintSnapshot{
+		Config:       map[string]json.RawMessage{"approvals_reviewer": json.RawMessage(`null`)},
+		Requirements: map[string]json.RawMessage{"requirements": json.RawMessage(`{"allowedApprovalsReviewers":["user"]}`)},
+	}
+	policy := managedPolicy()
+	effective := managedPreflight("/tmp/project").EffectiveCodexPolicy
+	if _, err := snapshot.validateConversion("/tmp/project", policy, effective); err != nil {
+		t.Fatalf("observed default rejected: %v", err)
+	}
+	for name, config := range map[string]json.RawMessage{"conflicting": json.RawMessage(`"auto_review"`), "malformed": json.RawMessage(`{"bad":true}`)} {
+		snapshot.Config["approvals_reviewer"] = config
+		if _, err := snapshot.validateConversion("/tmp/project", policy, effective); err == nil {
+			t.Fatalf("%s explicit reviewer accepted", name)
+		}
+	}
+	delete(snapshot.Config, "approvals_reviewer")
+	effective.ApprovalsReviewer = "unknown"
+	if _, err := snapshot.validateConversion("/tmp/project", policy, effective); err == nil {
+		t.Fatal("unknown effective reviewer accepted")
+	}
+}
+
 func TestCodexLifecycleEffectiveReadRejectsWrongUnsubscribeStatus(t *testing.T) {
 	var connections atomic.Int32
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {

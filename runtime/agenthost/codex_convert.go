@@ -117,7 +117,7 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if err != nil || !validManagedServiceSnapshot(service) {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization service: %w", errors.Join(ErrManagedStale, err))
 	}
-	request.Source, err = c.resolveSource(ctx, request.Source, ready, service)
+	request.Source, _, err = c.resolveSource(ctx, request.Source, ready, service)
 	if err != nil {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization identity: %w", err)
 	}
@@ -186,7 +186,8 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 	if !validManagedServiceSnapshot(service) {
 		return CodexConversionResult{}, fmt.Errorf("convert Codex service: %w", errors.Join(ErrManagedStale, err))
 	}
-	request.Source, err = c.resolveSource(ctx, request.Source, ready, service)
+	var observed managedStatusObservation
+	request.Source, observed, err = c.resolveSource(ctx, request.Source, ready, service)
 	if err != nil {
 		return CodexConversionResult{}, fmt.Errorf("convert Codex identity: %w", err)
 	}
@@ -208,7 +209,7 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 	}
 	identity, err := verifier.ReadThread(preCtx, threadID)
 	if err == nil {
-		err = validateConversionIdentity(identity, request.Source, threadID)
+		err = validateObservedConversionIdentity(identity, request.Source, threadID, observed)
 	}
 	var history [32]byte
 	if err == nil {
@@ -226,10 +227,10 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 			return CodexConversionResult{}, fmt.Errorf("convert Codex customization constraints: %w", classifyManagedPolicyError(err))
 		}
 	}
-	return c.stopCaptureResume(ctx, request, ready, service, verifier, constraints, identity, history)
+	return c.stopCaptureResume(ctx, request, ready, service, verifier, constraints, identity, history, observed)
 }
 
-func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConversionRequest, ready time.Duration, service CodexServiceSnapshot, verifier managedVerifier, constraints codexConstraintSnapshot, before codexThreadIdentity, history [32]byte) (CodexConversionResult, error) {
+func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConversionRequest, ready time.Duration, service CodexServiceSnapshot, verifier managedVerifier, constraints codexConstraintSnapshot, before codexThreadIdentity, history [32]byte, observed managedStatusObservation) (CodexConversionResult, error) {
 	target := sessionhost.Origin{
 		SessionName: request.Source.SessionName, WorkspaceID: request.Source.WorkspaceID,
 		TabID: request.Source.TabID, PaneID: request.Source.PaneID,
@@ -266,6 +267,28 @@ func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConv
 		if captureErr == nil && afterHistory != history {
 			captureErr = fmt.Errorf("stable history changed: %w", ErrManagedStale)
 		}
+	}
+	if captureErr == nil && before.ReasoningEffort == "" {
+		// Codex 0.154.0 can show the effective effort in a guarded /status
+		// while storing null in thread/read. Only the stopped writer may be
+		// normalized, and an uncertain update is never assumed to have failed.
+		safeNoDispatch, updateErr := verifier.ApplyObservedReasoning(captureCtx, before, observed.policy)
+		readback, readErr := verifier.ReadThread(captureCtx, before.ID)
+		readbackHistory, historyErr := verifier.ReadStableHistory(captureCtx, before.ID)
+		normalized := before
+		normalized.ReasoningEffort = observed.policy.ReasoningEffort
+		if readErr != nil || historyErr != nil || readbackHistory != history || readback != before && readback != normalized {
+			captureCancel()
+			if safeNoDispatch && updateErr != nil && (readErr != nil || historyErr != nil) && (readErr != nil || readback == before) && (historyErr != nil || readbackHistory == history) {
+				return c.fallbackWithoutReadback(ctx, ready, target, before, shellLease.Process, &shellLease, base, fmt.Errorf("observed reasoning update was not dispatched; API readback unavailable: %w", errors.Join(ErrManagedSettingsUnknown, updateErr, readErr, historyErr)))
+			}
+			return base, fmt.Errorf("convert Codex reasoning readback uncertain; ordinary source remains stopped: %w", errors.Join(ErrManagedSettingsUnknown, updateErr, readErr, historyErr))
+		}
+		if updateErr != nil || readback != normalized {
+			captureCancel()
+			return c.fallback(ctx, ready, service, verifier, readback, history, target, shellLease.Process, &shellLease, base, fmt.Errorf("observed reasoning update failed: %w", errors.Join(ErrManagedSettingsUnknown, updateErr)))
+		}
+		before = normalized
 	}
 	var policy EffectiveCodexPolicy
 	if captureErr == nil {
@@ -304,7 +327,7 @@ func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConv
 	if captureErr == nil {
 		if policy.CWD != before.CWD || policy.ModelProvider != before.ModelProvider || policy.Model != before.Model || policy.ReasoningEffort != before.ReasoningEffort {
 			captureErr = fmt.Errorf("captured identity policy changed: %w", ErrManagedPolicyDrift)
-		} else if _, captureErr = constraints.validate(before.CWD, managedPolicy); captureErr != nil {
+		} else if _, captureErr = constraints.validateConversion(before.CWD, managedPolicy, policy); captureErr != nil {
 			captureErr = fmt.Errorf("captured policy rejected: %w", classifyManagedPolicyError(captureErr))
 		}
 	}
@@ -494,8 +517,21 @@ func sameConversionShellLease(left, right conversionShellLease) bool {
 }
 
 func (c CodexConverter) fallback(ctx context.Context, ready time.Duration, service CodexServiceSnapshot, verifier managedVerifier, identity codexThreadIdentity, history [32]byte, target sessionhost.Origin, shellProcess sessionhost.ForegroundProcess, lease *conversionShellLease, result CodexConversionResult, cause error) (CodexConversionResult, error) {
-	if err := c.recheckRecovery(ctx, ready, service, verifier, identity, history); err != nil {
-		return result, errors.Join(cause, err)
+	return c.fallbackResume(ctx, ready, service, verifier, identity, history, target, shellProcess, lease, result, cause, true)
+}
+
+// When App Server was lost before any settings update was dispatched, the
+// already verified raw identity/history cannot be read again. Restore only
+// that exact ordinary thread, reporting the missing API readback in the cause.
+func (c CodexConverter) fallbackWithoutReadback(ctx context.Context, ready time.Duration, target sessionhost.Origin, identity codexThreadIdentity, shellProcess sessionhost.ForegroundProcess, lease *conversionShellLease, result CodexConversionResult, cause error) (CodexConversionResult, error) {
+	return c.fallbackResume(ctx, ready, CodexServiceSnapshot{}, nil, identity, [32]byte{}, target, shellProcess, lease, result, cause, false)
+}
+
+func (c CodexConverter) fallbackResume(ctx context.Context, ready time.Duration, service CodexServiceSnapshot, verifier managedVerifier, identity codexThreadIdentity, history [32]byte, target sessionhost.Origin, shellProcess sessionhost.ForegroundProcess, lease *conversionShellLease, result CodexConversionResult, cause error, checkReadback bool) (CodexConversionResult, error) {
+	if checkReadback {
+		if err := c.recheckRecovery(ctx, ready, service, verifier, identity, history); err != nil {
+			return result, errors.Join(cause, err)
+		}
 	}
 	var current conversionShellLease
 	if lease == nil {
@@ -531,12 +567,14 @@ func (c CodexConverter) fallback(ctx context.Context, ready time.Duration, servi
 	if err != nil {
 		return result, errors.Join(cause, err)
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, ready)
-	checked, checkErr := verifier.ReadThread(checkCtx, identity.ID)
-	checkedHistory, historyErr := verifier.ReadStableHistory(checkCtx, identity.ID)
-	cancel()
-	if checkErr != nil || historyErr != nil || checked != identity || checkedHistory != history {
-		return result, errors.Join(cause, ErrManagedStale, checkErr, historyErr)
+	if checkReadback {
+		checkCtx, cancel := context.WithTimeout(ctx, ready)
+		checked, checkErr := verifier.ReadThread(checkCtx, identity.ID)
+		checkedHistory, historyErr := verifier.ReadStableHistory(checkCtx, identity.ID)
+		cancel()
+		if checkErr != nil || historyErr != nil || checked != identity || checkedHistory != history {
+			return result, errors.Join(cause, ErrManagedStale, checkErr, historyErr)
+		}
 	}
 	result.Outcome, result.FallbackUsed = CodexConversionFallback, true
 	result.Agent, result.Process, result.Argv = agent, process, argv
@@ -605,9 +643,9 @@ func (c CodexConverter) validateResolvable(request CodexConversionRequest) error
 	return nil
 }
 
-func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready time.Duration, service CodexServiceSnapshot) (Agent, error) {
+func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready time.Duration, service CodexServiceSnapshot) (Agent, managedStatusObservation, error) {
 	if source.Session != nil {
-		return source, nil
+		return source, managedStatusObservation{}, nil
 	}
 	target := sessionhost.Origin{
 		SessionName: source.SessionName, WorkspaceID: source.WorkspaceID,
@@ -615,53 +653,54 @@ func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready t
 	}
 	process, err := c.launcher.topologyHost().InspectForegroundProcess(ctx, target)
 	if err != nil {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex process: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex process: %w", err)
 	}
 	if process.Name != "codex" {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex process name: %w", ErrManagedStale)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex process name: %w", ErrManagedStale)
 	}
 	if len(process.Argv) == 0 {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex process argv: %w", ErrManagedStale)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex process argv: %w", ErrManagedStale)
 	}
 	if filepath.Base(process.Argv[0]) != "codex" {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex executable: %w", ErrManagedStale)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex executable: %w", ErrManagedStale)
 	}
 	if process.CWD != source.CWD {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex cwd: %w", ErrManagedStale)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex cwd: %w", ErrManagedStale)
 	}
 	if codexRemoteArgv(process.Argv) || validateManagedSourceArgv(process.Argv) != nil {
-		return Agent{}, fmt.Errorf("inspect ordinary Codex argv: %w", ErrManagedUnsupported)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("inspect ordinary Codex argv: %w", ErrManagedUnsupported)
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, ready)
 	defer cancel()
-	observed, threadID, err := c.launcher.discoverManagedIdentityForSource(resolveCtx, target, source.CWD, source, process, service)
+	agent, observation, err := c.launcher.discoverManagedIdentityForSource(resolveCtx, target, source.CWD, source, process, service)
 	if err != nil {
-		return Agent{}, fmt.Errorf("discover ordinary Codex identity: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("discover ordinary Codex identity: %w", err)
 	}
+	threadID := observation.identity
 	if !validManagedThreadID(threadID) {
-		return Agent{}, ErrManagedNarrow
+		return Agent{}, managedStatusObservation{}, ErrManagedNarrow
 	}
 	verifier, err := c.launcher.verifierFactory().Connect(resolveCtx, service.SocketPath)
 	if err != nil {
-		return Agent{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
 	}
 	identity, identityErr := verifier.ReadThread(resolveCtx, threadID)
 	closeErr := verifier.Close()
 	if identityErr == nil {
-		identityErr = validateConversionIdentity(identity, observed, threadID)
+		identityErr = validateObservedConversionIdentity(identity, agent, threadID, observation)
 	}
 	if err := errors.Join(identityErr, closeErr); err != nil {
-		return Agent{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("validate ordinary Codex identity: %w", err)
 	}
-	observed, err = c.recheckSourceBeforeBinding(resolveCtx, target, observed, process)
+	agent, err = c.recheckSourceBeforeBinding(resolveCtx, target, agent, process)
 	if err != nil {
-		return Agent{}, fmt.Errorf("recheck ordinary Codex identity: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("recheck ordinary Codex identity: %w", err)
 	}
-	bound, err := c.launcher.bindManagedIdentity(resolveCtx, target, source.CWD, observed, threadID)
+	bound, err := c.launcher.bindManagedIdentity(resolveCtx, target, source.CWD, agent, threadID)
 	if err != nil {
-		return Agent{}, fmt.Errorf("bind ordinary Codex identity: %w", err)
+		return Agent{}, managedStatusObservation{}, fmt.Errorf("bind ordinary Codex identity: %w", err)
 	}
-	return bound, nil
+	return bound, observation, nil
 }
 
 func (c CodexConverter) recheckSourceBeforeBinding(ctx context.Context, target sessionhost.Origin, expected Agent, expectedProcess sessionhost.ForegroundProcess) (Agent, error) {
@@ -707,6 +746,30 @@ func validateConversionIdentity(identity codexThreadIdentity, source Agent, thre
 		return ErrManagedStale
 	}
 	return nil
+}
+
+func validateObservedConversionIdentity(identity codexThreadIdentity, source Agent, threadID string, observed managedStatusObservation) error {
+	if identity.ID != threadID || identity.CWD != source.CWD || identity.ModelProvider == "" || identity.Model == "" {
+		return ErrManagedStale
+	}
+	if observed.fromStatus {
+		if observed.identity != threadID || observed.policyIsPrefix || observed.policy.Model != identity.Model || !supportedObservedCodexEffort(observed.policy.ReasoningEffort) || identity.ReasoningEffort != "" && identity.ReasoningEffort != observed.policy.ReasoningEffort {
+			return ErrManagedPolicyDrift
+		}
+	} else if identity.ReasoningEffort == "" {
+		// A pre-bound source has no fresh, pane-guarded /status observation.
+		return ErrManagedNarrow
+	}
+	return nil
+}
+
+func supportedObservedCodexEffort(effort string) bool {
+	switch effort {
+	case "none", "minimal", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func eligibleConversionRetry(err error) bool {
