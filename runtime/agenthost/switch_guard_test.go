@@ -9,8 +9,126 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
+
+func TestVerifyFocusedWorkingAutofocusCodex(t *testing.T) {
+	for _, variant := range []string{"empty streaming", "draft", "blocked native", "focus drift"} {
+		t.Run(variant, func(t *testing.T) {
+			status := `{"type":"active","activeFlags":[]}`
+			if variant == "blocked native" {
+				status = `{"type":"active","activeFlags":["waitingOnUserInput"]}`
+			}
+			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+				exchange(t, ctx, conn)
+				send(t, ctx, conn, threadResult(status))
+			})
+			target := managedAgent(managedOrigin(), "/tmp/project", testThread, true)
+			target.Status = "working"
+			target.StateChangeSeq = 1
+			before := wireFromAgent(target)
+			second, final := before, before
+			second.Revision, final.Revision = before.Revision+100, before.Revision+200
+			if variant == "focus drift" {
+				second.Focused = false
+			}
+			composer := managedEmptyComposer("answer")
+			if variant == "draft" {
+				composer = []byte("answer\n› user draft\n status")
+			}
+			runner := &scriptedRunner{results: []command.Result{
+				jsonResult(t, listResponse(before)),
+				jsonResult(t, listResponse(before)), jsonResult(t, listResponse(before)),
+				{Stdout: composer}, jsonResult(t, listResponse(second)),
+				{Stdout: managedEmptyComposer("answer")}, jsonResult(t, listResponse(final)),
+			}}
+			probe := NewProbe(Host{Runner: runner, Session: "named", CodexSocket: socket})
+			probe.topology = &fakeManagedTopology{inspected: sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: target.CWD, Argv: []string{"codex"}}}
+			got, err := probe.VerifyFocusedWorkingAutofocus(context.Background(), target)
+			if variant == "empty streaming" {
+				if err != nil || !sameImmutable(got, target) || got.Revision != final.Revision {
+					t.Fatalf("agent=%+v error=%v", got, err)
+				}
+			} else if !errors.Is(err, ErrUnsafeSessionChange) {
+				t.Fatalf("%s accepted: agent=%+v error=%v", variant, got, err)
+			}
+			if hasPaneInput(runner.calls) {
+				t.Fatalf("guard sent input: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestVerifyFocusedWorkingAutofocusNative(t *testing.T) {
+	for _, test := range []struct {
+		name, kind, sessionKind, sessionValue string
+		empty, draft                          string
+	}{
+		{"OMP", "omp", "path", "/tmp/session.jsonl", "header\n\x1b[38;2;156;163;176m╰─ \x1b[0m", "header\n╰─ draft"},
+		{"OpenCode", "opencode", "id", "session-1", openCodeEmptyComposerANSI("sidebar"), strings.Replace(openCodeEmptyComposerANSI("sidebar"), "\x1b[38;2;255;255;255;48;2;30;30;30m        \x1b[0m", "\x1b[38;2;255;255;255;48;2;30;30;30m draft  \x1b[0m", 1)},
+	} {
+		for _, variant := range []string{"empty streaming", "draft", "state drift", "launch pending", "process drift", "cancelled"} {
+			t.Run(test.name+"/"+variant, func(t *testing.T) {
+				target, before := safeNativeTarget(test.kind, test.sessionKind, test.sessionValue)
+				target.Status, before.AgentStatus = "working", "working"
+				target.Focused, before.Focused = true, true
+				second, final := before, before
+				second.Revision, final.Revision = before.Revision+100, before.Revision+200
+				if variant == "state drift" {
+					second.StateChangeSeq++
+				}
+				if variant == "launch pending" {
+					before.LaunchPending = true
+				}
+				composer := test.empty
+				if variant == "draft" {
+					composer = test.draft
+				}
+				results := append([]command.Result{jsonResult(t, listResponse(before))}, fourNativeIdentities(t, target)...)
+				results = append(results, command.Result{Stdout: []byte(composer)}, jsonResult(t, listResponse(second)), command.Result{Stdout: []byte(test.empty)}, jsonResult(t, listResponse(final)))
+				runner := &scriptedRunner{results: results}
+				sources := NativeSources{}
+				if test.kind == "omp" {
+					payload := `{"version":1,"harness":"omp","session_kind":"path","session_value":"/tmp/session.jsonl","status":"working","state_seq":9}`
+					sources.OMPSockets = map[string]string{target.PaneID: serveOMPResponses(t, payload, payload)}
+				} else {
+					fixture := &openCodeFixture{t: t, target: target, directory: target.CWD, status: "busy"}
+					server := httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
+					t.Cleanup(server.Close)
+					sources.OpenCodeServers = map[string]OpenCodeServer{target.PaneID: {URL: server.URL, Directory: target.CWD}}
+				}
+				probe := mustNativeProbe(t, Host{Runner: runner, Session: "named"}, sources)
+				process := sessionhost.ForegroundProcess{PID: 77, Name: test.kind, CWD: target.CWD, Argv: []string{test.kind}}
+				topology := &fakeManagedTopology{inspected: process}
+				if variant == "process drift" {
+					changed := process
+					changed.PID++
+					topology.inspectedSeq = []sessionhost.ForegroundProcess{process, changed}
+				}
+				probe.topology = topology
+				ctx := context.Background()
+				if variant == "cancelled" {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+				got, err := probe.VerifyFocusedWorkingAutofocus(ctx, target)
+				if variant == "empty streaming" {
+					if err != nil || !sameImmutable(got, target) || got.Revision != final.Revision {
+						t.Fatalf("agent=%+v error=%v", got, err)
+					}
+				} else if !errors.Is(err, ErrUnsafeSessionChange) {
+					t.Fatalf("%s accepted: agent=%+v error=%v", variant, got, err)
+				}
+				if hasPaneInput(runner.calls) {
+					t.Fatalf("guard sent input: %#v", runner.calls)
+				}
+			})
+		}
+	}
+}
 
 func TestVerifyNativeSessionChangeChecksSupportedComposers(t *testing.T) {
 	for _, test := range []struct {

@@ -3,7 +3,10 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+
+	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
 )
 
 // ErrUnsafeSessionChange means the source conversation cannot safely lose
@@ -23,6 +26,83 @@ func (p Probe) VerifyNativeSessionChange(ctx context.Context, target Agent) (Age
 // independently prove and retain ownership of that modal.
 func (p Probe) VerifyNativeOverlaySessionChange(ctx context.Context, target Agent) (Agent, error) {
 	return p.verifyNativeSessionChange(ctx, target, true)
+}
+
+// VerifyFocusedWorkingAutofocus is a read-only, best-effort guard for an
+// automatic focus handoff. Unlike the session-change guards, it permits the
+// exact focused working agent to continue running in the background. Callers
+// must separately recheck the foreground and intended target before focusing.
+func (p Probe) VerifyFocusedWorkingAutofocus(ctx context.Context, target Agent) (Agent, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
+	}
+	if err := validateTarget(target); err != nil || !focusedWorking(target) || !filepath.IsAbs(target.CWD) {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
+	}
+	before, err := p.Host.find(ctx, target.PaneID)
+	if err != nil || !sameWorkingSource(target, before) {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
+	}
+	origin := sessionhost.Origin{SessionName: target.SessionName, WorkspaceID: target.WorkspaceID, TabID: target.TabID, PaneID: target.PaneID}
+	topology := p.topology
+	if topology == nil {
+		topology = sessionhost.Host{Runner: p.Host.Runner, Herdr: p.Host.Herdr, Session: p.Host.Session}
+	}
+	process, err := topology.InspectForegroundProcess(ctx, origin)
+	if err != nil || process.PID <= 0 || process.CWD != target.CWD || process.Name == "" || len(process.Argv) == 0 {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
+	}
+	assessment, err := p.Assess(ctx, before)
+	if err != nil || !assessment.Stable || assessment.Status != Working {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
+	}
+	if err := p.verifyAutofocusComposerEmpty(ctx, before); err != nil {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
+	}
+	second, err := p.Host.find(ctx, target.PaneID)
+	if err != nil || !sameWorkingSource(before, second) {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
+	}
+	if err := p.verifyAutofocusComposerEmpty(ctx, second); err != nil {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, err)
+	}
+	afterProcess, err := topology.InspectForegroundProcess(ctx, origin)
+	if err != nil || !sameForegroundProcess(process, afterProcess) {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err)
+	}
+	after, err := p.Host.find(ctx, target.PaneID)
+	if err != nil || !sameWorkingSource(second, after) || ctx.Err() != nil {
+		return Agent{}, errors.Join(ErrUnsafeSessionChange, ErrStaleReport, err, ctx.Err())
+	}
+	return after, nil
+}
+
+func focusedWorking(agent Agent) bool {
+	return agent.Focused && !agent.LaunchPending && agent.Status == "working"
+}
+
+func sameWorkingSource(before, after Agent) bool {
+	return sameImmutable(before, after) && before.CWD == after.CWD && before.StateChangeSeq == after.StateChangeSeq && focusedWorking(after)
+}
+
+func (p Probe) verifyAutofocusComposerEmpty(ctx context.Context, target Agent) error {
+	if strings.EqualFold(target.Kind, "codex") {
+		if target.Session == nil || !validManagedSession(target.Session) || p.Host.CodexSocket == "" {
+			return ErrUnsafeSessionChange
+		}
+		visible, err := (ManagedCodexLauncher{Host: p.Host}).readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+		if err != nil {
+			return err
+		}
+		if !emptyCodexComposer(visible) {
+			return ErrUnsafeSessionChange
+		}
+		return nil
+	}
+	return p.verifyNativeComposerEmpty(ctx, target)
 }
 
 func (p Probe) verifyNativeSessionChange(ctx context.Context, target Agent, focused bool) (Agent, error) {

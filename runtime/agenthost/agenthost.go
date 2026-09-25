@@ -32,6 +32,7 @@ type Agent struct {
 	Kind, Name, DisplayName, Title, Status, CWD, ForegroundCWD string
 	WorkspaceID, TabID, PaneID                                 string
 	Focused                                                    bool
+	LaunchPending                                              bool
 	Revision, StateChangeSeq                                   uint64
 	Session                                                    *SessionRef
 }
@@ -73,9 +74,10 @@ type Host struct {
 	Herdr, Session string
 }
 type Probe struct {
-	Host   Host
-	native NativeSources
-	wait   func(context.Context, time.Duration) error
+	Host     Host
+	native   NativeSources
+	topology managedTopology
+	wait     func(context.Context, time.Duration) error
 }
 
 // NewProbe creates a status probe. Codex uses one bounded App Server snapshot;
@@ -374,5 +376,5 @@ func (a wireAgent) public() (Agent, error) {
 		}
 		session = &s
 	}
-	return Agent{Kind: a.Agent, Name: a.Name, DisplayName: a.DisplayAgent, Title: a.Title, Status: a.AgentStatus, CWD: a.CWD, ForegroundCWD: a.ForegroundCWD, WorkspaceID: a.WorkspaceID, TabID: a.TabID, PaneID: a.PaneID, Focused: a.Focused, Revision: a.Revision, StateChangeSeq: a.StateChangeSeq, Session: session}, nil
+	return Agent{Kind: a.Agent, Name: a.Name, DisplayName: a.DisplayAgent, Title: a.Title, Status: a.AgentStatus, CWD: a.CWD, ForegroundCWD: a.ForegroundCWD, WorkspaceID: a.WorkspaceID, TabID: a.TabID, PaneID: a.PaneID, Focused: a.Focused, LaunchPending: a.LaunchPending, Revision: a.Revision, StateChangeSeq: a.StateChangeSeq, Session: session}, nil
 }
