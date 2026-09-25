@@ -18,6 +18,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/raulfrk/herdr-plugin-kit/internal/mutation"
 	"github.com/raulfrk/herdr-plugin-kit/manifest"
+	"github.com/raulfrk/herdr-plugin-kit/runtime/interop"
 )
 
 func TestGenerateCreatesOnlyTheValidatedPluginContract(t *testing.T) {
@@ -443,6 +444,12 @@ func TestAttentionShapedGeneratedConsumerUsesGenericFixedActionsAndEvents(t *tes
 		{ID: "toggle-autofocus", Title: "Toggle autofocus", Description: "Toggle fixture behavior", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "toggle-autofocus"}},
 		{ID: "observe-event", Title: "Observe event", Contexts: []string{"global"}, Command: []string{"./plugin", "action", "observe-event"}},
 	}
+	routeAction, routeContracts, err := interop.ActionRouteDeclarations([]string{"./plugin", "action", "route"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extras = append(extras, routeAction)
+	kit.Interfaces = append(kit.Interfaces, routeContracts...)
 	kit.Actions = append(kit.Actions, extras...)
 	kit.Events = []manifest.EventHook{
 		{On: "pane.focused", Command: []string{"./plugin", "action", "observe-event"}},
@@ -461,7 +468,7 @@ func TestAttentionShapedGeneratedConsumerUsesGenericFixedActionsAndEvents(t *tes
 		}
 	})
 	mainPath := filepath.Join(output, "cmd", options.ID, "main.go")
-	mutateText(t, mainPath, `case "health":`, `case "open-launcher", "toggle-autofocus", "observe-event":
+	mutateText(t, mainPath, `case "health":`, `case "open-launcher", "toggle-autofocus", "observe-event", "route":
 		return nil
 	case "health":`)
 
@@ -1071,6 +1078,69 @@ func TestContractValidatorAcceptsFixedActionRouteAdvertisementTogether(t *testin
 			herdrValue.Actions[3].Title = "Other"
 		},
 		"wrong version": func(value *manifest.Manifest, _ *herdrManifest) { value.Interfaces[1].Version = 2 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedKit := kit
+			changedKit.Actions = append([]manifest.Action(nil), kit.Actions...)
+			changedKit.Interfaces = append([]manifest.Interface(nil), kit.Interfaces...)
+			changedHerdr := herdr
+			changedHerdr.Actions = append([]herdrAction(nil), herdr.Actions...)
+			mutate(&changedKit, &changedHerdr)
+			if err := validateContracts(changedKit, changedHerdr); err == nil {
+				t.Fatal("action-route drift accepted")
+			}
+		})
+	}
+}
+
+func TestContractValidatorAcceptsCurrentActionRouteDeclarations(t *testing.T) {
+	options := Options{ID: "example.route", Name: "Route"}
+	kit := generatedManifest(options)
+	herdr := generatedHerdrManifest(options)
+	action, contracts, err := interop.ActionRouteDeclarations([]string{"./plugin", "action", "route"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kit.Actions = append(kit.Actions, action)
+	kit.Interfaces = append(kit.Interfaces, contracts...)
+	herdr.Actions = append(herdr.Actions, herdrAction{ID: action.ID, Title: action.Title, Contexts: action.Contexts, Command: action.Command})
+	if err := kit.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateContracts(kit, herdr); err != nil {
+		t.Fatalf("current action-route declarations rejected: %v", err)
+	}
+	t.Run("version order", func(t *testing.T) {
+		reordered := kit
+		reordered.Interfaces = append([]manifest.Interface(nil), kit.Interfaces...)
+		reordered.Interfaces[1], reordered.Interfaces[2] = reordered.Interfaces[2], reordered.Interfaces[1]
+		if err := validateContracts(reordered, herdr); err != nil {
+			t.Fatalf("reordered action-route declarations rejected: %v", err)
+		}
+	})
+	for name, mutate := range map[string]func(*manifest.Manifest, *herdrManifest){
+		"missing v1": func(value *manifest.Manifest, _ *herdrManifest) {
+			value.Interfaces = append(value.Interfaces[:1], value.Interfaces[2:]...)
+		},
+		"orphan v2": func(value *manifest.Manifest, herdrValue *herdrManifest) {
+			value.Interfaces = append(value.Interfaces[:1], value.Interfaces[2:]...)
+			value.Actions = value.Actions[:3]
+			herdrValue.Actions = herdrValue.Actions[:3]
+		},
+		"missing action": func(value *manifest.Manifest, herdrValue *herdrManifest) {
+			value.Actions = value.Actions[:3]
+			herdrValue.Actions = herdrValue.Actions[:3]
+		},
+		"unknown version": func(value *manifest.Manifest, _ *herdrManifest) { value.Interfaces[2].Version = 3 },
+		"wrong direction": func(value *manifest.Manifest, _ *herdrManifest) {
+			value.Interfaces[2].Direction = manifest.InterfaceRequires
+		},
+		"duplicate v1": func(value *manifest.Manifest, _ *herdrManifest) {
+			value.Interfaces = append(value.Interfaces, value.Interfaces[1])
+		},
+		"duplicate v2": func(value *manifest.Manifest, _ *herdrManifest) {
+			value.Interfaces = append(value.Interfaces, value.Interfaces[2])
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			changedKit := kit

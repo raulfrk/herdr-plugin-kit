@@ -1113,16 +1113,17 @@ func validateContracts(kit manifest.Manifest, herdr herdrManifest) error {
 	if kit.Interfaces[0] != (manifest.Interface{ID: "health", Version: 1, Direction: manifest.InterfaceProvides}) {
 		return errors.New("generated health interface contract differs")
 	}
-	routeInterfaces := 0
+	routeInterfaces := map[uint32]bool{}
 	for _, contract := range kit.Interfaces[1:] {
-		if contract == (manifest.Interface{ID: "action-route", Version: 1, Direction: manifest.InterfaceProvides}) {
-			routeInterfaces++
+		if (contract == (manifest.Interface{ID: "action-route", Version: 1, Direction: manifest.InterfaceProvides}) ||
+			contract == (manifest.Interface{ID: "action-route", Version: 2, Direction: manifest.InterfaceProvides})) && !routeInterfaces[contract.Version] {
+			routeInterfaces[contract.Version] = true
 			continue
 		}
 		return fmt.Errorf("unsupported generated interface contract %q/%d/%s", contract.ID, contract.Version, contract.Direction)
 	}
-	if routeInterfaces > 1 || routeAction != (routeInterfaces == 1) {
-		return errors.New("fixed route action and action-route v1 advertisement must appear together")
+	if routeAction != routeInterfaces[1] || (routeInterfaces[2] && !routeInterfaces[1]) {
+		return errors.New("fixed route action and action-route v1 advertisement must appear together; v2 extends v1")
 	}
 	if len(herdr.Panes) != 1 {
 		return errors.New("Herdr manifest must declare one routed main pane")
