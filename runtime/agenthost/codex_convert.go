@@ -23,9 +23,10 @@ const (
 )
 
 var (
-	ErrCodexConversionCapture  = errors.New("Codex conversion capture failed")
-	ErrCodexConversionFallback = errors.New("Codex conversion restored the ordinary session")
-	ErrCodexConversionComposer = errors.New("Codex conversion composer is not provably empty before stop")
+	ErrCodexConversionCapture        = errors.New("Codex conversion capture failed")
+	ErrCodexConversionFallback       = errors.New("Codex conversion restored the ordinary session")
+	ErrCodexConversionComposer       = errors.New("Codex conversion composer is not provably empty before stop")
+	ErrCodexConversionExitUnverified = errors.New("Codex conversion exit was attempted but not verified")
 )
 
 // CodexConversionRequest selects one ordinary Codex TUI in its existing pane.
@@ -236,13 +237,31 @@ func (c CodexConverter) stopCaptureResume(ctx context.Context, request CodexConv
 		SessionName: request.Source.SessionName, WorkspaceID: request.Source.WorkspaceID,
 		TabID: request.Source.TabID, PaneID: request.Source.PaneID,
 	}
-	stopped, err := c.launcher.StopForSessionChange(ctx, request.Source, ready)
+	stopped, err := c.launcher.awaitSafeSessionChangeWithFocus(ctx, request.Source, ready, false, true)
 	if err != nil {
 		return CodexConversionResult{}, fmt.Errorf("convert Codex source: %w", err)
 	}
-	base := CodexConversionResult{ThreadID: before.ID, Service: service}
 	if stopped.Service != service || stopped.Agent.Session == nil || stopped.Agent.Session.Value != before.ID || stopped.Process.CWD != request.Source.CWD {
-		return base, fmt.Errorf("convert Codex stopped source: %w", ErrManagedStale)
+		return CodexConversionResult{}, fmt.Errorf("convert Codex source changed: %w", ErrManagedStale)
+	}
+	process, err := c.launcher.topologyHost().VerifyForegroundProcess(ctx, target, before.CWD, stopped.Process.Argv)
+	if err != nil || !sameForegroundProcess(process, stopped.Process) {
+		return CodexConversionResult{}, fmt.Errorf("convert Codex source process: %w", errors.Join(ErrManagedStale, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return CodexConversionResult{}, err
+	}
+	// Native exit restores the terminal modes that a signal can leave behind.
+	// Herdr cannot bind this key to a PID atomically; the guarded input race is
+	// specific to conversion. Never repeat the key or fall back to a signal.
+	base := CodexConversionResult{ThreadID: before.ID, Service: service}
+	exitErr := c.launcher.runHerdr(ctx, "pane", "send-keys", target.PaneID, "ctrl+d")
+	exitErr = errors.Join(exitErr, ctx.Err())
+	if exitErr == nil {
+		exitErr = c.launcher.topologyHost().WaitForShell(ctx, target, before.CWD)
+	}
+	if exitErr != nil {
+		return base, fmt.Errorf("convert Codex exit: %w", errors.Join(ErrCodexConversionExitUnverified, exitErr))
 	}
 	shellCtx, shellCancel := context.WithTimeout(ctx, ready)
 	shellLease, err := c.captureConversionShell(shellCtx, target, before.CWD, nil)

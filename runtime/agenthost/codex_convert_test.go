@@ -97,7 +97,7 @@ func TestCodexConverterStopsCapturesAndResumesSameThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != CodexConversionManaged || result.FallbackUsed || result.Managed != managed || result.ManagedAttempts != 1 || result.ThreadID != managedSourceID || len(harness.topology.stops) != 1 || harness.topology.stops[0].PID != 77 {
+	if result.Outcome != CodexConversionManaged || result.FallbackUsed || result.Managed != managed || result.ManagedAttempts != 1 || result.ThreadID != managedSourceID || conversionExitCount(harness.runner.calls) != 1 || len(harness.topology.stops) != 0 {
 		t.Fatalf("result=%+v stops=%+v", result, harness.topology.stops)
 	}
 	if len(harness.launches) != 1 {
@@ -107,7 +107,7 @@ func TestCodexConverterStopsCapturesAndResumesSameThread(t *testing.T) {
 	if request.Operation != ManagedResume || request.Origin != managedOrigin() || request.ThreadID != managedSourceID || request.Directory != harness.source.CWD || request.Focus || request.Placement != "" || request.Policy != managedPolicy() {
 		t.Fatalf("managed request=%+v", request)
 	}
-	if harness.verifier.closed != 1 || len(harness.runner.calls) != 4 || hasPaneInput(harness.runner.calls) {
+	if harness.verifier.closed != 1 || len(harness.runner.calls) != 5 || conversionExitCount(harness.runner.calls) != 1 {
 		t.Fatalf("closed=%d calls=%#v", harness.verifier.closed, harness.runner.calls)
 	}
 }
@@ -286,7 +286,7 @@ func TestCodexConverterDiscoversAndBindsMissingOrdinarySessionBeforeStopping(t *
 	if err != nil || result.Outcome != CodexConversionManaged || result.ThreadID != managedSourceID {
 		t.Fatalf("result=%+v error=%v calls=%q", result, err, harness.runner.calls)
 	}
-	if len(harness.topology.stops) != 1 || len(harness.launches) != 1 || harness.launches[0].ThreadID != managedSourceID {
+	if conversionExitCount(harness.runner.calls) != 1 || len(harness.topology.stops) != 0 || len(harness.launches) != 1 || harness.launches[0].ThreadID != managedSourceID {
 		t.Fatalf("stops=%+v launches=%+v", harness.topology.stops, harness.launches)
 	}
 	assertConversionDiscoveryCalls(t, harness.runner.calls, harness.source.SessionName)
@@ -321,7 +321,7 @@ func TestCodexConverterNormalizesObservedStockEffortAfterStop(t *testing.T) {
 	if err != nil || result.Outcome != CodexConversionManaged || len(h.verifier.applied) != 1 || h.verifier.applied[0].Model != h.identity.Model || h.verifier.applied[0].ReasoningEffort != "medium" || len(h.launches) != 1 || h.launches[0].resumeSourcePolicy == nil || h.launches[0].resumeSourcePolicy.ReasoningEffort != "medium" {
 		t.Fatalf("result=%+v error=%v applied=%+v launches=%+v", result, err, h.verifier.applied, h.launches)
 	}
-	if len(h.topology.stops) != 1 || len(h.topology.runs) != 0 {
+	if conversionExitCount(h.runner.calls) != 1 || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 {
 		t.Fatalf("stops=%d ordinary resumes=%d", len(h.topology.stops), len(h.topology.runs))
 	}
 }
@@ -351,7 +351,7 @@ func TestCodexConverterStockUpdateAmbiguousReadbackLeavesSourceStopped(t *testin
 	h.verifier.applyErr = errors.New("update response lost")
 	h.verifier.identities[3].Model = "different"
 	result, err := h.converter.Convert(context.Background(), h.request())
-	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || len(h.topology.stops) != 1 || len(h.topology.runs) != 0 || len(h.launches) != 0 {
+	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || conversionExitCount(h.runner.calls) != 1 || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 || len(h.launches) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d resumes=%d launches=%d", result, err, len(h.topology.stops), len(h.topology.runs), len(h.launches))
 	}
 }
@@ -379,7 +379,7 @@ func TestCodexConverterNoDispatchDoesNotOverrideKnownReadbackDrift(t *testing.T)
 	h.verifier.identities[3].Model = "different"
 	h.verifier.historyErrs = []error{nil, nil, errors.New("history unavailable")}
 	result, err := h.converter.Convert(context.Background(), h.request())
-	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || len(h.topology.stops) != 1 || len(h.topology.runs) != 0 {
+	if !errors.Is(err, ErrManagedSettingsUnknown) || result.Outcome != "" || conversionExitCount(h.runner.calls) != 1 || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d resumes=%d", result, err, len(h.topology.stops), len(h.topology.runs))
 	}
 }
@@ -989,15 +989,23 @@ func newConversionHarness(t *testing.T) *conversionHarness {
 	runner := &scriptedRunner{results: []command.Result{
 		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
 		managedAgentResult(t, source), {Stdout: managedEmptyComposer("answer")},
+		{},
 	}}
 	service := &fakeManagedService{snapshot: managedServiceSnapshot()}
-	topology := &fakeManagedTopology{inspected: sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}}
+	topology := &fakeManagedTopology{inspected: sessionhost.ForegroundProcess{PID: 77, Name: "codex", CWD: source.CWD, Argv: []string{"codex"}}, pid: 77}
 	launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: origin.SessionName})
 	launcher.service, launcher.topology, launcher.verifiers = service, topology, fakeManagedVerifierFactory{verifier: verifier}
 	harness := &conversionHarness{
 		converter: CodexConverter{launcher: launcher}, service: service, topology: topology,
 		verifier: verifier, runner: runner, source: source, identity: identity, history: history, policy: policy,
 	}
+	harness.converter.launcher.Host.Runner = runnerFunc(func(ctx context.Context, executable string, args []string) (command.Result, error) {
+		result, err := runner.Run(ctx, executable, args)
+		if conversionExitCount([][]string{args}) == 1 {
+			topology.pid = 99
+		}
+		return result, err
+	})
 	harness.shellLease = conversionShellLease{
 		Process:  sessionhost.ForegroundProcess{PID: 88, Name: "zsh", CWD: source.CWD, Argv: []string{"zsh"}},
 		Revision: 17,

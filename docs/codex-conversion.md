@@ -39,8 +39,8 @@ Call `Convert` with the exact `Agent` returned for the source pane. Conversion:
    clean absolute CWD, persisted turn history, foreground PID and literal argv;
 2. reads current Codex constraints, then waits without input for two stable
    unfocused, idle/done observations with an empty composer;
-3. gracefully stops only that exact Codex process and requires the same pane's
-   authoritative shell;
+3. rechecks the same foreground process, sends one native Ctrl-D to that pane,
+   and requires its authoritative shell to return with Codex's terminal cleanup;
 4. captures the effective policy now that the ordinary active writer has
    released the thread;
 5. records a short-lived shell lease containing the exact shell process, pane
@@ -66,6 +66,16 @@ The remote-resume argv never carries model, reasoning, approval, sandbox,
 permission, profile, prompt, or environment overrides. Settings reconciliation
 is an App Server operation on the already attached same thread and is never
 retried when its outcome is unknown.
+
+Native exit is conversion-specific; generic process stopping and cleanup remain
+PID-bound. Herdr 0.8.2 cannot atomically bind a key to the checked process. Typing
+or process replacement between the final guard and Ctrl-D can therefore affect
+new input or the wrong process. Callers must accept that residual risk; these
+guards do not provide atomic PID targeting or unconditional losslessness.
+The exit key is never retried, and a failed or unverified exit never falls back
+to a signal. `ErrCodexConversionExitUnverified` means dispatch was attempted but
+exit could not be established; inspect the pane before taking another action.
+No resume, fallback, or settings update is attempted after that error.
 
 ## Transient custom policy
 
@@ -109,7 +119,7 @@ that limitation instead of claiming they were compared.
 
 ## Failure and recovery
 
-Pre-stop rejection sends no pane input. If authoritative capture fails after a
+Pre-exit guard rejection sends no pane input. If authoritative capture fails after a
 successful stop, conversion performs exactly one minimal ordinary
 `codex resume --cd CWD ORIGINAL_ID` after rechecking the unchanged shell,
 identity, history, and service instance. The returned result has outcome
