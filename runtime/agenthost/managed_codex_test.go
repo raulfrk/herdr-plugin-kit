@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
@@ -474,19 +475,25 @@ func TestManagedCleanupReportsReconciliationStopFailure(t *testing.T) {
 func TestManagedCleanupCancellationCoversUnsettledReconciliationStates(t *testing.T) {
 	for _, shellFirst := range []bool{false, true} {
 		t.Run(fmt.Sprintf("shell-ready-%t", shellFirst), func(t *testing.T) {
-			verifyErrs := []error{sessionhost.ErrStaleTarget, sessionhost.ErrStaleTarget}
-			waitErrs := []error{errors.New("busy")}
-			if shellFirst {
-				verifyErrs = []error{sessionhost.ErrStaleTarget, nil, nil, sessionhost.ErrStaleTarget}
-				waitErrs = []error{nil, errors.New("changed"), errors.New("busy")}
-			}
-			topology := &fakeManagedTopology{verifyErrs: verifyErrs, waitErrs: waitErrs}
-			cleanup := &managedCleanup{topology: topology, target: sessionhost.CreatedTarget{Origin: managedOrigin()}, resume: true, launchOwned: true, cwd: "/tmp/project", argv: []string{"codex"}}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-			defer cancel()
-			if err := cleanup.run(ctx); !errors.Is(err, ErrManagedCleanup) {
-				t.Fatalf("error=%v", err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				verifyErrs := []error{sessionhost.ErrStaleTarget, sessionhost.ErrStaleTarget}
+				waitErrs := []error{errors.New("busy")}
+				if shellFirst {
+					verifyErrs = []error{sessionhost.ErrStaleTarget, nil, nil, sessionhost.ErrStaleTarget}
+					waitErrs = []error{nil, errors.New("changed"), errors.New("busy")}
+				}
+				topology := &fakeManagedTopology{verifyErrs: verifyErrs, waitErrs: waitErrs}
+				cleanup := &managedCleanup{topology: topology, target: sessionhost.CreatedTarget{Origin: managedOrigin()}, resume: true, launchOwned: true, cwd: "/tmp/project", argv: []string{"codex"}}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+				defer cancel()
+				started := time.Now()
+				if err := cleanup.run(ctx); !errors.Is(err, ErrManagedCleanup) {
+					t.Fatalf("error=%v", err)
+				}
+				if elapsed := time.Since(started); elapsed != managedCleanupTimeout {
+					t.Fatalf("cleanup budget = %v, want %v", elapsed, managedCleanupTimeout)
+				}
+			})
 		})
 	}
 }
