@@ -7,8 +7,9 @@ conversation storage; it does not create one server per conversation.
 
 ## Managed versus ordinary
 
-Typing `codex` starts an ordinary, unmanaged TUI, but its App Server transport
-is the same systemd-owned canonical Unix socket used by managed operations.
+Typing `codex` starts an ordinary, unmanaged TUI. Do not assume its transport
+uses the systemd-owned canonical Unix socket: conversion requires the source
+thread to be loaded in that shared server and refuses a disk-only source.
 Managed New and Fork explicitly use that socket. Convert stops the exact
 guarded ordinary TUI and resumes its existing conversation through that socket,
 preserving its identity, history, directory, and effective settings. It does
@@ -23,8 +24,8 @@ Codex configuration or change ordinary sessions started manually with `codex`.
 
 The service launches pinned Codex with literal `app-server --listen unix://`,
 which resolves to `CODEX_HOME/app-server-control/app-server-control.sock`.
-Consequently plain and explicitly remote Codex clients share one App Server
-process while remaining distinct conversations. A native daemon or legacy Kit
+Clients connected to that socket share one App Server process while remaining
+distinct conversations. A native daemon or legacy Kit
 service that predates installation must be retired through the explicit
 maintenance procedure below; installation never creates a second canonical
 listener or silently disconnects clients.

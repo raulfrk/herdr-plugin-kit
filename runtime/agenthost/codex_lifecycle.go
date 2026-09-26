@@ -53,6 +53,7 @@ type managedVerifier interface {
 	ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error)
 	ListThreads(context.Context, string) ([]codexThreadIdentity, error)
 	ReadThread(context.Context, string) (codexThreadIdentity, error)
+	ReadLoadedThread(context.Context, string) (codexThreadIdentity, error)
 	RecheckIdentity(context.Context, string) (codexThreadIdentity, error)
 	ReadEffective(context.Context, string) (EffectiveCodexPolicy, error)
 	ApplyObservedReasoning(context.Context, codexThreadIdentity, ManagedCodexPolicy) (safeNoDispatch bool, err error)
@@ -331,6 +332,16 @@ func (c *codexLifecycle) ConfirmIdentity(ctx context.Context, operation ManagedO
 }
 
 func (c *codexLifecycle) ReadThread(ctx context.Context, threadID string) (codexThreadIdentity, error) {
+	return c.readThread(ctx, threadID, false)
+}
+
+// ReadLoadedThread refuses disk-only metadata as evidence of a live source.
+// This is a precondition, not a subscription or a policy-preservation guarantee.
+func (c *codexLifecycle) ReadLoadedThread(ctx context.Context, threadID string) (codexThreadIdentity, error) {
+	return c.readThread(ctx, threadID, true)
+}
+
+func (c *codexLifecycle) readThread(ctx context.Context, threadID string, requireLoaded bool) (codexThreadIdentity, error) {
 	var response struct {
 		Thread codexThread `json:"thread"`
 	}
@@ -343,6 +354,14 @@ func (c *codexLifecycle) ReadThread(ctx context.Context, threadID string) (codex
 	identity, err := response.Thread.identity()
 	if err != nil || identity.ID != threadID {
 		return codexThreadIdentity{}, ErrManagedStale
+	}
+	if requireLoaded {
+		var status struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(response.Thread.Status, &status) != nil || (status.Type != "idle" && status.Type != "active") {
+			return codexThreadIdentity{}, ErrManagedSettingsUnknown
+		}
 	}
 	return identity, nil
 }
@@ -588,12 +607,13 @@ func (c *codexLifecycle) DeleteThread(ctx context.Context, threadID string) erro
 }
 
 type codexThread struct {
-	ID              string  `json:"id"`
-	CWD             string  `json:"cwd"`
-	ForkedFromID    *string `json:"forkedFromId"`
-	ModelProvider   string  `json:"modelProvider"`
-	Model           *string `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
+	ID              string          `json:"id"`
+	CWD             string          `json:"cwd"`
+	ForkedFromID    *string         `json:"forkedFromId"`
+	ModelProvider   string          `json:"modelProvider"`
+	Model           *string         `json:"model"`
+	ReasoningEffort *string         `json:"reasoningEffort"`
+	Status          json.RawMessage `json:"status"`
 }
 
 func (t codexThread) identity() (codexThreadIdentity, error) {

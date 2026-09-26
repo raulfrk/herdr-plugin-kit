@@ -16,6 +16,8 @@ import (
 )
 
 type conversionVerifier struct {
+	loadedErr       error
+	loadedReads     []string
 	constraints     []codexConstraintSnapshot
 	constraintErrs  []error
 	identities      []codexThreadIdentity
@@ -43,6 +45,14 @@ func (f *conversionVerifier) ConfirmIdentity(context.Context, ManagedOperation, 
 }
 func (f *conversionVerifier) ReadThread(context.Context, string) (codexThreadIdentity, error) {
 	return popConversion(&f.identities, &f.identityErrs)
+}
+
+func (f *conversionVerifier) ReadLoadedThread(ctx context.Context, id string) (codexThreadIdentity, error) {
+	f.loadedReads = append(f.loadedReads, id)
+	if f.loadedErr != nil {
+		return codexThreadIdentity{}, f.loadedErr
+	}
+	return f.ReadThread(ctx, id)
 }
 func (f *conversionVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
 	return nil, errors.New("unexpected list")
@@ -188,6 +198,19 @@ func TestCodexConverterPreStopCaptureFailureSendsNoInput(t *testing.T) {
 	result, err := harness.converter.Convert(context.Background(), harness.request())
 	if !errors.Is(err, ErrCodexConversionCapture) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d runs=%d calls=%d", result, err, len(harness.topology.stops), len(harness.topology.runs), len(harness.runner.calls))
+	}
+}
+
+func TestCodexConverterUnloadedSourceRefusesBeforeExitOrPolicyResume(t *testing.T) {
+	harness := newConversionHarness(t)
+	harness.verifier.loadedErr = ErrManagedSettingsUnknown
+	policies := len(harness.verifier.policies)
+	result, err := harness.converter.Convert(context.Background(), harness.request())
+	if !errors.Is(err, ErrCodexConversionCapture) || !errors.Is(err, ErrManagedSettingsUnknown) || !reflect.DeepEqual(result, CodexConversionResult{}) {
+		t.Fatalf("result=%+v error=%v, want pre-exit settings refusal", result, err)
+	}
+	if !reflect.DeepEqual(harness.verifier.loadedReads, []string{harness.identity.ID}) || len(harness.verifier.policies) != policies || len(harness.verifier.applied) != 0 || len(harness.launches) != 0 || len(harness.topology.stops) != 0 || len(harness.topology.runs) != 0 || len(harness.runner.calls) != 0 {
+		t.Fatalf("unloaded source performed an exit, policy read/update, or launch: %+v", harness)
 	}
 }
 

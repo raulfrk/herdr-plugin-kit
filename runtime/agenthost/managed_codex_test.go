@@ -96,6 +96,9 @@ func (f *fakeManagedVerifier) ReadThread(context.Context, string) (codexThreadId
 	f.read = f.read[1:]
 	return value, nil
 }
+func (f *fakeManagedVerifier) ReadLoadedThread(ctx context.Context, id string) (codexThreadIdentity, error) {
+	return f.ReadThread(ctx, id)
+}
 func (f *fakeManagedVerifier) ListCLIThreads(context.Context, string) ([]codexThreadIdentity, error) {
 	return f.listThreads()
 }

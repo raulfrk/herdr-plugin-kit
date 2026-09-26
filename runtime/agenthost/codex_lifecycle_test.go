@@ -720,6 +720,52 @@ func TestCodexLifecycleEffectiveReadSendsNoOverridesAndUnsubscribes(t *testing.T
 	}
 }
 
+func TestCodexLifecycleLoadedThreadRequiresCurrentLiveState(t *testing.T) {
+	for _, test := range []struct {
+		name, status string
+		wantErr      error
+	}{
+		{"idle", `{"type":"idle"}`, nil},
+		{"active", `{"type":"active","activeFlags":[]}`, nil},
+		{"not loaded", `{"type":"notLoaded"}`, ErrManagedSettingsUnknown},
+		{"system error", `{"type":"systemError"}`, ErrManagedSettingsUnknown},
+		{"unknown", `{"type":"future"}`, ErrManagedSettingsUnknown},
+		{"missing type", `{}`, ErrManagedSettingsUnknown},
+		{"null", `null`, ErrManagedSettingsUnknown},
+		{"malformed shape", `"idle"`, ErrManagedSettingsUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
+				lifecycleInitialize(t, ctx, conn)
+				request := readRPCRequest(t, ctx, conn, "thread/read")
+				if len(request.Params) != 2 || string(request.Params["threadId"]) != fmt.Sprintf("%q", managedSourceID) || string(request.Params["includeTurns"]) != "false" {
+					t.Fatalf("read params=%s", mustJSON(request.Params))
+				}
+				thread := strings.TrimSuffix(codexListThreadJSON(managedSourceID), "}") + `,"status":` + test.status + `}`
+				sendRPCResult(t, ctx, conn, request.ID, `{"thread":`+thread+`}`)
+				if _, _, err := conn.Read(ctx); err == nil {
+					t.Error("read-only loaded check sent another RPC")
+				}
+			})
+			verifier, err := newCodexLifecycle(context.Background(), socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verifier.Close()
+			identity, err := verifier.ReadLoadedThread(context.Background(), managedSourceID)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error=%v, want %v", err, test.wantErr)
+			}
+			if test.wantErr == nil && identity.ID != managedSourceID {
+				t.Fatalf("identity=%+v", identity)
+			}
+			if test.wantErr != nil && identity != (codexThreadIdentity{}) {
+				t.Fatalf("unverified identity=%+v", identity)
+			}
+		})
+	}
+}
+
 func TestCodexLifecycleAppliesOnlyObservedReasoningOnStoppedThread(t *testing.T) {
 	var connections atomic.Int32
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {

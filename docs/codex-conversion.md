@@ -5,7 +5,7 @@ existing Herdr 0.8.2 pane. It uses the Kit's one installed user-systemd App Serv
 service and configured `CODEX_HOME`; it never starts a per-pane server, creates a replacement
 conversation, injects environment, or moves the session to another pane.
 
-Plain `codex` remains product-unmanaged even while it uses the service-owned
+Ordinary `codex` remains product-unmanaged even when it uses the service-owned
 canonical socket. Managed New/Fork explicitly connect to that same App Server.
 See [service lifecycle](codex-service.md) for installation, migration,
 maintenance restart, and uninstall.
@@ -31,6 +31,14 @@ output; conversion never tries alternate keys or reconstructs an ID from
 correlated metadata.
 
 ## Automatic conversion
+
+Conversion refuses before exit when the shared App Server reports the source
+thread as not loaded, or cannot establish a supported live state. Reading a
+stored thread's identity and history does not prove access to its current
+permissions: resuming it to inspect them can instead load server defaults.
+This check contains that unsupported case; it does not by itself prove policy
+preservation for a loaded source. The broader handoff still requires live
+policy-preservation evidence before acceptance.
 
 Call `Convert` with the exact `Agent` returned for the source pane. Conversion:
 

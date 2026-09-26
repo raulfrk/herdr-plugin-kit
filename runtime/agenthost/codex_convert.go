@@ -209,7 +209,7 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 		preCancel()
 		return CodexConversionResult{}, fmt.Errorf("convert Codex pre-stop constraints: %w", errors.Join(ErrCodexConversionCapture, err))
 	}
-	identity, err := verifier.ReadThread(preCtx, threadID)
+	identity, err := verifier.ReadLoadedThread(preCtx, threadID)
 	if err == nil {
 		err = validateObservedConversionIdentity(identity, request.Source, threadID, observed)
 	}
