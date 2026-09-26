@@ -220,7 +220,7 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 		return CodexConversionResult{}, fmt.Errorf("convert Codex pre-stop constraints: %w", errors.Join(ErrCodexConversionCapture, err))
 	}
 	identity, err := verifier.ReadLoadedThread(preCtx, threadID)
-	if err == nil && request.Customization != nil && identity.ReasoningEffort == "" && !observed.fromStatus {
+	if err == nil && identity.ReasoningEffort == "" && !observed.fromStatus {
 		request.Source, observed, err = c.observeCustomizationDefaults(preCtx, request.Source, identity, service, verifier)
 	}
 	if err == nil {
@@ -736,9 +736,9 @@ func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready t
 	return bound, observation, nil
 }
 
-// Custom preparation can bind an ordinary source before confirmation. If its
-// stored effort is still unset, obtain a new guarded observation rather than
-// retaining the earlier status or treating the default as a concrete setting.
+// Custom preparation can bind an ordinary source before confirmation or cancel.
+// If its stored effort is still unset, either conversion path needs a fresh
+// guarded observation, never retained status or a guessed concrete setting.
 func (c CodexConverter) observeCustomizationDefaults(ctx context.Context, source Agent, before codexThreadIdentity, service CodexServiceSnapshot, verifier managedVerifier) (Agent, managedStatusObservation, error) {
 	if before.ID != source.Session.Value || before.CWD != source.CWD || before.Model == "" || before.ModelProvider == "" {
 		return Agent{}, managedStatusObservation{}, ErrManagedStale

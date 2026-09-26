@@ -407,11 +407,14 @@ func TestCodexConverterNoDispatchDoesNotOverrideKnownReadbackDrift(t *testing.T)
 	}
 }
 
-func TestCodexConverterBoundStockThreadWithoutStatusRefusesBeforeStop(t *testing.T) {
+func TestCodexConverterBoundStockThreadWithoutFreshStatusRefusesBeforeStop(t *testing.T) {
 	h := newConversionHarness(t)
+	h.source.Revision, h.source.StateChangeSeq = 1, 1
+	h.runner.results[0] = managedAgentResult(t, h.source)
 	h.verifier.identities[0].ReasoningEffort = ""
+	h.runner.results[1].Stdout = []byte("› UNSENT DRAFT")
 	result, err := h.converter.Convert(context.Background(), h.request())
-	if !errors.Is(err, ErrManagedNarrow) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 {
+	if !errors.Is(err, ErrCodexConversionComposer) || !reflect.DeepEqual(result, CodexConversionResult{}) || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 || hasPaneInput(h.runner.calls) || len(h.verifier.applied) != 0 {
 		t.Fatalf("result=%+v error=%v stops=%d resumes=%d", result, err, len(h.topology.stops), len(h.topology.runs))
 	}
 }
@@ -849,6 +852,43 @@ func TestCodexConverterConfirmsBoundStockCustomizationWithFreshStatus(t *testing
 	}
 	if conversionExitCount(h.runner.calls) != 1 || len(h.verifier.applied) != 1 || h.verifier.applied[0].ReasoningEffort != "medium" || len(h.launches) != 1 || h.launches[0].Policy != desired {
 		t.Fatalf("calls=%q applied=%+v launches=%+v", h.runner.calls, h.verifier.applied, h.launches)
+	}
+}
+
+func TestCodexConverterCanceledCustomPreparationAllowsAutomaticConversion(t *testing.T) {
+	h := boundDefaultCustomizationHarness(t)
+	bound := h.source
+	h.source.Session = nil
+	h.runner.results = conversionDiscoveryResults(t, h.source, bound)
+	if _, err := h.converter.PrepareCustomization(context.Background(), h.source, managedPolicy(), 4*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if conversionExitCount(h.runner.calls) != 0 || len(h.verifier.applied) != 0 {
+		t.Fatal("preparation changed the source")
+	}
+	// The user cancels the custom disclosure, then chooses ordinary Convert
+	// from the fresh snapshot carrying the discovered thread binding.
+	h.source = bound
+	raw := h.identity
+	raw.ReasoningEffort = ""
+	h.verifier.identities = []codexThreadIdentity{raw, raw, raw, h.identity, h.identity}
+	h.verifier.histories = [][32]byte{h.history, h.history, h.history, h.history}
+	h.verifier.constraints = []codexConstraintSnapshot{conversionConstraints(), conversionConstraints()}
+	discovery := conversionDiscoveryResults(t, bound, bound)
+	h.runner.results = append(discovery[:len(discovery)-3],
+		managedAgentResult(t, bound), command.Result{Stdout: managedEmptyComposer("answer")},
+		managedAgentResult(t, bound), command.Result{Stdout: managedEmptyComposer("answer")}, command.Result{})
+	managed := h.managedResult()
+	h.converter.launch = func(_ context.Context, request ManagedCodexRequest) (*ManagedCodex, error) {
+		h.launches = append(h.launches, request)
+		return managed, nil
+	}
+	result, err := h.converter.Convert(context.Background(), h.request())
+	if err != nil || result.Outcome != CodexConversionManaged || result.ManagedAttempts != 1 || result.FallbackUsed || requiredPolicyDrift(result.Policy, h.policy) != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if conversionExitCount(h.runner.calls) != 1 || len(h.verifier.applied) != 1 || h.verifier.applied[0].ReasoningEffort != "medium" || len(h.launches) != 1 || h.launches[0].Policy != managedPolicy() {
+		t.Fatalf("automatic conversion applied custom replacements: %+v", h.launches)
 	}
 }
 
