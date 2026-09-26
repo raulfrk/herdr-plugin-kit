@@ -936,6 +936,21 @@ func TestCodexConverterStockCustomizationRefusesUnprovenSources(t *testing.T) {
 	}
 }
 
+func TestCodexConverterStockCustomizationRejectsWrongProcessDirectory(t *testing.T) {
+	h := boundDefaultCustomizationHarness(t)
+	h.topology.inspected.CWD = "/other"
+	// The real topology verifier rejects this mismatch if discovery reaches it.
+	h.topology.verifyErr = sessionhost.ErrStaleTarget
+
+	disclosure, err := h.converter.PrepareCustomization(context.Background(), h.source, managedPolicy(), 4*time.Second)
+	if !errors.Is(err, ErrManagedUnsupported) || !reflect.DeepEqual(disclosure, CodexConversionDisclosure{}) {
+		t.Fatalf("wrong process directory: disclosure=%+v error=%v", disclosure, err)
+	}
+	if hasPaneInput(h.runner.calls) || conversionExitCount(h.runner.calls) != 0 || len(h.verifier.applied) != 0 || len(h.topology.runs) != 0 || len(h.topology.stops) != 0 || len(h.launches) != 0 {
+		t.Fatal("unsupported source refusal changed input, settings, or processes")
+	}
+}
+
 func TestCodexConverterCustomConfirmationReconcilesExactTargetPolicy(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.policy.SandboxMode = "workspace-write"
