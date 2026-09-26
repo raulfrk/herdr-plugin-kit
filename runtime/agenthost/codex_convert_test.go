@@ -771,6 +771,131 @@ func TestCodexConverterPreparesCompleteCustomDisclosureWithoutPaneInput(t *testi
 	}
 }
 
+func boundDefaultCustomizationHarness(t *testing.T) *conversionHarness {
+	t.Helper()
+	h := newConversionHarness(t)
+	h.source.Revision, h.source.StateChangeSeq = 1, 1
+	raw := h.identity
+	raw.ReasoningEffort = ""
+	h.verifier.identities = []codexThreadIdentity{raw, raw}
+	h.verifier.histories = [][32]byte{h.history}
+	results := conversionDiscoveryResults(t, h.source, h.source)
+	// Already-bound sources need the guarded status and post-input checks,
+	// but must not send another session-binding report.
+	h.runner.results = results[:len(results)-3]
+	return h
+}
+
+func TestCodexConverterPreparesStockCustomizationWithoutChangingSettings(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			h := boundDefaultCustomizationHarness(t)
+			if !bound {
+				original := h.source
+				h.source.Session = nil
+				h.runner.results = conversionDiscoveryResults(t, h.source, original)
+			}
+			desired := managedPolicy()
+			disclosure, err := h.converter.PrepareCustomization(context.Background(), h.source, desired, 4*time.Second)
+			if err != nil || disclosure.ThreadID != h.identity.ID || disclosure.Desired != desired || len(disclosure.KnownReplacements) != 0 {
+				t.Fatalf("disclosure=%+v error=%v", disclosure, err)
+			}
+			raw := h.identity
+			raw.ReasoningEffort = ""
+			if disclosure.ConfirmationToken != conversionConfirmationToken(h.source, raw, desired) || disclosure.ConfirmationToken == conversionConfirmationToken(h.source, h.identity, desired) {
+				t.Fatal("confirmation was not bound to the raw unset identity")
+			}
+			if len(h.verifier.applied) != 0 || conversionExitCount(h.runner.calls) != 0 || len(h.topology.stops) != 0 || len(h.topology.runs) != 0 {
+				t.Fatal("preparation changed settings or stopped/resumed the source")
+			}
+			if bound {
+				for _, call := range h.runner.calls {
+					if strings.Contains(strings.Join(call, " "), "report-agent-session") {
+						t.Fatal("bound source was rebound")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCodexConverterConfirmsBoundStockCustomizationWithFreshStatus(t *testing.T) {
+	h := boundDefaultCustomizationHarness(t)
+	raw := h.identity
+	raw.ReasoningEffort = ""
+	desired := managedPolicy()
+	desired.ReasoningEffort, desired.ApprovalPolicy, desired.SandboxMode = "high", "on-request", "read-only"
+	target := h.policy
+	target.ReasoningEffort, target.ApprovalPolicy, target.SandboxMode = desired.ReasoningEffort, desired.ApprovalPolicy, desired.SandboxMode
+	final := h.identity
+	final.ReasoningEffort = desired.ReasoningEffort
+	h.verifier.identities = []codexThreadIdentity{raw, raw, raw, h.identity, final}
+	h.verifier.histories = [][32]byte{h.history, h.history, h.history, h.history}
+	h.verifier.policies = []EffectiveCodexPolicy{h.policy, target}
+	h.runner.results = append(h.runner.results,
+		managedAgentResult(t, h.source), command.Result{Stdout: managedEmptyComposer("answer")},
+		managedAgentResult(t, h.source), command.Result{Stdout: managedEmptyComposer("answer")}, command.Result{})
+	managed := h.managedResult()
+	managed.Policy = target
+	h.converter.launch = func(_ context.Context, request ManagedCodexRequest) (*ManagedCodex, error) {
+		h.launches = append(h.launches, request)
+		return managed, nil
+	}
+	request := h.request()
+	request.Customization = &CodexConversionCustomization{Desired: desired, ConfirmationToken: conversionConfirmationToken(h.source, raw, desired)}
+	result, err := h.converter.Convert(context.Background(), request)
+	if err != nil || result.Outcome != CodexConversionManaged || result.FallbackUsed || result.ManagedAttempts != 1 || requiredPolicyDrift(result.Policy, target) != "" {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if conversionExitCount(h.runner.calls) != 1 || len(h.verifier.applied) != 1 || h.verifier.applied[0].ReasoningEffort != "medium" || len(h.launches) != 1 || h.launches[0].Policy != desired {
+		t.Fatalf("calls=%q applied=%+v launches=%+v", h.runner.calls, h.verifier.applied, h.launches)
+	}
+}
+
+func TestCodexConverterStockCustomizationRefusesUnprovenSources(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mutate  func(*conversionHarness)
+		noInput bool
+	}{
+		{"unloaded", func(h *conversionHarness) { h.verifier.loadedErr = ErrManagedSettingsUnknown }, true},
+		{"wrong thread", func(h *conversionHarness) { h.verifier.identities[0].ID = "wrong" }, true},
+		{"wrong cwd", func(h *conversionHarness) { h.verifier.identities[0].CWD = "/other" }, true},
+		{"missing model", func(h *conversionHarness) { h.verifier.identities[0].Model = "" }, true},
+		{"missing provider", func(h *conversionHarness) { h.verifier.identities[0].ModelProvider = "" }, true},
+		{"remote process", func(h *conversionHarness) {
+			h.topology.inspected.Argv = []string{"codex", "--remote", "unix:///tmp/socket"}
+		}, true},
+		{"process replaced", func(h *conversionHarness) {
+			changed := h.topology.inspected
+			changed.PID++
+			h.topology.inspectedSeq = []sessionhost.ForegroundProcess{h.topology.inspected, changed}
+		}, true},
+		{"draft", func(h *conversionHarness) { h.runner.results[1].Stdout = []byte("› UNSENT DRAFT") }, true},
+		{"identity drift", func(h *conversionHarness) { h.verifier.identities[1].Model = "other" }, false},
+		{"effort became explicit", func(h *conversionHarness) { h.verifier.identities[1].ReasoningEffort = "high" }, false},
+		{"contradictory status", func(h *conversionHarness) {
+			h.runner.results[13].Stdout = []byte(strings.ReplaceAll(string(h.runner.results[13].Stdout), "gpt-5.6-sol", "other-model"))
+		}, false},
+		{"post-status draft", func(h *conversionHarness) { h.runner.results[18].Stdout = []byte("› NEW INPUT") }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := boundDefaultCustomizationHarness(t)
+			test.mutate(h)
+			disclosure, err := h.converter.PrepareCustomization(context.Background(), h.source, managedPolicy(), 4*time.Second)
+			if err == nil || !reflect.DeepEqual(disclosure, CodexConversionDisclosure{}) {
+				t.Fatalf("unsafe preparation accepted: %+v error=%v", disclosure, err)
+			}
+			if test.noInput && hasPaneInput(h.runner.calls) {
+				t.Fatalf("unsafe input: %q", h.runner.calls)
+			}
+			if conversionExitCount(h.runner.calls) != 0 || len(h.verifier.applied) != 0 || len(h.topology.runs) != 0 || len(h.topology.stops) != 0 {
+				t.Fatal("refusal changed settings or stopped/resumed the source")
+			}
+		})
+	}
+}
+
 func TestCodexConverterCustomConfirmationReconcilesExactTargetPolicy(t *testing.T) {
 	harness := newConversionHarness(t)
 	harness.policy.SandboxMode = "workspace-write"

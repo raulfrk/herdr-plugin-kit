@@ -62,24 +62,24 @@ func (l ManagedCodexLauncher) waitForProcess(ctx context.Context, target session
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentity(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy) (Agent, string, error) {
-	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, false, nil, nil, false)
+	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, false, nil, nil, false, false)
 	return agent, observed.identity, err
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
-	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, false)
+	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, false, false)
 }
 
 func (l ManagedCodexLauncher) discoverOrdinaryManagedIdentityObservation(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool) (Agent, managedStatusObservation, error) {
-	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, true)
+	return l.discoverManagedIdentityObservationExpected(ctx, target, cwd, argv, service, policy, allowPrefix, nil, nil, true, false)
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentityForSource(ctx context.Context, target sessionhost.Origin, cwd string, expected Agent, expectedProcess sessionhost.ForegroundProcess, service CodexServiceSnapshot) (Agent, managedStatusObservation, error) {
-	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, expectedProcess.Argv, service, ManagedCodexPolicy{}, false, &expected, &expectedProcess, true)
+	agent, observed, err := l.discoverManagedIdentityObservationExpected(ctx, target, cwd, expectedProcess.Argv, service, ManagedCodexPolicy{}, false, &expected, &expectedProcess, true, false)
 	return agent, observed, err
 }
 
-func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, expected *Agent, expectedProcess *sessionhost.ForegroundProcess, allowLocal bool) (Agent, managedStatusObservation, error) {
+func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, expected *Agent, expectedProcess *sessionhost.ForegroundProcess, allowLocal, requireStatus bool) (Agent, managedStatusObservation, error) {
 	verifyProcess := func() error {
 		if expectedProcess != nil {
 			current, err := l.topologyHost().InspectForegroundProcess(ctx, target)
@@ -123,7 +123,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 		if err := verifyProcess(); err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
-		if agent.Session != nil {
+		if agent.Session != nil && !requireStatus {
 			if !validManagedSession(agent.Session) {
 				return Agent{}, managedStatusObservation{}, ErrManagedStale
 			}

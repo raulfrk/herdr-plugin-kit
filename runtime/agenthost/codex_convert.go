@@ -119,7 +119,8 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if err != nil || !validManagedServiceSnapshot(service) {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization service: %w", errors.Join(ErrManagedStale, err))
 	}
-	request.Source, _, err = c.resolveSource(ctx, request.Source, ready, service)
+	var observed managedStatusObservation
+	request.Source, observed, err = c.resolveSource(ctx, request.Source, ready, service)
 	if err != nil {
 		return CodexConversionDisclosure{}, fmt.Errorf("prepare Codex customization identity: %w", err)
 	}
@@ -138,12 +139,17 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if err == nil {
 		_, err = constraints.validate(source.CWD, desired)
 	}
-	identity, identityErr := verifier.ReadThread(readCtx, source.Session.Value)
+	identity, identityErr := verifier.ReadLoadedThread(readCtx, source.Session.Value)
 	if err == nil {
 		err = identityErr
 	}
 	if err == nil {
-		err = validateConversionIdentity(identity, source, source.Session.Value)
+		if identity.ReasoningEffort == "" && !observed.fromStatus {
+			source, observed, err = c.observeCustomizationDefaults(readCtx, source, identity, service, verifier)
+		}
+		if err == nil {
+			err = validateObservedConversionIdentity(identity, source, source.Session.Value, observed)
+		}
 	}
 	if err == nil {
 		_, err = verifier.ReadStableHistory(readCtx, source.Session.Value)
@@ -158,7 +164,11 @@ func (c CodexConverter) PrepareCustomization(ctx context.Context, source Agent, 
 	if identity.Model != desired.Model {
 		disclosure.KnownReplacements = append(disclosure.KnownReplacements, "model")
 	}
-	if identity.ReasoningEffort != desired.ReasoningEffort {
+	currentEffort := identity.ReasoningEffort
+	if currentEffort == "" && observed.fromStatus {
+		currentEffort = observed.policy.ReasoningEffort
+	}
+	if currentEffort != desired.ReasoningEffort {
 		disclosure.KnownReplacements = append(disclosure.KnownReplacements, "reasoning_effort")
 	}
 	disclosure.ConfirmationToken = conversionConfirmationToken(source, identity, desired)
@@ -210,6 +220,9 @@ func (c CodexConverter) Convert(ctx context.Context, request CodexConversionRequ
 		return CodexConversionResult{}, fmt.Errorf("convert Codex pre-stop constraints: %w", errors.Join(ErrCodexConversionCapture, err))
 	}
 	identity, err := verifier.ReadLoadedThread(preCtx, threadID)
+	if err == nil && request.Customization != nil && identity.ReasoningEffort == "" && !observed.fromStatus {
+		request.Source, observed, err = c.observeCustomizationDefaults(preCtx, request.Source, identity, service, verifier)
+	}
 	if err == nil {
 		err = validateObservedConversionIdentity(identity, request.Source, threadID, observed)
 	}
@@ -723,6 +736,39 @@ func (c CodexConverter) resolveSource(ctx context.Context, source Agent, ready t
 	return bound, observation, nil
 }
 
+// Custom preparation can bind an ordinary source before confirmation. If its
+// stored effort is still unset, obtain a new guarded observation rather than
+// retaining the earlier status or treating the default as a concrete setting.
+func (c CodexConverter) observeCustomizationDefaults(ctx context.Context, source Agent, before codexThreadIdentity, service CodexServiceSnapshot, verifier managedVerifier) (Agent, managedStatusObservation, error) {
+	if before.ID != source.Session.Value || before.CWD != source.CWD || before.Model == "" || before.ModelProvider == "" {
+		return Agent{}, managedStatusObservation{}, ErrManagedStale
+	}
+	target := sessionhost.Origin{SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID}
+	process, err := c.launcher.topologyHost().InspectForegroundProcess(ctx, target)
+	if err != nil {
+		return Agent{}, managedStatusObservation{}, err
+	}
+	if process.Name != "codex" || len(process.Argv) == 0 || filepath.Base(process.Argv[0]) != "codex" || process.CWD != source.CWD || codexRemoteArgv(process.Argv) || validateManagedSourceArgv(process.Argv) != nil {
+		return Agent{}, managedStatusObservation{}, ErrManagedUnsupported
+	}
+	agent, observed, err := c.launcher.discoverManagedIdentityObservationExpected(ctx, target, source.CWD, process.Argv, service, ManagedCodexPolicy{}, false, &source, &process, true, true)
+	if err != nil {
+		return Agent{}, managedStatusObservation{}, err
+	}
+	after, err := verifier.ReadLoadedThread(ctx, source.Session.Value)
+	if err != nil {
+		return Agent{}, managedStatusObservation{}, err
+	}
+	if after != before {
+		return Agent{}, managedStatusObservation{}, ErrManagedStale
+	}
+	if err := validateObservedConversionIdentity(after, agent, source.Session.Value, observed); err != nil {
+		return Agent{}, managedStatusObservation{}, err
+	}
+	agent, err = c.recheckSourceBeforeBinding(ctx, target, agent, process)
+	return agent, observed, err
+}
+
 func (c CodexConverter) recheckSourceBeforeBinding(ctx context.Context, target sessionhost.Origin, expected Agent, expectedProcess sessionhost.ForegroundProcess) (Agent, error) {
 	var prior Agent
 	for sample := 0; sample < 2; sample++ {
@@ -730,7 +776,7 @@ func (c CodexConverter) recheckSourceBeforeBinding(ctx context.Context, target s
 		if err != nil {
 			return Agent{}, err
 		}
-		if current.Session != nil {
+		if expected.Session == nil && current.Session != nil {
 			return Agent{}, ErrManagedStale
 		}
 		if !sameImmutable(expected, current) {
