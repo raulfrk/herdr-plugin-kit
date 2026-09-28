@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -217,6 +218,23 @@ func (s codexConstraintSnapshot) validate(cwd string, requested ManagedCodexPoli
 		return codexPreflight{}, err
 	}
 	return preflight, nil
+}
+
+func (s codexConstraintSnapshot) validateNew(cwd string, requested ManagedCodexPolicy, reviewer string) (codexPreflight, error) {
+	if s.Config == nil || reviewer != "user" && reviewer != "auto_review" {
+		return codexPreflight{}, ErrManagedUnsupported
+	}
+	if raw := s.Config["approvals_reviewer"]; len(raw) != 0 && string(raw) != "null" {
+		var inherited string
+		if json.Unmarshal(raw, &inherited) != nil || inherited != "user" && inherited != "auto_review" {
+			return codexPreflight{}, ErrManagedUnsupported
+		}
+	}
+	// This is explicit New launch intent, never an inferred config default.
+	// Keep the authoritative snapshot intact and apply its existing requirements.
+	config := maps.Clone(s.Config)
+	config["approvals_reviewer"], _ = json.Marshal(reviewer)
+	return (codexConstraintSnapshot{Config: config, Requirements: s.Requirements}).validate(cwd, requested)
 }
 
 func (s codexConstraintSnapshot) validateConversion(cwd string, requested ManagedCodexPolicy, effective EffectiveCodexPolicy) (codexPreflight, error) {

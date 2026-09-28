@@ -56,6 +56,9 @@ type ManagedCodexRequest struct {
 	ThreadID   string
 	SourceArgv []string
 	Policy     ManagedCodexPolicy
+	// ApprovalsReviewer is an explicit per-process reviewer choice for New.
+	// Empty preserves inherited configuration; Fork and Resume reject overrides.
+	ApprovalsReviewer string
 	// InheritSourcePolicy makes ManagedFork read and preserve the exact
 	// authoritative source policy instead of requiring a consumer to infer it.
 	InheritSourcePolicy bool
@@ -76,11 +79,13 @@ type ManagedCodex struct {
 	Agent          Agent
 	Target         sessionhost.CreatedTarget
 	Process        sessionhost.ForegroundProcess
-	Policy         EffectiveCodexPolicy
-	Argv           []string
-	Service        CodexServiceSnapshot
-	Prompt         PromptResult
-	cleanup        *managedCleanup
+	// Policy is validated launch intent for New, not independent runtime readback.
+	// Fork and Resume use their authoritative effective policy audit.
+	Policy  EffectiveCodexPolicy
+	Argv    []string
+	Service CodexServiceSnapshot
+	Prompt  PromptResult
+	cleanup *managedCleanup
 }
 
 func (m *ManagedCodex) Cleanup(ctx context.Context) error {
@@ -162,7 +167,13 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 	var preflight codexPreflight
 	if !request.InheritSourcePolicy {
 		preflightCtx, preflightCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
-		if request.resumeSourcePolicy != nil {
+		if request.Operation == ManagedNew && request.ApprovalsReviewer != "" {
+			var constraints codexConstraintSnapshot
+			constraints, err = verifier.ReadConstraints(preflightCtx, request.Directory)
+			if err == nil {
+				preflight, err = constraints.validateNew(request.Directory, request.Policy, request.ApprovalsReviewer)
+			}
+		} else if request.resumeSourcePolicy != nil {
 			var constraints codexConstraintSnapshot
 			constraints, err = verifier.ReadConstraints(preflightCtx, request.Directory)
 			if err == nil {
@@ -516,6 +527,12 @@ func (l ManagedCodexLauncher) validate(request ManagedCodexRequest) error {
 	if len(request.Directory) > maxPathBytes || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory || strings.ContainsRune(request.Directory, 0) {
 		return errors.New("managed Codex directory must be clean, absolute, and NUL-free")
 	}
+	if request.ApprovalsReviewer != "" && (request.Operation != ManagedNew || request.ApprovalsReviewer != "user" && request.ApprovalsReviewer != "auto_review") {
+		return errors.New("managed Codex reviewer override is valid only for New with user or auto_review")
+	}
+	if request.ApprovalsReviewer != "" && len(request.ExtraArgv) > sessionhost.MaxArgv-18 {
+		return errors.New("managed Codex reviewer override exceeds the argument limit")
+	}
 	if request.InheritSourcePolicy {
 		if request.Operation != ManagedFork || request.Policy != (ManagedCodexPolicy{}) {
 			return errors.New("managed Codex source-policy inheritance is invalid")
@@ -692,6 +709,9 @@ func composeManagedTUIArgv(request ManagedCodexRequest, service CodexServiceSnap
 	)
 	if request.Operation == ManagedNew {
 		args = append(args, "-a", policy.ApprovalPolicy, "-s", policy.SandboxMode)
+		if request.ApprovalsReviewer != "" {
+			args = append(args, "-c", "approvals_reviewer="+request.ApprovalsReviewer)
+		}
 	}
 	args = append(args, "--strict-config", "--remote", remote, "--cd", request.Directory)
 	if request.Operation == ManagedFork {

@@ -7,14 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestOpenCodePromptSessionCreateAndDeleteExactContract(t *testing.T) {
-	requests := 0
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requests++
+		requests.Add(1)
 		if request.URL.Query().Get("directory") != "/tmp/project" || request.Header.Get("Authorization") != "" {
 			http.Error(response, "unexpected request", http.StatusBadRequest)
 			return
@@ -35,8 +36,8 @@ func TestOpenCodePromptSessionCreateAndDeleteExactContract(t *testing.T) {
 	if err != nil || id != "ses_created" {
 		t.Fatalf("id=%q error=%v", id, err)
 	}
-	if err := sessions.Delete(context.Background(), configured, id); err != nil || requests != 2 {
-		t.Fatalf("requests=%d error=%v", requests, err)
+	if err := sessions.Delete(context.Background(), configured, id); err != nil || requests.Load() != 2 {
+		t.Fatalf("requests=%d error=%v", requests.Load(), err)
 	}
 }
 
@@ -60,9 +61,9 @@ func TestOpenCodeNativeForkExactContractAndUncertainResponses(t *testing.T) {
 		{name: "oversized", status: http.StatusOK, body: strings.Repeat("x", openCodeResponseBytes+1), wantErrors: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			requests := 0
+			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-				requests++
+				requests.Add(1)
 				if request.Method != http.MethodPost || request.URL.Path != "/session/"+sourceID+"/fork" || request.URL.Query().Get("directory") != "/tmp/project" || request.Header.Get("Content-Type") != "application/json" {
 					t.Errorf("unexpected native fork request: %s %s", request.Method, request.URL)
 				}
@@ -74,8 +75,8 @@ func TestOpenCodeNativeForkExactContractAndUncertainResponses(t *testing.T) {
 			}))
 			defer server.Close()
 			child, err := forkOpenCodeSession(context.Background(), OpenCodeServer{URL: server.URL, Directory: "/tmp/project"}, sourceID)
-			if requests != 1 || child != test.wantChild || (test.wantErrors && !errors.Is(err, ErrForkOutcomeUncertain)) || (!test.wantErrors && err != nil) {
-				t.Fatalf("requests=%d child=%q error=%v", requests, child, err)
+			if requests.Load() != 1 || child != test.wantChild || (test.wantErrors && !errors.Is(err, ErrForkOutcomeUncertain)) || (!test.wantErrors && err != nil) {
+				t.Fatalf("requests=%d child=%q error=%v", requests.Load(), child, err)
 			}
 		})
 	}

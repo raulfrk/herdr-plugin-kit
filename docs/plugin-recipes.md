@@ -328,6 +328,17 @@ topology. Use `PromptStarter` for ordinary Codex New with a prompt or
 `ManagedCodexLauncher` for a managed new conversation; neither path invents or
 replaces an identity.
 
+For managed Codex New, `ManagedCodexRequest.ApprovalsReviewer` can explicitly
+request `user` or `auto_review`. The reviewer controls who handles requested
+approvals; it does not change the requested approval policy, model, effort,
+or sandbox. The Kit validates the choice against App Server requirements and
+owns its per-process `-c approvals_reviewer=...` argument, without writing
+Codex configuration. An empty value retains configuration inheritance and
+refuses when the supported Codex version does not expose that setting.
+Fork and Resume reject this override and retain their source-policy behavior.
+For New, the returned policy describes validated launch intent, not a separate
+per-thread runtime policy readback.
+
 OMP forks require a unique absolute `OMPStatusSocket`. It becomes the sole
 fixed process environment delta,
 `HERDR_PLUGIN_KIT_OMP_STATUS_SOCKET=<path>`; there is no general environment
