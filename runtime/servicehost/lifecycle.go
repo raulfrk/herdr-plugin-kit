@@ -44,6 +44,7 @@ var (
 	ErrPurgeRecoveryConsentRequired = errors.New("servicehost: explicit recovery-data loss confirmation required")
 	ErrNotInstalled                 = errors.New("servicehost: service is not installed")
 	ErrLifecycleUnavailable         = errors.New("servicehost: lifecycle manager unavailable")
+	ErrLifecycleDisabled            = errors.New("servicehost: service is disabled")
 )
 
 type LifecyclePaths struct {
@@ -1375,6 +1376,19 @@ func (l *Lifecycle) Disable(ctx context.Context) (LifecycleStatus, error) {
 }
 
 func (l *Lifecycle) Start(ctx context.Context) (LifecycleStatus, error) {
+	return l.start(ctx, nil, false)
+}
+
+// StartEnabled starts only an enabled installation with exactly the expected
+// service arguments. Both preconditions are checked under the lifecycle lock,
+// so cooperating Disable and installation changes cannot interleave with Start.
+// Unlike Start, this is suitable for explicit-open ensure behavior that must
+// respect a prior Disable decision. It never enables or repairs an installation.
+func (l *Lifecycle) StartEnabled(ctx context.Context, expectedArguments []string) (LifecycleStatus, error) {
+	return l.start(ctx, slices.Clone(expectedArguments), true)
+}
+
+func (l *Lifecycle) start(ctx context.Context, expectedArguments []string, enabledOnly bool) (LifecycleStatus, error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -1390,8 +1404,15 @@ func (l *Lifecycle) Start(ctx context.Context) (LifecycleStatus, error) {
 	if err != nil {
 		return LifecycleStatus{}, err
 	}
-	if _, err := l.ownedManagerStatus(ctx, descriptor); err != nil {
+	if enabledOnly && !slices.Equal(descriptor.Arguments, expectedArguments) {
+		return LifecycleStatus{}, ErrLifecycleOwnership
+	}
+	before, err := l.ownedManagerStatus(ctx, descriptor)
+	if err != nil {
 		return LifecycleStatus{}, err
+	}
+	if enabledOnly && !before.Enabled {
+		return LifecycleStatus{}, ErrLifecycleDisabled
 	}
 	if _, err := l.runSystemctl(ctx, "start", descriptor.UnitName); err != nil {
 		return LifecycleStatus{}, err
