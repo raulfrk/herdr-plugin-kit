@@ -45,3 +45,13 @@ back publication.
 Call `Close` to release the open root directory. It waits for active operations;
 later operations return `documentstore.ErrClosed`. Other platforms expose the
 same API but return `documentstore.ErrUnsupported`.
+
+`RemoveBounded` restores absence by removing only the regular document matching
+a non-zero expected revision. It uses the same exclusive sidecar lock, path
+validation, and bounded read as checked replacement; missing documents, zero
+expectations, and changed bytes conflict. Removal unlinks only the addressed
+path (other hard links retain their contents), then fsyncs its directory. The
+returned boolean is true once unlink succeeds, including when a subsequent
+fsync error means crash durability is unproven. Cancellation is checked before
+work, while waiting for the lock, and immediately before unlink, not after
+publication. The same non-cooperating-writer limitation applies.

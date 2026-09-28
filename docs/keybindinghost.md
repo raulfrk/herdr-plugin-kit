@@ -47,8 +47,22 @@ mismatch is `ErrDrift`, and only an accepted reload sets `Result.Activated`.
 The host resolves `HERDR_CONFIG_PATH` when present, otherwise
 `$XDG_CONFIG_HOME/herdr/config.toml` (or the platform user-config default).
 An explicit `ConfigPath` is useful for isolated consumers and tests. Paths
-must be clean and absolute. The config file must already exist as a regular
-file.
+must be clean and absolute, with an existing real parent directory. An absent
+config is valid: `Read` returns an empty owner binding set and zero revision.
+An empty `Apply` on that snapshot leaves the config absent and does not reload.
+The first nonempty `Apply` uses checked creation and publishes an owner-only
+(`0600`) regular file. Concurrent creation invalidates the zero revision rather
+than overwriting the new file. Existing configs must be regular files.
+
+For compensation after another resource fails to publish, `Apply` can use
+`Request.RestoreAbsence=true`, with the exact non-zero newly published revision
+and empty bindings. It removes the file only if removing this owner's managed
+block leaves no other bytes; native settings, comments, other owners, unowned
+empty files, and revision drift refuse deletion. `Activate` rejects this flag.
+Once removal is published, a five-second cancellation-independent reload is
+attempted. Results preserve the visible zero revision even if directory fsync
+or native recovery fails; such failures return `ErrRollback` without recreating
+the file. Ordinary `Apply` and `Activate` behavior is unchanged.
 
 ## Transaction contract
 
@@ -75,7 +89,11 @@ file.
   `config_reload/applied` receipt.
 - A reload or post-rename write failure triggers a five-second
   cancellation-independent attempt to restore the exact prior bytes and reload
-  the prior keymap. `Result.RolledBack` and
+  the prior keymap. If the prior config was absent, rollback checked-removes
+  only the newly published revision instead of writing an empty file; external
+  changes prevent removal. A post-unlink directory fsync failure remains an
+  `ErrRollback` even when absence is visible and the recovery reload succeeds.
+  `Result.RolledBack` and
   `Result.EffectiveRestored` expose what succeeded; `ErrRollback` means
   recovery was incomplete.
 - Plugin-local page and action keys never use this API and require no Herdr
@@ -84,3 +102,7 @@ file.
 `Error.Kind` and `errors.Is` distinguish invalid input, ownership damage,
 collision, drift, check, write, reload, rollback, and caller cancellation.
 The API adds no Attention-specific policy or product orchestration.
+
+Activation and effective-restoration flags report accepted native reloads;
+they do not independently prove a keyboard action fired. Consumer acceptance
+must also exercise the actual binding through the public Herdr entrypoint.

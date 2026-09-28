@@ -138,6 +138,10 @@ type Request struct {
 	Owner    string
 	Expected documentstore.Revision
 	Bindings []Binding
+	// RestoreAbsence is Apply-only compensation for a config created by this
+	// owner. It requires a non-zero exact revision and empty Bindings; removing
+	// the owner's block must leave no bytes from other owners or native config.
+	RestoreAbsence bool
 }
 
 // Result reports both the durable revision and any recovery performed after a
@@ -166,6 +170,15 @@ type documentStore interface {
 	Close() error
 	ReadBounded(context.Context, string, int) (documentstore.Document, error)
 	WriteBounded(context.Context, string, []byte, documentstore.Revision, int) (documentstore.Revision, error)
+	RemoveBounded(context.Context, string, documentstore.Revision, int) (bool, error)
+}
+
+func readConfiguration(ctx context.Context, store documentStore, name string) (documentstore.Document, error) {
+	document, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return documentstore.Document{}, nil
+	}
+	return document, err
 }
 
 // EffectiveConfigPath resolves the same supported override/default path used
@@ -195,7 +208,7 @@ func (h Host) Read(ctx context.Context, owner string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	defer store.Close()
-	document, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	document, err := readConfiguration(ctx, store, name)
 	if err != nil {
 		if errors.Is(err, documentstore.ErrTooLarge) {
 			return Snapshot{}, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
@@ -219,6 +232,9 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 	if err := validateBindings(request.Owner, request.Bindings); err != nil {
 		return Result{}, err
 	}
+	if request.RestoreAbsence && (request.Expected == (documentstore.Revision{}) || len(request.Bindings) != 0) {
+		return Result{}, failure(FailureInvalid, errors.New("absence compensation requires a published revision and empty bindings"), "")
+	}
 	path, err := h.validate()
 	if err != nil {
 		return Result{}, err
@@ -237,7 +253,7 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 	}
 	defer store.Close()
 
-	previous, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	previous, err := readConfiguration(ctx, store, name)
 	if err != nil {
 		if errors.Is(err, documentstore.ErrTooLarge) {
 			return Result{}, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
@@ -251,6 +267,9 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{Revision: previous.Revision}, err
 	}
+	if request.RestoreAbsence && (!changed || len(nextBytes) != 0) {
+		return Result{Revision: previous.Revision}, failure(FailureOwnership, errors.New("absence compensation requires a config containing only this owner's managed bindings"), "")
+	}
 	if !changed {
 		return Result{Revision: previous.Revision}, nil
 	}
@@ -262,6 +281,24 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{Revision: previous.Revision}, failure(FailureCanceled, err, "")
+	}
+	if request.RestoreAbsence {
+		removed, removeErr := store.RemoveBounded(ctx, name, previous.Revision, MaxConfigBytes)
+		result := Result{Revision: previous.Revision}
+		if !removed {
+			return result, failure(FailureRollback, removeErr, "")
+		}
+		result.Revision, result.Changed, result.RolledBack = documentstore.Revision{}, true, true
+		// After publication, cancellation must not silently leave the old
+		// keymap active instead of attempting bounded native recovery.
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		reloadErr := h.reload(recoveryCtx, path)
+		result.Activated, result.EffectiveRestored = reloadErr == nil, reloadErr == nil
+		if removeErr != nil || reloadErr != nil {
+			return result, failure(FailureRollback, errors.Join(removeErr, reloadErr), "")
+		}
+		return result, nil
 	}
 	nextRevision, err := store.WriteBounded(ctx, name, nextBytes, previous.Revision, MaxConfigBytes)
 	if errors.Is(err, documentstore.ErrConflict) {
@@ -290,6 +327,9 @@ func (h Host) Apply(ctx context.Context, request Request) (Result, error) {
 // config revision, checks the unchanged bytes, and reloads only the addressed
 // default or named Herdr session. It never writes the config file.
 func (h Host) Activate(ctx context.Context, request Request) (Result, error) {
+	if request.RestoreAbsence {
+		return Result{}, failure(FailureInvalid, errors.New("absence compensation is only supported by Apply"), "")
+	}
 	if err := validateOwner(request.Owner); err != nil {
 		return Result{}, failure(FailureInvalid, err, "")
 	}
@@ -313,7 +353,7 @@ func (h Host) Activate(ctx context.Context, request Request) (Result, error) {
 		return Result{}, err
 	}
 	defer store.Close()
-	document, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	document, err := readConfiguration(ctx, store, name)
 	if err != nil {
 		if errors.Is(err, documentstore.ErrTooLarge) {
 			return Result{}, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
@@ -337,7 +377,7 @@ func (h Host) Activate(ctx context.Context, request Request) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return result, failure(FailureCanceled, err, "")
 	}
-	verified, err := store.ReadBounded(ctx, name, MaxConfigBytes)
+	verified, err := readConfiguration(ctx, store, name)
 	if err != nil {
 		if errors.Is(err, documentstore.ErrTooLarge) {
 			return result, failure(FailureInvalid, fmt.Errorf("Herdr config exceeds %d bytes", MaxConfigBytes), "")
@@ -357,6 +397,24 @@ func (h Host) Activate(ctx context.Context, request Request) (Result, error) {
 func (h Host) rollback(parent context.Context, store documentStore, name, path string, previous documentstore.Document, written documentstore.Revision, result Result, reloadErr error) (Result, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), rollbackTimeout)
 	defer cancel()
+	if previous.Revision == (documentstore.Revision{}) {
+		removed, removeErr := store.RemoveBounded(ctx, name, written, MaxConfigBytes)
+		if !removed {
+			return result, failure(FailureRollback, errors.Join(reloadErr, removeErr), "")
+		}
+		result.Revision, result.RolledBack = documentstore.Revision{}, true
+		restoreErr := h.reload(ctx, path)
+		result.EffectiveRestored = restoreErr == nil
+		if removeErr != nil || restoreErr != nil {
+			return result, failure(FailureRollback, errors.Join(reloadErr, removeErr, restoreErr), "")
+		}
+		kind := FailureReload
+		var operation *Error
+		if errors.As(reloadErr, &operation) {
+			kind = operation.Kind
+		}
+		return result, failure(kind, reloadErr, "")
+	}
 	restored, writeErr := store.WriteBounded(ctx, name, previous.Bytes, written, MaxConfigBytes)
 	if writeErr != nil {
 		if restored == (documentstore.Revision{}) {

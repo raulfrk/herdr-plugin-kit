@@ -65,14 +65,23 @@ type fakeRunner struct {
 
 type fakeDocumentStore struct {
 	document documentstore.Document
+	readErr  error
 	writes   int
 	write    func(context.Context, string, []byte, documentstore.Revision, int) (documentstore.Revision, error)
+	remove   func(context.Context, string, documentstore.Revision, int) (bool, error)
 }
 
 func (s *fakeDocumentStore) Close() error { return nil }
 
 func (s *fakeDocumentStore) ReadBounded(context.Context, string, int) (documentstore.Document, error) {
-	return s.document, nil
+	return s.document, s.readErr
+}
+
+func (s *fakeDocumentStore) RemoveBounded(ctx context.Context, name string, expected documentstore.Revision, limit int) (bool, error) {
+	if s.remove == nil {
+		return false, errors.New("unexpected document removal")
+	}
+	return s.remove(ctx, name, expected, limit)
 }
 
 func (s *fakeDocumentStore) WriteBounded(ctx context.Context, name string, data []byte, expected documentstore.Revision, _ int) (documentstore.Revision, error) {

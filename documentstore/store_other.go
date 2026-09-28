@@ -23,3 +23,7 @@ func (*Store) WriteBounded(context.Context, string, []byte, Revision, int) (Revi
 func (*Store) WritePrivate(context.Context, string, []byte, Revision) (Revision, error) {
 	return Revision{}, ErrUnsupported
 }
+
+func (*Store) RemoveBounded(context.Context, string, Revision, int) (bool, error) {
+	return false, ErrUnsupported
+}

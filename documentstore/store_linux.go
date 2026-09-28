@@ -117,6 +117,49 @@ func (s *Store) Write(ctx context.Context, name string, data []byte, expected Re
 	return s.write(ctx, name, data, expected, false, -1)
 }
 
+// RemoveBounded removes an existing regular document only when its revision
+// equals the non-zero expected revision. It uses the same cooperative lock as
+// Write. A true result means removal was published, even if directory fsync
+// subsequently failed. Missing documents and zero expectations conflict.
+func (s *Store) RemoveBounded(ctx context.Context, name string, expected Revision, maxBytes int) (removed bool, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	parent, base, release, err := s.openParent(name)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	lock, err := openLock(parent, base, s.hooks)
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(lock)
+	if err := flockContext(ctx, lock, unix.LOCK_EX); err != nil {
+		return false, err
+	}
+	current, _, err := readRegular(ctx, parent, base, maxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, ErrConflict
+	}
+	if err != nil {
+		return false, err
+	}
+	if expected == (Revision{}) || revision(current) != expected {
+		return false, ErrConflict
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := s.hooks.unlink(parent, base); err != nil {
+		return false, fmt.Errorf("remove document: %w", err)
+	}
+	if err := s.hooks.syncDir(parent); err != nil {
+		return true, fmt.Errorf("sync document directory: %w", err)
+	}
+	return true, nil
+}
+
 // WriteBounded has Write's checked-write semantics while refusing to read or
 // publish a document larger than maxBytes.
 func (s *Store) WriteBounded(ctx context.Context, name string, data []byte, expected Revision, maxBytes int) (result Revision, resultErr error) {
