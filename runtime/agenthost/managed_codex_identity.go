@@ -80,6 +80,8 @@ func (l ManagedCodexLauncher) discoverManagedIdentityForSource(ctx context.Conte
 }
 
 func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx context.Context, target sessionhost.Origin, cwd string, argv []string, service CodexServiceSnapshot, policy ManagedCodexPolicy, allowPrefix bool, expected *Agent, expectedProcess *sessionhost.ForegroundProcess, allowLocal, requireStatus bool) (Agent, managedStatusObservation, error) {
+	observedLoading := false
+	var firstProcess *sessionhost.ForegroundProcess
 	verifyProcess := func() error {
 		if expectedProcess != nil {
 			current, err := l.topologyHost().InspectForegroundProcess(ctx, target)
@@ -90,9 +92,15 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 				return fmt.Errorf("foreground process changed: %w", ErrManagedStale)
 			}
 		}
-		_, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv)
+		process, err := l.topologyHost().VerifyForegroundProcess(ctx, target, cwd, argv)
 		if err != nil {
 			return fmt.Errorf("foreground process verification: %w", err)
+		}
+		if firstProcess == nil {
+			process.Argv = append([]string(nil), process.Argv...)
+			firstProcess = &process
+		} else if observedLoading && !sameForegroundProcess(*firstProcess, process) {
+			return fmt.Errorf("initializing process changed: %w", ErrManagedStale)
 		}
 		return nil
 	}
@@ -131,7 +139,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 			if err != nil {
 				return Agent{}, managedStatusObservation{}, err
 			}
-			if !emptyCodexComposer(visible) {
+			if !emptyCodexComposer(visible) || codexStartupLoading(visible) {
 				if expectedProcess != nil {
 					return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
 				}
@@ -154,7 +162,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 			if err != nil {
 				return Agent{}, managedStatusObservation{}, err
 			}
-			if !emptyCodexComposer(visible) {
+			if !emptyCodexComposer(visible) || codexStartupLoading(visible) {
 				if expectedProcess != nil {
 					return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
 				}
@@ -166,7 +174,8 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 		if err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
-		if !emptyCodexComposer(visible) {
+		observedLoading = observedLoading || codexStartupLoading(visible)
+		if !emptyCodexComposer(visible) || codexStartupLoading(visible) {
 			if expectedProcess != nil {
 				return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
 			}
@@ -182,6 +191,19 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 		// Re-read every guard immediately before the first byte of input.
 		check, checkedAgent, err := l.readManagedAgent(ctx, target, cwd)
 		if err != nil || check.Focused || check.LaunchPending || !managedPaneQuiescent(check) {
+			// Initialization can change idle to working after the model appears.
+			// Reacquire readiness only for that observed startup, before any input,
+			// on the same process and immutable target; existing sources still fail.
+			if err == nil && observedLoading && expected == nil &&
+				!check.Focused && !check.LaunchPending && sameImmutable(agent, checkedAgent) {
+				if err := verifyProcess(); err != nil {
+					return Agent{}, managedStatusObservation{}, err
+				}
+				if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
+					return Agent{}, managedStatusObservation{}, errors.Join(ErrManagedPaneBusy, err)
+				}
+				continue
+			}
 			if err == nil {
 				err = ErrManagedPaneBusy
 			}
@@ -197,7 +219,7 @@ func (l ManagedCodexLauncher) discoverManagedIdentityObservationExpected(ctx con
 		if err != nil {
 			return Agent{}, managedStatusObservation{}, err
 		}
-		if !emptyCodexComposer(visible) {
+		if !emptyCodexComposer(visible) || codexStartupLoading(visible) {
 			if expectedProcess != nil {
 				return Agent{}, managedStatusObservation{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
 			}
@@ -315,6 +337,9 @@ func (l ManagedCodexLauncher) awaitStatusDraft(ctx context.Context, target sessi
 		visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
 		if err != nil {
 			return err
+		}
+		if codexStartupLoading(visible) {
+			return ErrManagedPaneBusy
 		}
 		if exactCodexSingleLineDraft(visible, "/status") {
 			if seenDraft {
@@ -565,6 +590,22 @@ func (l ManagedCodexLauncher) awaitFreshStatusObservationMode(ctx context.Contex
 			return managedStatusObservation{}, errors.Join(ErrManagedStale, err)
 		}
 	}
+}
+
+// Codex 0.154.0 renders its empty composer before it can execute slash commands.
+// Keep that startup state separate from the shared draft-emptiness predicate.
+func codexStartupLoading(text string) bool {
+	for _, line := range strings.Split(managedANSI.ReplaceAllString(text, ""), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "│") {
+			continue
+		}
+		fields := strings.Fields(strings.Trim(line, "│"))
+		if len(fields) >= 2 && fields[0] == "model:" && fields[1] == "loading" {
+			return true
+		}
+	}
+	return false
 }
 
 func emptyCodexComposer(text string) bool {

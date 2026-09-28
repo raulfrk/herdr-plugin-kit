@@ -180,7 +180,9 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 			t.Errorf("close conversion workspace: %v: %s", cleanupErr, result.Stderr)
 		}
 	})
-	argv := []string{"codex", "resume", "--cd", directory, threadID}
+	// Launch overrides and strict-config select an embedded ordinary server on
+	// the supported native version. Reuse the canonical daemon from this CWD.
+	argv := []string{"codex", "resume", threadID}
 	attempted, err := launcher.topologyHost().RunInShell(ctx, shell, directory, argv)
 	if err != nil || !attempted {
 		t.Fatalf("launch ordinary Codex attempted=%t error=%v", attempted, err)
@@ -197,11 +199,16 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, identityErr := verifier.ReadThread(ctx, threadID)
+	identity, identityErr := verifier.ReadLoadedThread(ctx, threadID)
 	history, historyErr := verifier.ReadStableHistory(ctx, threadID)
-	if identityErr != nil || historyErr != nil || validateConversionIdentity(identity, managedAgent(shell, directory, threadID, false), threadID) != nil {
+	beforePolicy, beforePolicyErr := verifier.ReadEffective(ctx, threadID)
+	if identityErr != nil || historyErr != nil || beforePolicyErr != nil || validateConversionIdentity(identity, managedAgent(shell, directory, threadID, false), threadID) != nil {
 		verifier.Close()
-		t.Fatalf("identity=%+v identityErr=%v historyErr=%v", identity, identityErr, historyErr)
+		t.Fatalf("identity=%+v identityErr=%v historyErr=%v policyErr=%v", identity, identityErr, historyErr, beforePolicyErr)
+	}
+	// An observer retained through native exit can mask a source-lifetime bug.
+	if err := verifier.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	converted, err := converter.Convert(ctx, CodexConversionRequest{Source: source, ReadyTimeout: 35 * time.Second})
@@ -218,6 +225,10 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 			_ = converted.Managed.Cleanup(cleanupCtx)
 		}
 	})
+	verifier, err = newCodexLifecycle(ctx, service.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	checkedHistory, checkedHistoryErr := verifier.ReadStableHistory(ctx, threadID)
 	closeErr := verifier.Close()
 	focusAfter, focusErr := liveFocusedWorkspace(ctx, liveRunner)
@@ -227,9 +238,41 @@ func TestCodexConverterLiveDiscoversMissingOrdinarySessionWithoutNewTurn(t *test
 		wantArgv = append(wantArgv, "-c", "service_tier="+strconv.Quote(converted.Policy.ServiceTier))
 	}
 	wantArgv = append(wantArgv, "--remote", "unix://"+service.SocketPath, "--cd", directory, threadID)
-	if checkedHistoryErr != nil || closeErr != nil || checkedHistory != history || focusErr != nil || focusAfter != focusBefore || serviceErr != nil || afterService != service || converted.Outcome != CodexConversionManaged || converted.ThreadID != threadID || converted.Agent.Session == nil || converted.Agent.Session.Value != threadID || converted.Agent.PaneID != shell.PaneID || converted.Process.PID == ordinaryProcess.PID || converted.Process.CWD != directory || !reflect.DeepEqual(converted.Argv, wantArgv) {
+	if checkedHistoryErr != nil || closeErr != nil || checkedHistory != history || focusErr != nil || focusAfter != focusBefore || serviceErr != nil || afterService != service || converted.Outcome != CodexConversionManaged || converted.ManagedAttempts != 1 || converted.ThreadID != threadID || converted.Agent.Session == nil || converted.Agent.Session.Value != threadID || converted.Agent.PaneID != shell.PaneID || converted.Process.PID == ordinaryProcess.PID || converted.Process.CWD != directory || !reflect.DeepEqual(converted.Argv, wantArgv) || requiredPolicyDrift(converted.Policy, beforePolicy) != "" {
 		t.Fatalf("converted=%+v historyErr=%v closeErr=%v focus=%q/%q focusErr=%v serviceErr=%v", converted, checkedHistoryErr, closeErr, focusBefore, focusAfter, focusErr, serviceErr)
 	}
+	// This test can reuse a persisted source. Never accept a reply from an
+	// earlier invocation as evidence for the turn submitted below.
+	canary := fmt.Sprintf("CONVERT-%x", time.Now().UnixNano())
+	prompt, err := PreparePrompt("Reply exactly " + canary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := NewPromptHost(launcher.Host).Deliver(ctx, prompt, PromptTarget{
+		Created: converted.Managed.Target, Agent: converted.Agent, Directory: directory,
+		Argv: converted.Argv, CodexService: converted.Service,
+	})
+	if err != nil || delivered.State != PromptAcknowledged {
+		t.Fatalf("post-conversion prompt: %v", err)
+	}
+	_ = awaitLivePromptResult(t, ctx, launcher.Host, sessionhost.Host{Runner: runner, Session: sessionName}, delivered, canary)
+	verifier, err = newCodexLifecycle(ctx, service.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, policyErr := verifier.ReadEffective(ctx, threadID)
+	closeErr = verifier.Close()
+	postTurnPolicy := beforePolicy
+	// The supported native client resolves an unset tier to "default" on a
+	// turn even without conversion. The immediate conversion check above stays
+	// exact; this post-turn control keeps every other policy field unchanged.
+	if postTurnPolicy.ServiceTier == "" {
+		postTurnPolicy.ServiceTier = "default"
+	}
+	if policyErr != nil || closeErr != nil || requiredPolicyDrift(effective, postTurnPolicy) != "" {
+		t.Fatalf("post-turn conversion policy drift (%s): expected=%+v actual=%+v error=%v close=%v", requiredPolicyDrift(effective, postTurnPolicy), postTurnPolicy, effective, policyErr, closeErr)
+	}
+	t.Logf("converted exact thread=%s pane=%s attempts=%d; completed post-turn policy preserved", threadID, shell.PaneID, converted.ManagedAttempts)
 }
 
 func createLiveConversionWorkspace(ctx context.Context, runner command.Runner, sessionName, directory string) (sessionhost.Origin, error) {
