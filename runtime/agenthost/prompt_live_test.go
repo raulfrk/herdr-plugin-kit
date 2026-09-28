@@ -302,11 +302,32 @@ func createPromptLiveWorkspace(t *testing.T, ctx context.Context, runner command
 
 func awaitLivePromptResult(t *testing.T, ctx context.Context, host Host, topology sessionhost.Host, result PromptResult, canary string) Agent {
 	t.Helper()
+	var codex *codexLifecycle
+	if strings.EqualFold(result.Agent.Kind, "codex") && result.Target.CodexService.SocketPath != "" {
+		var err error
+		codex, err = newCodexLifecycle(ctx, result.Target.CodexService.SocketPath)
+		if err != nil {
+			t.Fatalf("connect managed reply observer: %v", err)
+		}
+		defer codex.Close()
+	}
 	for {
 		agent, err := host.find(ctx, result.Agent.PaneID)
 		if err == nil && sameImmutable(result.Agent, agent) && !agent.Focused && promptReadyStatus(agent.Status) {
 			history, readErr := (ManagedCodexLauncher{Host: host}).readFullPaneHistory(ctx, result.Target.Created.Origin)
-			if readErr == nil && strings.Count(history, canary) >= 1 {
+			if readErr == nil && livePromptReplyVisible(agent.Kind, history, canary) {
+				if codex != nil {
+					var reply codexLiveReply
+					if err := codex.call(ctx, "thread/read", map[string]any{"threadId": agent.Session.Value, "includeTurns": true}, &reply); err != nil {
+						t.Fatalf("read completed managed reply: %v", err)
+					}
+					if !reply.completed(agent.Session.Value, canary) {
+						if err := waitManaged(ctx, 100*time.Millisecond); err != nil {
+							t.Fatalf("wait for completed reply: %v", err)
+						}
+						continue
+					}
+				}
 				if _, processErr := topology.VerifyForegroundProcess(ctx, result.Target.Created.Origin, result.Target.Directory, result.Target.Argv); processErr != nil {
 					t.Fatalf("prompt target process drift: %v", processErr)
 				}
@@ -317,6 +338,48 @@ func awaitLivePromptResult(t *testing.T, ctx context.Context, host Host, topolog
 			t.Fatalf("wait for prompt %q: %v", canary, err)
 		}
 	}
+}
+
+func livePromptReplyVisible(kind, history, canary string) bool {
+	if !strings.EqualFold(kind, "codex") {
+		return strings.Contains(history, canary)
+	}
+	for _, line := range strings.Split(history, "\n") {
+		if strings.TrimSpace(line) == "• "+canary {
+			return true
+		}
+	}
+	return false
+}
+
+type codexLiveReply struct {
+	Thread struct {
+		ID    string `json:"id"`
+		Turns []struct {
+			Status string `json:"status"`
+			Items  []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"items"`
+		} `json:"turns"`
+	} `json:"thread"`
+}
+
+func (reply codexLiveReply) completed(threadID, canary string) bool {
+	if reply.Thread.ID != threadID {
+		return false
+	}
+	for _, turn := range reply.Thread.Turns {
+		if turn.Status != "completed" {
+			continue
+		}
+		for _, item := range turn.Items {
+			if item.Type == "agentMessage" && strings.TrimSpace(item.Text) == canary {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func trackPromptLiveSession(t *testing.T, agent Agent, ompSessions, openCodeSessions *[]string) {

@@ -65,6 +65,7 @@ type fakeManagedVerifier struct {
 	reconcile    EffectiveCodexPolicy
 	reconcileErr error
 	reconciles   []EffectiveCodexPolicy
+	reconcileIDs []string
 	recheckErr   error
 	rechecks     []codexThreadIdentity
 	recheckErrs  []error
@@ -140,8 +141,9 @@ func (f *fakeManagedVerifier) ReadEffective(context.Context, string) (EffectiveC
 func (f *fakeManagedVerifier) ApplyObservedReasoning(context.Context, codexThreadIdentity, ManagedCodexPolicy) (bool, error) {
 	return false, errors.New("unexpected observed reasoning update")
 }
-func (f *fakeManagedVerifier) ReconcileEffective(_ context.Context, _ string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
+func (f *fakeManagedVerifier) ReconcileEffective(_ context.Context, id string, desired EffectiveCodexPolicy) (EffectiveCodexPolicy, error) {
 	f.reconciles = append(f.reconciles, desired)
+	f.reconcileIDs = append(f.reconcileIDs, id)
 	if reflect.DeepEqual(f.reconcile, EffectiveCodexPolicy{}) {
 		return desired, f.reconcileErr
 	}
@@ -614,6 +616,77 @@ func TestManagedCodexForkCanInheritAuthoritativeSourcePolicy(t *testing.T) {
 	wantArgv := []string{managedServiceSnapshot().Executable, "fork", "--search", "-m", "gpt-5.6-terra", "-c", `model_reasoning_effort="high"`, "-c", managedSkipUpdateConfig, "--strict-config", "--remote", "unix:///tmp/codex-home/app-server-control/app-server-control.sock", "--cd", "/tmp/project", managedSourceID}
 	if !reflect.DeepEqual(verifier.policies, []ManagedCodexPolicy{wantPolicy}) || !reflect.DeepEqual(managed.Argv, wantArgv) || managed.SourceThreadID != managedSourceID {
 		t.Fatalf("preflight=%+v managed=%+v", verifier.policies, managed)
+	}
+}
+
+func TestManagedCodexForkReconcilesOnlyOwnedChildBeforeDelivery(t *testing.T) {
+	for _, scenario := range []string{"matches", "reconcile", "unknown update", "unrepresentable drift", "unverified child"} {
+		t.Run(scenario, func(t *testing.T) {
+			launcher, _, topology, verifier, runner, request := newManagedHarness(t, ManagedFork, managedChildID)
+			source := managedAgent(request.Origin, request.Directory, managedSourceID, false)
+			request.Source = source
+			prompt, _ := PreparePrompt("synthetic reply")
+			request.Prompt = &prompt
+			verifier.confirm.ForkedFromID, verifier.recheck.ForkedFromID = managedSourceID, managedSourceID
+			verifier.read = []codexThreadIdentity{{ID: managedSourceID, CWD: request.Directory, ModelProvider: "openai"}, {ID: managedSourceID, CWD: request.Directory, ModelProvider: "openai"}}
+			expected := verifier.audit
+			drifted := expected
+			if scenario != "matches" {
+				drifted.SandboxMode = "workspace-write"
+			}
+			verifier.audits = []EffectiveCodexPolicy{expected, drifted}
+			switch scenario {
+			case "unknown update":
+				verifier.reconcileErr = ErrManagedSettingsUnknown
+				request.Focus = true
+			case "unrepresentable drift":
+				verifier.reconcileErr = ErrManagedPolicyDrift
+				request.Focus = true
+			case "unverified child":
+				verifier.confirmErr = ErrManagedStale
+			}
+			child := managedAgent(topology.target.Origin, request.Directory, managedChildID, false)
+			runner.results = []command.Result{
+				managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")},
+				managedAgentResult(t, source), {Stdout: managedEmptyComposer("header")}, {},
+				managedAgentResult(t, child), managedAgentResult(t, child), jsonResult(t, listResponse(wireFromAgent(source))), managedAgentResult(t, child),
+			}
+			deliveries := 0
+			launcher.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
+				deliveries++
+				if scenario == "reconcile" && (len(verifier.reconciles) != 1 || verifier.reconcileIDs[0] != managedChildID) {
+					t.Fatal("delivery before exact-child policy reconciliation")
+				}
+				return PromptResult{State: PromptAcknowledged, Agent: target.Agent}, nil
+			}
+			managed, err := launcher.Launch(context.Background(), request)
+			if scenario == "matches" || scenario == "reconcile" {
+				if err != nil || managed == nil || deliveries != 1 || requiredPolicyDrift(managed.Policy, expected) != "" {
+					t.Fatalf("managed=%+v deliveries=%d error=%v", managed, deliveries, err)
+				}
+				want := 0
+				if scenario == "reconcile" {
+					want = 1
+				}
+				if len(verifier.reconciles) != want {
+					t.Fatalf("policy updates=%d want%d", len(verifier.reconciles), want)
+				}
+				if want == 1 && (verifier.reconcileIDs[0] != managedChildID || !reflect.DeepEqual(verifier.reconciles[0], expected)) {
+					t.Fatal("must restore exact source policy only on the child")
+				}
+			} else {
+				if err == nil || managed != nil || deliveries != 0 || len(topology.focuses) != 0 || len(topology.cleanups) != 1 {
+					t.Fatalf("unsafe failure: managed=%v err=%v deliveries=%d cleanup=%v", managed, err, deliveries, topology.cleanups)
+				}
+				if scenario == "unverified child" {
+					if len(verifier.reconciles) != 0 {
+						t.Fatal("changed unverified child")
+					}
+				} else if len(verifier.reconciles) != 1 || !reflect.DeepEqual(verifier.deleted, []string{managedChildID}) {
+					t.Fatal("must fail once and clean only verified child")
+				}
+			}
+		})
 	}
 }
 

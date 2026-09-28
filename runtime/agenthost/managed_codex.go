@@ -341,7 +341,15 @@ func (l ManagedCodexLauncher) Launch(ctx context.Context, request ManagedCodexRe
 			return fail(fmt.Errorf("managed Codex policy audit: %w", errors.Join(ErrManagedPolicyDrift, err)), verifier)
 		}
 		if drift := forkPolicyDrift(effective, expected, sourceProcess.Argv); drift != "" {
-			return fail(fmt.Errorf("managed Codex policy audit (%s): %w", drift, ErrManagedPolicyDrift), verifier)
+			// Remote Fork can restore saved defaults instead of the live source
+			// permissions. Restore only this verified child before prompt/focus;
+			// reconciliation still requires a complete authoritative readback.
+			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
+			effective, err = verifier.ReconcileEffective(reconcileCtx, identity.ID, expected)
+			reconcileCancel()
+			if err != nil {
+				return fail(fmt.Errorf("managed Codex Fork policy reconciliation (%s): %w", drift, err), verifier)
+			}
 		}
 	} else if request.Operation == ManagedResume {
 		auditCtx, auditCancel := context.WithTimeout(ctx, managedReadyTimeout(request.ReadyTimeout))
