@@ -190,9 +190,12 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 		codexPrepared, err = binding.Prepare(ctx, created, request.Source.CWD, argv)
 		child = codexPrepared.Agent
 	} else {
-		child, err = f.waitForChild(ctx, created, request.Source, kind, readyTimeout(request.ReadyTimeout))
+		child, err = f.waitForChild(ctx, created, request.Source, kind, argv, readyTimeout(request.ReadyTimeout))
 	}
 	if err != nil {
+		if errors.Is(err, ErrForkOutcomeUncertain) && child.PaneID == created.PaneID {
+			return ForkResult{Source: before, Child: child, Created: created}, fmt.Errorf("fork child: %w", err)
+		}
 		return fail(fmt.Errorf("fork child: %w", err))
 	}
 	if nativeChildID != "" && (child.Session == nil || child.Session.Value != nativeChildID) {
@@ -264,7 +267,7 @@ func (f Forker) Fork(ctx context.Context, request ForkRequest) (ForkResult, erro
 	return result, nil
 }
 
-func (f Forker) waitForChild(parent context.Context, created sessionhost.CreatedTarget, source Agent, kind string, timeout time.Duration) (Agent, error) {
+func (f Forker) waitForChild(parent context.Context, created sessionhost.CreatedTarget, source Agent, kind string, argv []string, timeout time.Duration) (Agent, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	for {
@@ -276,6 +279,21 @@ func (f Forker) waitForChild(parent context.Context, created sessionhost.Created
 			}
 			if !pending {
 				return Agent{}, ErrStaleReport
+			}
+			if kind == "codex" && child.Session == nil {
+				managed := f.managed
+				if managed.Host.Runner == nil {
+					managed = NewManagedCodexLauncher(f.Host)
+				}
+				binding, err := beginOrdinaryCodexBinding(ctx, managed, ManagedFork, source, source.CWD, ManagedCodexPolicy{}, true, timeout)
+				var bound Agent
+				if err == nil {
+					bound, err = binding.Finish(ctx, created, source.CWD, argv)
+				}
+				if errors.Is(err, ErrManagedPaneBusy) || errors.Is(err, ErrManagedStale) {
+					return child, errors.Join(ErrForkOutcomeUncertain, err)
+				}
+				return bound, err
 			}
 		}
 		if err != nil && !errors.Is(err, ErrStaleReport) {

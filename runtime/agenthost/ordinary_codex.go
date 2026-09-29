@@ -196,7 +196,14 @@ func (b *ordinaryCodexBinding) Finish(ctx context.Context, target sessionhost.Cr
 		return Agent{}, err
 	}
 	if prepared.Prefix != "" {
-		return Agent{}, ErrManagedNarrow
+		if b.operation != ManagedFork {
+			return Agent{}, ErrManagedNarrow
+		}
+		agent, _, err := b.resolvePersistedIdentity(ctx, target, directory, argv, prepared)
+		if err == nil {
+			err = b.recheckForkSource(ctx)
+		}
+		return agent, err
 	}
 	return prepared.Agent, nil
 }
