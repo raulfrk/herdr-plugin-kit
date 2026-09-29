@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 )
 
 type probe struct {
+	activity                                        *atomic.Uint64
+	submittedGeneration                             uint64
 	changeAfterRefresh                              bool
 	bold                                            bool
 	disableRefresh                                  bool
@@ -90,6 +93,9 @@ func (p *probe) Update(events shell.EventContext, event shell.Event) []shell.Eff
 	case shell.ActionEvent:
 		switch e.ID {
 		case "probe.refresh":
+			if p.activity != nil {
+				p.submittedGeneration = p.activity.Load()
+			}
 			p.invocations++
 			if p.changeAfterRefresh {
 				code, _ := shell.NewEventCode("probe.replace")
@@ -468,14 +474,18 @@ type driver struct {
 	stopped bool
 }
 
-func runUIForTest(t *testing.T, s *Surface, p *probe) *driver {
+func runUIForTest(t *testing.T, s *Surface, p *probe, inputObserver ...func()) *driver {
 	t.Helper()
 	palette, _ := theme.Builtin("terminal")
 	plugin, _ := diagnostics.NewID("keymap-test")
 	input, writer := io.Pipe()
 	o := &observer{Surface: s, main: p, states: make(chan observation, 128)}
 	sink := &semanticSink{}
-	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: plugin, Theme: palette, Events: sink, Keymap: s.Runtime(), Input: input, Output: io.Discard}, o)
+	var observeInput func()
+	if len(inputObserver) > 0 {
+		observeInput = inputObserver[0]
+	}
+	program, err := shell.NewProgram(shell.ProgramOptions{PluginID: plugin, Theme: palette, Events: sink, Keymap: s.Runtime(), Input: input, Output: io.Discard, ObserveInputActivity: observeInput}, o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,6 +555,64 @@ func (d *driver) choose(t *testing.T, key, query string) {
 	d.key(tea.KeyEnter)
 	d.wait(t, func(o observation) bool { return o.view == current && !o.pending && !o.editing && o.selected == key })
 	d.key(tea.KeyEnter)
+}
+
+func TestInputActivityThroughComposedScreens(t *testing.T) {
+	main, debug := &probe{name: "main", suppress: true, ownHelp: true}, &probe{name: "debug", suppress: true}
+	activity := &atomic.Uint64{}
+	main.activity = activity
+	s, err := New(Options{Main: main, Debug: debug, ConfigDirectory: t.TempDir(), InteractiveHelp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := runUIForTest(t, s, main, func() { activity.Add(1) })
+	d.typeText("grz")
+	d.wait(t, func(o observation) bool { return o.calls == 1 })
+	if main.submittedGeneration == 0 || activity.Load() != main.submittedGeneration+1 {
+		t.Fatal("coalesced dropped input did not invalidate captured submit through actual wrapper")
+	}
+	d.typeText("/secret")
+	d.wait(t, func(o observation) bool { return o.editing && o.text == "secret" })
+	initial := activity.Load()
+	d.program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("private-paste-canary"), Paste: true})
+	d.key(tea.KeyEnter)
+	d.wait(t, func(o observation) bool { return !o.editing })
+	if activity.Load() != initial+2 {
+		t.Fatal("search/paste observer did not precede delivery")
+	}
+	d.typeText("?")
+	d.wait(t, func(o observation) bool { return o.view == helpScreen })
+	initial = activity.Load()
+	d.typeText("z") // deliberately unbound in Help
+	d.key(tea.KeyEsc)
+	d.wait(t, func(o observation) bool { return o.view == baseScreen })
+	if activity.Load() != initial+2 {
+		t.Fatal("Help dropped input escaped observer")
+	}
+	d.program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true})
+	d.wait(t, func(o observation) bool { return o.debug })
+	initial = activity.Load()
+	d.typeText("z")
+	d.program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true})
+	d.wait(t, func(o observation) bool { return !o.debug })
+	if activity.Load() != initial+2 {
+		t.Fatal("Debug dropped input escaped observer")
+	}
+	d.key(tea.KeyCtrlK)
+	d.wait(t, func(o observation) bool { return o.view == actionsScreen && !o.pending })
+	d.choose(t, "keymap.checker", "Key checker")
+	d.wait(t, func(o observation) bool { return o.view == checkerScreen })
+	initial = activity.Load()
+	d.typeText("zz")
+	d.wait(t, func(o observation) bool { return len(o.keys) == 2 })
+	d.program.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("private-paste-canary"), Paste: true})
+	d.wait(t, func(o observation) bool { return o.paste })
+	if activity.Load() != initial+3 {
+		t.Fatal("key capture or opaque paste escaped observer")
+	}
+	if strings.Contains(string(d.sink.bytes()), "private-paste-canary") || strings.Contains(string(d.sink.bytes()), "secret") {
+		t.Fatal("private input leaked into diagnostics")
+	}
 }
 
 func TestEditorCheckerAndSavedBindingsThroughShell(t *testing.T) {

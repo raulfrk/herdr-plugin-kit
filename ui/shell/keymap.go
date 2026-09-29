@@ -46,6 +46,7 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 	case TextEvent:
 		text = &input
 		if input.Paste {
+			model.observeInputActivity()
 			runtime.Cancel()
 			if capture, ok := model.surface.(KeyCapture); ok && capture.CapturingKeys() {
 				return capture.CaptureKey(events, CapturedKey{Paste: true})
@@ -60,9 +61,7 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 			if input.Alt {
 				value = "alt+" + value
 			}
-			if normalized, err := keymap.Normalize(value); err == nil {
-				strokes = append(strokes, normalized)
-			}
+			strokes = append(strokes, value)
 		}
 	case KeyEvent:
 		if (input.Code == KeyCtrlC || input.Code == "ctrl+c") && !input.Alt {
@@ -76,9 +75,7 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 		if input.Alt {
 			value = "alt+" + value
 		}
-		if normalized, err := keymap.Normalize(value); err == nil {
-			strokes = []string{normalized}
-		}
+		strokes = []string{value}
 	default:
 		effects := model.surface.Update(events, event)
 		runtime.Sync(surface.KeymapContext(), now)
@@ -87,10 +84,31 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 	if _, ok := event.(FocusEvent); ok {
 		return model.surface.Update(events, event)
 	}
+	observed := 0
+	observeRune := func() {
+		if text != nil {
+			model.observeInputActivity()
+			observed++
+		}
+	}
+	if text != nil {
+		// Early returns discard the remaining original input, but it still
+		// invalidates a consumer's captured activity generation.
+		defer func() {
+			for observed < len(strokes) {
+				observeRune()
+			}
+		}()
+	}
 	if capture, ok := model.surface.(KeyCapture); ok && capture.CapturingKeys() {
 		runtime.Cancel()
 		var effects []Effect
 		for _, stroke := range strokes {
+			observeRune()
+			stroke, err := keymap.Normalize(stroke)
+			if err != nil {
+				continue
+			}
 			if !capture.CapturingKeys() {
 				break
 			}
@@ -99,15 +117,31 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 		return effects
 	}
 	if text != nil && !text.Alt && surface.KeymapContext().Editing && len(runtime.Pending()) == 0 {
+		model.observeInputActivity()
+		observed = len(strokes)
 		return model.surface.Update(events, *text)
 	}
 	var effects []Effect
+	normalizedIndex := -1
 	for index, stroke := range strokes {
+		observeRune()
+		stroke, err := keymap.Normalize(stroke)
+		if err != nil {
+			continue
+		}
+		normalizedIndex++
 		if capture, ok := model.surface.(KeyCapture); ok && capture.CapturingKeys() {
 			runtime.Cancel()
-			for _, remaining := range strokes[index:] {
+			for offset, remaining := range strokes[index:] {
 				if !capture.CapturingKeys() {
 					break
+				}
+				if text != nil && offset > 0 {
+					observeRune()
+				}
+				remaining, err := keymap.Normalize(remaining)
+				if err != nil {
+					continue
 				}
 				effects = append(effects, capture.CaptureKey(events, CapturedKey{Stroke: remaining})...)
 			}
@@ -117,7 +151,11 @@ func (model *model) dispatchKeymap(events EventContext, event Event, now time.Ti
 		// Preserve the rest of a rune batch once an action enters text entry.
 		if text != nil && !text.Alt && context.Editing && len(runtime.Pending()) == 0 {
 			runes := []rune(text.Text)
-			effects = append(effects, model.surface.Update(events, TextEvent{Text: string(runes[index:])})...)
+			// Keep the existing normalized-stroke suffix semantics unchanged.
+			for observed < len(strokes) {
+				observeRune()
+			}
+			effects = append(effects, model.surface.Update(events, TextEvent{Text: string(runes[normalizedIndex:])})...)
 			break
 		}
 		action, consumed := runtime.Step(context, stroke, now)

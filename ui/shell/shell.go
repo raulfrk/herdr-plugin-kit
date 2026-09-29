@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,12 +42,18 @@ type RenderContext struct {
 }
 
 type ProgramOptions struct {
-	PluginID diagnostics.ID
-	Theme    theme.Palette
-	Events   diagnostics.SemanticSink
-	Input    io.Reader
-	Output   io.Writer
-	Keymap   *keymap.Runtime
+	// ObserveInputActivity runs synchronously on the shell event loop before
+	// input is dispatched or discarded. It receives no input contents. Paste
+	// and raw editing batches count once; command/capture runes count individually.
+	// Focus, resize and mouse messages also count, but background results do not.
+	// The callback must not block or reenter the program. Nil preserves behavior.
+	ObserveInputActivity func()
+	PluginID             diagnostics.ID
+	Theme                theme.Palette
+	Events               diagnostics.SemanticSink
+	Input                io.Reader
+	Output               io.Writer
+	Keymap               *keymap.Runtime
 }
 
 func NewProgram(options ProgramOptions, surface Surface) (*tea.Program, error) {
@@ -127,6 +134,7 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
+		model.observeInputActivity()
 		model.resizeGeneration++
 		model.layout = responsive.Resolve(responsive.Size{Columns: message.Width, Rows: message.Height})
 		model.settled = false
@@ -138,6 +146,9 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return settleMessage{generation: generation, startedAt: receivedAt}
 		})
 	case tea.KeyMsg:
+		if message.Type != tea.KeyRunes || model.options.Keymap == nil {
+			model.observeInputActivity()
+		}
 		if message.Type == tea.KeyRunes {
 			event = TextEvent{Text: string(message.Runes), Paste: message.Paste, Alt: message.Alt}
 			code = "input.text"
@@ -157,10 +168,12 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			code, outcome = "input.unsupported", diagnostics.OutcomeRejected
 		}
 	case tea.FocusMsg:
+		model.observeInputActivity()
 		model.focused = true
 		event, code = FocusEvent{Focused: true}, "focus.gained"
 		needsRender = true
 	case tea.BlurMsg:
+		model.observeInputActivity()
 		model.focused = false
 		event, code = FocusEvent{Focused: false}, "focus.lost"
 		needsRender = true
@@ -206,7 +219,19 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			event = message.TimerEvent
 			needsRender = true
 		}
+	case tea.MouseMsg:
+		model.observeInputActivity()
+		code, outcome = "event.unsupported", diagnostics.OutcomeRejected
 	default:
+		// Bubble Tea's two undecoded input messages have private types. Check
+		// their pinned identities, never format or inspect their contents.
+		if model.options.ObserveInputActivity != nil {
+			kind := reflect.TypeOf(message)
+			if kind != nil && kind.PkgPath() == "github.com/charmbracelet/bubbletea" &&
+				(kind.Name() == "unknownInputByteMsg" || kind.Name() == "unknownCSISequenceMsg") {
+				model.observeInputActivity()
+			}
+		}
 		code, outcome = "event.unsupported", diagnostics.OutcomeRejected
 	}
 
@@ -253,6 +278,12 @@ func (model *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (model *model) View() string { return model.rendered }
+
+func (model *model) observeInputActivity() {
+	if model.options.ObserveInputActivity != nil {
+		model.options.ObserveInputActivity()
+	}
+}
 
 func (model *model) eventContext() EventContext {
 	return EventContext{
