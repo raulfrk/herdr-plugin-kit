@@ -20,6 +20,40 @@ type ManagedCodexPaneSnapshot struct {
 	Service CodexServiceSnapshot
 }
 
+// VerifySafeSessionChange performs one read-only attempt to prove that the
+// exact unfocused Codex source is idle/done with a stable process and empty
+// composer. It never starts the shared service, sends input, stops a process,
+// or waits for an unsafe pane to become safe. Successful checks use paired reads.
+func (l ManagedCodexLauncher) VerifySafeSessionChange(ctx context.Context, source Agent) (ManagedCodexPaneSnapshot, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return ManagedCodexPaneSnapshot{}, err
+	}
+	if err := l.validateSafeSource(source, 0); err != nil {
+		return ManagedCodexPaneSnapshot{}, err
+	}
+	inspector, ok := l.serviceClient().(interface {
+		Inspect(context.Context) (CodexServiceSnapshot, error)
+	})
+	if !ok {
+		return ManagedCodexPaneSnapshot{}, ErrCodexServiceUnavailable
+	}
+	service, err := inspector.Inspect(ctx)
+	if err != nil {
+		return ManagedCodexPaneSnapshot{}, err
+	}
+	if !validManagedServiceSnapshot(service) {
+		return ManagedCodexPaneSnapshot{}, ErrManagedStale
+	}
+	snapshot, _, err := l.sampleSafeSessionChange(ctx, source, service, false, false)
+	if err == nil && ctx.Err() != nil {
+		return ManagedCodexPaneSnapshot{}, ctx.Err()
+	}
+	return snapshot, err
+}
+
 // AwaitSafeSessionChange waits without sending terminal input until the exact
 // managed Codex pane is unfocused, quiescent, and has an empty composer on two
 // consecutive stable reads.
@@ -76,67 +110,71 @@ func (l ManagedCodexLauncher) awaitSafeSessionChange(ctx context.Context, source
 }
 
 func (l ManagedCodexLauncher) awaitSafeSessionChangeFocus(ctx context.Context, source Agent, service CodexServiceSnapshot, focused, refuseComposer bool) (ManagedCodexPaneSnapshot, error) {
-	target := sessionhost.Origin{SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID}
 	for {
-		wire, current, err := l.readManagedAgent(ctx, target, source.CWD)
-		if err != nil || !sameImmutable(source, current) {
-			if err == nil {
-				err = ErrManagedStale
-			}
-			return ManagedCodexPaneSnapshot{}, err
+		snapshot, retry, err := l.sampleSafeSessionChange(ctx, source, service, focused, refuseComposer)
+		if !retry {
+			return snapshot, err
 		}
-		if !managedPaneReadyForSessionChange(wire, focused) {
-			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-				return ManagedCodexPaneSnapshot{}, errors.Join(ErrManagedPaneBusy, err)
-			}
-			continue
+		if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
+			return ManagedCodexPaneSnapshot{}, errors.Join(ErrManagedPaneBusy, err)
 		}
-		process, err := l.topologyHost().InspectForegroundProcess(ctx, target)
-		if err != nil || process.Name != "codex" || len(process.Argv) == 0 || filepath.Base(process.Argv[0]) != "codex" || process.CWD != source.CWD {
-			if err == nil {
-				err = ErrManagedStale
-			}
-			return ManagedCodexPaneSnapshot{}, err
-		}
-		visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-		if err != nil {
-			return ManagedCodexPaneSnapshot{}, err
-		}
-		if !emptyCodexComposer(visible) {
-			if refuseComposer {
-				return ManagedCodexPaneSnapshot{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
-			}
-			if err := waitManaged(ctx, 25*time.Millisecond); err != nil {
-				return ManagedCodexPaneSnapshot{}, errors.Join(ErrManagedPaneBusy, err)
-			}
-			continue
-		}
-		secondWire, second, err := l.readManagedAgent(ctx, target, source.CWD)
-		if err != nil {
-			return ManagedCodexPaneSnapshot{}, err
-		}
-		if !sameImmutable(current, second) || current.Status != second.Status || !managedPaneReadyForSessionChange(secondWire, focused) {
-			return ManagedCodexPaneSnapshot{}, ErrManagedStale
-		}
-		secondProcess, err := l.topologyHost().InspectForegroundProcess(ctx, target)
-		if err != nil || !sameForegroundProcess(process, secondProcess) {
-			if err == nil {
-				err = ErrManagedStale
-			}
-			return ManagedCodexPaneSnapshot{}, err
-		}
-		visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
-		if err != nil {
-			return ManagedCodexPaneSnapshot{}, err
-		}
-		if !emptyCodexComposer(visible) {
-			if refuseComposer {
-				return ManagedCodexPaneSnapshot{}, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
-			}
-			return ManagedCodexPaneSnapshot{}, ErrManagedPaneBusy
-		}
-		return ManagedCodexPaneSnapshot{Agent: second, Process: secondProcess, Service: service}, nil
 	}
+}
+
+func (l ManagedCodexLauncher) sampleSafeSessionChange(ctx context.Context, source Agent, service CodexServiceSnapshot, focused, refuseComposer bool) (ManagedCodexPaneSnapshot, bool, error) {
+	target := sessionhost.Origin{SessionName: source.SessionName, WorkspaceID: source.WorkspaceID, TabID: source.TabID, PaneID: source.PaneID}
+	wire, current, err := l.readManagedAgent(ctx, target, source.CWD)
+	if err != nil || !sameImmutable(source, current) {
+		if err == nil {
+			err = ErrManagedStale
+		}
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	if !managedPaneReadyForSessionChange(wire, focused) {
+		return ManagedCodexPaneSnapshot{}, true, ErrManagedPaneBusy
+	}
+	process, err := l.topologyHost().InspectForegroundProcess(ctx, target)
+	if err != nil || process.Name != "codex" || len(process.Argv) == 0 || filepath.Base(process.Argv[0]) != "codex" || process.CWD != source.CWD {
+		if err == nil {
+			err = ErrManagedStale
+		}
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	visible, err := l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+	if err != nil {
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	if !emptyCodexComposer(visible) {
+		if refuseComposer {
+			return ManagedCodexPaneSnapshot{}, false, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+		}
+		return ManagedCodexPaneSnapshot{}, true, ErrManagedPaneBusy
+	}
+	secondWire, second, err := l.readManagedAgent(ctx, target, source.CWD)
+	if err != nil {
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	if !sameImmutable(current, second) || current.Status != second.Status || !managedPaneReadyForSessionChange(secondWire, focused) {
+		return ManagedCodexPaneSnapshot{}, false, ErrManagedStale
+	}
+	secondProcess, err := l.topologyHost().InspectForegroundProcess(ctx, target)
+	if err != nil || !sameForegroundProcess(process, secondProcess) {
+		if err == nil {
+			err = ErrManagedStale
+		}
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	visible, err = l.readPaneANSI(ctx, target.PaneID, "visible", managedStatusLines)
+	if err != nil {
+		return ManagedCodexPaneSnapshot{}, false, err
+	}
+	if !emptyCodexComposer(visible) {
+		if refuseComposer {
+			return ManagedCodexPaneSnapshot{}, false, errors.Join(ErrCodexConversionComposer, ErrManagedPaneBusy)
+		}
+		return ManagedCodexPaneSnapshot{}, false, ErrManagedPaneBusy
+	}
+	return ManagedCodexPaneSnapshot{Agent: second, Process: secondProcess, Service: service}, false, nil
 }
 
 func (l ManagedCodexLauncher) validateSafeSource(source Agent, readyTimeout time.Duration) error {
