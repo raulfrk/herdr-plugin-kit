@@ -190,6 +190,7 @@ func TestShellReadinessRejectsEachInvalidObservation(t *testing.T) {
 				pending = true
 			case "cwd":
 				process["cwd"] = "/other"
+				pending = true
 			case "shell":
 				process["name"] = "fish"
 			}
@@ -209,6 +210,41 @@ func TestShellReadinessRejectsEachInvalidObservation(t *testing.T) {
 				t.Fatalf("err=%v waited=%v", err, waited)
 			}
 		})
+	}
+}
+
+func TestLaunchWaitsForCreatedShellDirectory(t *testing.T) {
+	runner := &scriptedRunner{outputs: []string{
+		paneJSON("w1:p1", "w1", "w1:t1", "/tmp", true),
+		paneJSON("w1:p2", "w1", "w1:t1", "/tmp/project", false),
+		processInfoJSON("w1:p2", "/tmp", "zsh", true),
+		processInfoJSON("w1:p2", "/tmp/project", "zsh", true),
+		"",
+		paneJSON("w1:p1", "w1", "w1:t1", "/tmp", true),
+	}}
+	waits := 0
+	host := Host{Runner: runner, wait: func(ctx context.Context, interval time.Duration) error {
+		waits++
+		deadline, ok := ctx.Deadline()
+		if !ok || interval != 25*time.Millisecond || time.Until(deadline) < 4*time.Second || time.Until(deadline) > ShellReadyTimeout {
+			t.Fatal("shell startup lost its existing bounded wait")
+		}
+		for _, call := range runner.calls {
+			if strings.Contains(strings.Join(call, " "), "pane run") {
+				t.Fatal("agent command sent before shell reached requested directory")
+			}
+		}
+		return nil
+	}}
+	created, err := host.Launch(context.Background(), LaunchRequest{
+		Origin: Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
+		Argv:   []string{"agent"}, Directory: "/tmp/project", Placement: NewPane, Direction: "right",
+	})
+	if err != nil || created.PaneID != "w1:p2" || waits != 1 || len(runner.calls) != 6 {
+		t.Fatalf("created=%+v waits=%d calls=%q err=%v", created, waits, runner.calls, err)
+	}
+	if launch := runner.calls[4]; !strings.Contains(strings.Join(launch, " "), "pane run w1:p2 exec 'agent'") {
+		t.Fatalf("exact target command not delivered after readiness: %q", launch)
 	}
 }
 

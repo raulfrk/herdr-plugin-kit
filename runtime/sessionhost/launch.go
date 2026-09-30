@@ -368,7 +368,12 @@ func (h Host) waitForShell(parent context.Context, target Origin, directory stri
 		if info.ForegroundProcessGroupID == info.ShellPID && len(info.ForegroundProcesses) == 1 && info.ForegroundProcesses[0].PID == info.ShellPID {
 			process := info.ForegroundProcesses[0]
 			if process.CWD != directory {
-				return ErrStaleTarget
+				// A newly spawned shell may still be entering its requested CWD.
+				// Do not deliver input until the same readiness checks succeed.
+				if err := h.waitInterval(ctx, 25*time.Millisecond); err != nil {
+					return errors.Join(ErrStaleTarget, err)
+				}
+				continue
 			}
 			if len(process.Argv) == 0 || !supportedShell(filepath.Base(process.Argv[0])) || process.Name != filepath.Base(process.Argv[0]) {
 				return ErrUnsupportedShell
