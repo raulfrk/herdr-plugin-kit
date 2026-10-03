@@ -130,7 +130,11 @@ the JSON and applies this policy. The runner builds a task-local tool using
 requires Python 3 and `unzip`; no module-cache source or global tool is edited.
 The correction executes constant-expression mutants despite their lack of Go
 statement-coverage locations, preserving normal diff/exclusion filters and
-test-based KILLED/LIVED outcomes. It does not exempt mutants or alter thresholds.
+test-based KILLED/LIVED outcomes. It also gives switch case-expression mutants the
+statement coverage of their switch statement, because Go coverage starts each case
+clause after its colon. A case expression in a reached switch therefore runs and is
+judged by the test result; one in an unreached switch stays NOT COVERED. It does not
+exempt mutants or alter thresholds.
 It also preserves the baseline environment instead of injecting a longer
 `GOTMPDIR` for mutant executions, which can otherwise cause unrelated Unix-socket
 path-length failures and false kills. An explicitly inherited `GOTMPDIR` remains

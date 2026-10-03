@@ -1,32 +1,78 @@
 --- a/internal/engine/engine.go
 +++ b/internal/engine/engine.go
-@@ -129,0 +130,11 @@
+@@ -129 +129,47 @@
+-	ast.Inspect(file, func(node ast.Node) bool {
++	var visit func(node ast.Node) bool
++	visit = func(node ast.Node) bool {
 +		if declaration, ok := node.(*ast.GenDecl); ok && declaration.Tok == token.CONST {
 +			// Constants have no statement-coverage locations. Execute their
 +			// mutations and let the test result establish whether they are caught.
 +			ast.Inspect(declaration, func(expression ast.Node) bool {
 +				if n, ok := NewTokenNode(expression); ok {
-+					mu.findMutations(fileName, set, file, n, true)
++					mu.findMutations(fileName, set, file, n, true, token.NoPos)
 +				}
 +				return true
 +			})
 +			return false
 +		}
-@@ -134 +145 @@
++		if statement, ok := node.(*ast.SwitchStmt); ok && statement.Body != nil {
++			// Statement coverage starts each case clause after its colon, so case
++			// expressions have no coverage locations of their own. They can only
++			// run when the switch statement is reached, which its keyword's
++			// coverage records; the test result decides whether they are caught.
++			if statement.Init != nil {
++				ast.Inspect(statement.Init, visit)
++			}
++			if statement.Tag != nil {
++				ast.Inspect(statement.Tag, visit)
++			}
++			for _, clause := range statement.Body.List {
++				clause, ok := clause.(*ast.CaseClause)
++				if !ok {
++					continue
++				}
++				for _, expression := range clause.List {
++					ast.Inspect(expression, func(node ast.Node) bool {
++						if _, ok := node.(*ast.FuncLit); ok {
++							ast.Inspect(node, visit)
++							return false
++						}
++						if n, ok := NewTokenNode(node); ok {
++							mu.findMutations(fileName, set, file, n, false, statement.Switch)
++						}
++						return true
++					})
++				}
++				for _, body := range clause.Body {
++					ast.Inspect(body, visit)
++				}
++			}
++			return false
++		}
+@@ -134 +180 @@
 -		mu.findMutations(fileName, set, file, n)
-+		mu.findMutations(fileName, set, file, n, false)
-@@ -140 +151 @@
++		mu.findMutations(fileName, set, file, n, false, token.NoPos)
+@@ -137 +183,2 @@
+-	})
++	}
++	ast.Inspect(file, visit)
+@@ -140 +187,2 @@
 -func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken) {
-+func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken, constant bool) {
-@@ -154 +165 @@
++// findMutations reports the mutations of node. A valid coveredAt replaces the node's own position for the coverage decision only.
++func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.File, node *NodeToken, constant bool, coveredAt token.Pos) {
+@@ -154 +202,5 @@
 -		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos)))
-+		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos), constant))
-@@ -188 +199 @@
++		coverage := set.Position(node.TokPos)
++		if coveredAt.IsValid() {
++			coverage = set.Position(coveredAt)
++		}
++		tm.SetStatus(mu.mutationStatus(set.Position(node.TokPos), coverage, constant))
+@@ -188 +240 @@
 -func (mu *Engine) mutationStatus(pos token.Position) mutator.Status {
-+func (mu *Engine) mutationStatus(pos token.Position, constant bool) mutator.Status {
-@@ -191 +202 @@
++func (mu *Engine) mutationStatus(pos, coverage token.Position, constant bool) mutator.Status {
+@@ -191 +243 @@
 -	if mu.codeData.Cov.IsCovered(pos) {
-+	if constant || mu.codeData.Cov.IsCovered(pos) {
++	if constant || mu.codeData.Cov.IsCovered(coverage) {
 --- /dev/null
 +++ b/internal/engine/constants_test.go
 @@ -0,0 +1,64 @@
@@ -90,6 +136,103 @@
 +			m := engine.New(mod, data, newJobDealerStub(t), engine.WithDirFs(fs))
 +			if result := m.Run(context.Background()); len(result.Mutants) != 0 {
 +				t.Fatalf("excluded/disabled constants produced mutants: %v", result.Mutants)
++			}
++		})
++	}
++}
+--- /dev/null
++++ b/internal/engine/case_coverage_test.go
+@@ -0,0 +1,94 @@
++package engine_test
++
++import (
++	"context"
++	"fmt"
++	"testing"
++	"testing/fstest"
++
++	"github.com/go-gremlins/gremlins/internal/configuration"
++	"github.com/go-gremlins/gremlins/internal/coverage"
++	"github.com/go-gremlins/gremlins/internal/diff"
++	"github.com/go-gremlins/gremlins/internal/engine"
++	"github.com/go-gremlins/gremlins/internal/gomodule"
++	"github.com/go-gremlins/gremlins/internal/mutator"
++)
++
++func TestCaseExpressionMutantsFollowTheirSwitchCoverage(t *testing.T) {
++	const (
++		tagless = "package example\n\nfunc f(n int) string {\n\tswitch {\n\tcase n > 1:\n\t\treturn \"big\"\n\t}\n\treturn \"\"\n}\n"
++		tagged  = "package example\n\nfunc f(n int) bool {\n\tswitch m := n * 2; m {\n\tcase n + 1:\n\t\treturn true\n\t}\n\treturn false\n}\n"
++		literal = "package example\n\nfunc f(n int) bool {\n\tswitch {\n\tcase func() bool { return n > 1 }():\n\t\treturn true\n\t}\n\treturn false\n}\n"
++		nested  = "package example\n\nfunc f(n int) bool {\n\tswitch {\n\tcase true:\n\t\tswitch {\n\t\tcase n > 1:\n\t\t\treturn true\n\t\t}\n\t}\n\treturn false\n}\n"
++	)
++	// The function's first coverage block ends at the switch's opening brace.
++	header := coverage.Block{StartLine: 3, StartCol: 22, EndLine: 4, EndCol: 9}
++	taggedHeader := coverage.Block{StartLine: 3, StartCol: 20, EndLine: 4, EndCol: 23}
++	boolHeader := coverage.Block{StartLine: 3, StartCol: 20, EndLine: 4, EndCol: 9}
++	// The outer clause body starts after "case true:" and ends at the inner switch's brace.
++	outerBody := coverage.Block{StartLine: 5, StartCol: 12, EndLine: 6, EndCol: 10}
++
++	for _, tc := range []struct {
++		name    string
++		source  string
++		blocks  []coverage.Block
++		changes diff.Diff
++		want    map[string]mutator.Status
++	}{
++		{"tagless covered", tagless, []coverage.Block{header}, nil, map[string]mutator.Status{
++			"5:9 CONDITIONALS_BOUNDARY": mutator.Runnable, "5:9 CONDITIONALS_NEGATION": mutator.Runnable,
++		}},
++		{"tagless not covered", tagless, nil, nil, map[string]mutator.Status{
++			"5:9 CONDITIONALS_BOUNDARY": mutator.NotCovered, "5:9 CONDITIONALS_NEGATION": mutator.NotCovered,
++		}},
++		{"tagged covered", tagged, []coverage.Block{taggedHeader}, nil, map[string]mutator.Status{
++			"4:16 ARITHMETIC_BASE": mutator.Runnable, "5:9 ARITHMETIC_BASE": mutator.Runnable,
++		}},
++		{"tagged not covered", tagged, nil, nil, map[string]mutator.Status{
++			"4:16 ARITHMETIC_BASE": mutator.NotCovered, "5:9 ARITHMETIC_BASE": mutator.NotCovered,
++		}},
++		{"function literal keeps its own coverage", literal, []coverage.Block{boolHeader}, nil, map[string]mutator.Status{
++			"5:30 CONDITIONALS_BOUNDARY": mutator.NotCovered, "5:30 CONDITIONALS_NEGATION": mutator.NotCovered,
++		}},
++		{"nested switch reached", nested, []coverage.Block{boolHeader, outerBody}, nil, map[string]mutator.Status{
++			"7:10 CONDITIONALS_BOUNDARY": mutator.Runnable, "7:10 CONDITIONALS_NEGATION": mutator.Runnable,
++		}},
++		{"nested switch not reached", nested, []coverage.Block{boolHeader}, nil, map[string]mutator.Status{
++			"7:10 CONDITIONALS_BOUNDARY": mutator.NotCovered, "7:10 CONDITIONALS_NEGATION": mutator.NotCovered,
++		}},
++		{"changed case expression", tagless, []coverage.Block{header}, diff.Diff{"file.go": {{StartLine: 5, EndLine: 5}}}, map[string]mutator.Status{
++			"5:9 CONDITIONALS_BOUNDARY": mutator.Runnable, "5:9 CONDITIONALS_NEGATION": mutator.Runnable,
++		}},
++		{"unchanged case expression", tagless, []coverage.Block{header}, diff.Diff{"file.go": {{StartLine: 4, EndLine: 4}}}, map[string]mutator.Status{
++			"5:9 CONDITIONALS_BOUNDARY": mutator.Skipped, "5:9 CONDITIONALS_NEGATION": mutator.Skipped,
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			viperSet(map[string]any{configuration.UnleashDryRunKey: true})
++			defer viperReset()
++			mod := gomodule.GoModule{Name: "example.com", Root: ".", CallingDir: "."}
++			fs := fstest.MapFS{"file.go": {Data: []byte(tc.source)}}
++			data := engine.CodeData{Cov: coverage.Profile{"file.go": tc.blocks}, Diff: tc.changes}
++			m := engine.New(mod, data, newJobDealerStub(t), engine.WithDirFs(fs))
++			result := m.Run(context.Background())
++
++			got := map[string]mutator.Status{}
++			for _, mutant := range result.Mutants {
++				pos := mutant.Position()
++				key := fmt.Sprintf("%d:%d %s", pos.Line, pos.Column, mutant.Type())
++				if _, duplicate := got[key]; duplicate {
++					t.Fatalf("duplicate mutant %s in %v", key, result.Mutants)
++				}
++				got[key] = mutant.Status()
++			}
++			if len(got) != len(tc.want) {
++				t.Fatalf("mutants=%v, want %v", got, tc.want)
++			}
++			for key, status := range tc.want {
++				if got[key] != status {
++					t.Errorf("mutant %s is %v, want %v (all: %v)", key, got[key], status, got)
++				}
 +			}
 +		})
 +	}
