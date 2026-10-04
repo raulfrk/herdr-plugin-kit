@@ -14,22 +14,6 @@ import (
 	"github.com/coder/websocket"
 )
 
-// codexLifecycleHandshake answers the initialize handshake and reports false when the
-// connection ends or the server stops first. A client that finishes before the
-// server consumed its last frame is not a test failure.
-func codexLifecycleHandshake(ctx context.Context, conn *websocket.Conn) bool {
-	_, data, err := conn.Read(ctx)
-	var request rpcTestRequest
-	if err != nil || json.Unmarshal(data, &request) != nil || request.Method != "initialize" {
-		return false
-	}
-	if conn.Write(ctx, websocket.MessageText, []byte(`{"id":`+jsonNumber(request.ID)+`,"result":{"userAgent":"codex-cli/0.154.0"}}`)) != nil {
-		return false
-	}
-	_, data, err = conn.Read(ctx)
-	return err == nil && string(data) == `{"method":"initialized"}`
-}
-
 func TestNewCodexLifecycleRejectsUnsafeSocketBeforeDialing(t *testing.T) {
 	for name, socket := range map[string]string{
 		"relative":  "app.sock",
@@ -173,10 +157,10 @@ func TestCodexLifecycleArmRefusesStaleState(t *testing.T) {
 
 func TestCodexLifecycleConfirmIdentityRefusesBeforeAnyRequest(t *testing.T) {
 	var requests atomic.Int32
+	handshakes := make(chan struct{}, 2)
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
-		if !codexLifecycleHandshake(ctx, conn) {
-			return
-		}
+		lifecycleInitialize(t, ctx, conn)
+		handshakes <- struct{}{}
 		for {
 			_, data, err := conn.Read(ctx)
 			if err != nil {
@@ -196,6 +180,7 @@ func TestCodexLifecycleConfirmIdentityRefusesBeforeAnyRequest(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer lifecycle.Close()
+			codexLifecycleAwaitHandshake(t, handshakes)
 			threadID := "thread-new"
 			if arm {
 				if err := lifecycle.Arm(); err != nil {
@@ -309,15 +294,15 @@ func TestCodexLifecycleApplyObservedReasoningReportsFailedUnsubscribe(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var connections atomic.Int32
+			initialized := make(chan struct{})
 			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 				index := connections.Add(1)
+				lifecycleInitialize(t, ctx, conn)
 				if index == 1 {
-					if codexLifecycleHandshake(ctx, conn) {
-						_, _, _ = conn.Read(ctx)
-					}
+					close(initialized)
+					_, _, _ = conn.Read(ctx)
 					return
 				}
-				lifecycleInitialize(t, ctx, conn)
 				resume := readRPCRequest(t, ctx, conn, "thread/resume")
 				sendRPCResult(t, ctx, conn, resume.ID, `{"thread":{"id":"thread-original","cwd":"/tmp/project","modelProvider":"openai"},"model":"gpt-5.6-sol","modelProvider":"openai","cwd":"/tmp/project","reasoningEffort":null}`)
 				update := readRPCRequest(t, ctx, conn, "thread/settings/update")
@@ -332,6 +317,7 @@ func TestCodexLifecycleApplyObservedReasoningReportsFailedUnsubscribe(t *testing
 				t.Fatal(err)
 			}
 			defer lifecycle.Close()
+			codexLifecycleAwaitHandshake(t, initialized)
 			expected := codexThreadIdentity{ID: "thread-original", CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol"}
 			safeNoDispatch, err := lifecycle.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: expected.Model, ReasoningEffort: "medium"})
 			if safeNoDispatch || err == nil || errors.Is(err, errCodexProtocol) != test.wantProtocol {
@@ -367,15 +353,15 @@ func TestCodexLifecycleApplyObservedReasoningChecksEveryResumeField(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var connections atomic.Int32
+			initialized := make(chan struct{})
 			socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 				index := connections.Add(1)
+				lifecycleInitialize(t, ctx, conn)
 				if index == 1 {
-					if codexLifecycleHandshake(ctx, conn) {
-						_, _, _ = conn.Read(ctx)
-					}
+					close(initialized)
+					_, _, _ = conn.Read(ctx)
 					return
 				}
-				lifecycleInitialize(t, ctx, conn)
 				request := readRPCRequest(t, ctx, conn, "thread/resume")
 				sendRPCResult(t, ctx, conn, request.ID, test.response)
 				if test.accepted {
@@ -390,6 +376,7 @@ func TestCodexLifecycleApplyObservedReasoningChecksEveryResumeField(t *testing.T
 				t.Fatal(err)
 			}
 			defer lifecycle.Close()
+			codexLifecycleAwaitHandshake(t, initialized)
 			expected := codexThreadIdentity{ID: id, CWD: cwd, ModelProvider: provider, Model: model}
 			safeNoDispatch, err := lifecycle.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: model, ReasoningEffort: "medium"})
 			if safeNoDispatch || test.accepted && err != nil || !test.accepted && !errors.Is(err, ErrManagedPolicyDrift) {
