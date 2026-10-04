@@ -29,7 +29,7 @@ func TestRedactMatchesUnguardedPipeline(t *testing.T) {
 		"authori\u017fation: secret", "coo\u212aie: secret", "--api_key=secret", "Bearer token",
 		"token: \"secret\"", "private-key=value", "foo:bar --token value", "\u017fecret=value",
 	} {
-		if got, want := Redact(input), unguardedRedact(input); got != want {
+		if got, want := redactBoundedCall(t, Redact, input), redactBoundedCall(t, unguardedRedact, input); got != want {
 			t.Fatalf("input=%q got=%q want=%q", input, got, want)
 		}
 	}
@@ -40,7 +40,7 @@ func TestRedactMatchesUnguardedPipeline(t *testing.T) {
 			input.WriteString(components[rng.Intn(len(components))])
 		}
 		value := input.String()
-		if got, want := Redact(value), unguardedRedact(value); got != want {
+		if got, want := redactBoundedCall(t, Redact, value), redactBoundedCall(t, unguardedRedact, value); got != want {
 			t.Fatalf("case %d input=%q got=%q want=%q", i, value, got, want)
 		}
 	}
