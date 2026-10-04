@@ -3,7 +3,9 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/raulfrk/herdr-plugin-kit/runtime/command"
 	"github.com/raulfrk/herdr-plugin-kit/runtime/sessionhost"
@@ -258,6 +260,53 @@ func TestValidateSafeSourceRejectsCrossSessionSource(t *testing.T) {
 	launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
 	if err := launcher.validateSafeSource(source, 0); !errors.Is(err, ErrManagedUnsupported) {
 		t.Fatalf("cross-session source error=%v", err)
+	}
+}
+
+func TestManagedCodexGuardSafeSourceBoundsWorkingDirectory(t *testing.T) {
+	longest := "/" + strings.Repeat("a", maxPathBytes-1)
+	for _, test := range []struct {
+		name string
+		cwd  string
+		want error
+	}{
+		{"longest allowed path", longest, nil},
+		{"one byte too long", longest + "a", ErrManagedUnsupported},
+		{"relative", "tmp/project", ErrManagedUnsupported},
+		{"unclean", "/tmp/project/../project", ErrManagedUnsupported},
+		{"NUL byte", "/tmp/pro\x00ject", ErrManagedUnsupported},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := managedAgent(managedOrigin(), test.cwd, managedSourceID, false)
+			launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+			if err := launcher.validateSafeSource(source, 0); !errors.Is(err, test.want) {
+				t.Fatalf("error=%v want=%v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestManagedCodexGuardSafeSourceBoundsReadyTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		timeout time.Duration
+		want    error
+	}{
+		{"default", 0, nil},
+		{"negative", -time.Second, ErrManagedUnsupported},
+		{"shorter than three seconds", time.Second, ErrManagedUnsupported},
+		{"exactly three seconds", 3 * time.Second, ErrManagedUnsupported},
+		{"just over three seconds", 3*time.Second + time.Nanosecond, nil},
+		{"maximum", MaxManagedReadyTimeout, nil},
+		{"just over the maximum", MaxManagedReadyTimeout + time.Nanosecond, ErrManagedUnsupported},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+			launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+			if err := launcher.validateSafeSource(source, test.timeout); !errors.Is(err, test.want) {
+				t.Fatalf("timeout=%v error=%v want=%v", test.timeout, err, test.want)
+			}
+		})
 	}
 }
 
