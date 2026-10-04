@@ -215,6 +215,14 @@ func TestOpenCodePromptServerRejectsInvalidInputAndEarlyExit(t *testing.T) {
 	}
 }
 
+func TestOpenCodePromptServerNilRunnerFailsBeforeReservingPort(t *testing.T) {
+	reservations := 0
+	launcher := nativeOpenCodePromptServerLauncher{reserve: func() (int, error) { reservations++; return 49152, nil }}
+	if _, _, err := launcher.Start(context.Background(), "opencode", "/tmp/project"); err == nil || reservations != 0 {
+		t.Fatalf("reservations=%d error=%v", reservations, err)
+	}
+}
+
 func TestOpenCodePromptServerPortReservationBoundsAndDefault(t *testing.T) {
 	reserveErr := errors.New("reserve failed")
 	invalid := []struct {
