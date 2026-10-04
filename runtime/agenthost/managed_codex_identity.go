@@ -824,9 +824,7 @@ func managedTruncatedPolicy(displayed string, expected ManagedCodexPolicy) (Mana
 	if expected == (ManagedCodexPolicy{}) {
 		const suffix = " (reasoning med"
 		model := strings.TrimSuffix(displayed, suffix)
-		validModel := model != displayed && model != "" && strings.IndexFunc(model, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/-", r))
-		}) == -1
+		validModel := model != displayed && model != "" && strings.IndexFunc(model, invalidManagedModelRune) == -1
 		return ManagedCodexPolicy{Model: model, ReasoningEffort: "med"}, true, validModel
 	}
 	prefix := expected.Model + " (reasoning "
@@ -858,4 +856,8 @@ func managedStatusFields(block, label string) []string {
 		values = append(values, strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	}
 	return values
+}
+
+func invalidManagedModelRune(r rune) bool {
+	return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/-", r))
 }

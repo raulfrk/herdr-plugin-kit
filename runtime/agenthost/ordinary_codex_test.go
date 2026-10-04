@@ -401,6 +401,90 @@ func TestOrdinaryCodexResolvesNarrowStatusPrefixBeforeBinding(t *testing.T) {
 	}
 }
 
+func TestOrdinaryCodexBindingForkRejectsSourceIdentityBeforeAnyObservation(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	unbound := source
+	unbound.Session = nil
+	for _, test := range []struct {
+		name      string
+		source    Agent
+		directory string
+	}{
+		{"source without a session", unbound, "/tmp/project"},
+		{"source in another directory", source, "/tmp/other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &scriptedRunner{}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+			launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher.topology = &fakeManagedTopology{}
+			binding, err := beginOrdinaryCodexBinding(context.Background(), launcher, ManagedFork, test.source, test.directory, ManagedCodexPolicy{}, true, 0)
+			if binding != nil || !errors.Is(err, ErrManagedStale) || len(runner.calls) != 0 {
+				t.Fatalf("binding=%+v error=%v calls=%q", binding, err, runner.calls)
+			}
+		})
+	}
+}
+
+func TestOrdinaryCodexPrepareKeepsObservedStatusPrefixWithoutPolicy(t *testing.T) {
+	target := sessionhost.CreatedTarget{Origin: sessionhost.Origin{SessionName: "named", WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}}
+	unbound := managedAgent(target.Origin, "/tmp/project", managedNewID, false)
+	unbound.Session = nil
+	for _, identity := range []string{
+		"01a09f5c-37cc-77f1-9409-e9aa070a",
+		"01a09f5c-37cc-77f1-9409-e9",
+	} {
+		t.Run(identity, func(t *testing.T) {
+			launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}, Session: "named"})
+			launcher.service = &fakeManagedService{snapshot: managedServiceSnapshot()}
+			launcher.topology = &fakeManagedTopology{}
+			launcher.discoverObserved = func(context.Context, sessionhost.Origin, string, []string, CodexServiceSnapshot, ManagedCodexPolicy) (Agent, managedStatusObservation, error) {
+				return unbound, managedStatusObservation{identity: identity}, nil
+			}
+			binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedNew, readyTimeout: DefaultPromptReadyTimeout}
+			prepared, err := binding.Prepare(context.Background(), target, "/tmp/project", []string{"codex"})
+			if err != nil || prepared.Prefix != identity || prepared.Policy != (ManagedCodexPolicy{}) {
+				t.Fatalf("prepared=%+v error=%v", prepared, err)
+			}
+		})
+	}
+}
+
+func TestOrdinaryCodexForkSourceRecheckRejectsEachSourceDrift(t *testing.T) {
+	source := managedAgent(managedOrigin(), "/tmp/project", managedSourceID, false)
+	process := sessionProcess(source.CWD)
+	replaced := process
+	replaced.PID++
+	movedTab := source
+	movedTab.TabID = "w1:t9"
+	movedDirectory := source
+	movedDirectory.CWD = "/tmp/other"
+	inspectErr := errors.New("inspect failed")
+	for _, test := range []struct {
+		name     string
+		listed   []wireAgent
+		topology *fakeManagedTopology
+		wantErr  error
+	}{
+		{"unchanged", []wireAgent{wireFromAgent(source)}, &fakeManagedTopology{inspected: process}, nil},
+		{"source missing", nil, &fakeManagedTopology{inspected: process}, ErrManagedStale},
+		{"pane moved to another tab", []wireAgent{wireFromAgent(movedTab)}, &fakeManagedTopology{inspected: process}, ErrManagedStale},
+		{"pane moved to another directory", []wireAgent{wireFromAgent(movedDirectory)}, &fakeManagedTopology{inspected: process}, ErrManagedStale},
+		{"foreground process replaced", []wireAgent{wireFromAgent(source)}, &fakeManagedTopology{inspected: replaced}, ErrManagedStale},
+		{"foreground process unreadable", []wireAgent{wireFromAgent(source)}, &fakeManagedTopology{inspectErr: inspectErr}, ErrManagedStale},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &scriptedRunner{results: []command.Result{jsonResult(t, listResponse(test.listed...))}}
+			launcher := NewManagedCodexLauncher(Host{Runner: runner, Session: "named"})
+			launcher.topology = test.topology
+			binding := &ordinaryCodexBinding{launcher: launcher, operation: ManagedFork, source: source, sourceProcess: process}
+			if err := binding.recheckForkSource(context.Background()); !errors.Is(err, test.wantErr) {
+				t.Fatalf("error=%v want=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func hasAgentSessionReport(calls [][]string) bool {
 	for _, call := range calls {
 		for _, arg := range call {
