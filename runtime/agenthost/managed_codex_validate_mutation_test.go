@@ -48,8 +48,8 @@ func runManagedValidateRows(t *testing.T, rows []managedValidateRow) {
 	}
 }
 
-// managedResumePolicies pairs a source and target policy that match the base Resume request.
-func managedResumePolicies(request *ManagedCodexRequest) (*EffectiveCodexPolicy, *EffectiveCodexPolicy) {
+// managedValidateResumePolicies pairs a source and target policy that match the base Resume request.
+func managedValidateResumePolicies(request *ManagedCodexRequest) (*EffectiveCodexPolicy, *EffectiveCodexPolicy) {
 	source := managedPreflight(request.Directory).EffectiveCodexPolicy
 	target := source
 	request.resumeSourcePolicy, request.resumeTargetPolicy = &source, &target
@@ -95,26 +95,26 @@ func TestManagedCodexValidateResumeReconciliationPolicies(t *testing.T) {
 	const invalid = "reconciliation policy is invalid"
 	maxTier := strings.Repeat("a", maxIdentityBytes)
 	runManagedValidateRows(t, []managedValidateRow{
-		{"paired policies", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { managedResumePolicies(r) }, ""},
-		{"not a Resume", ManagedNew, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { managedResumePolicies(r) }, invalid},
+		{"paired policies", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { managedValidateResumePolicies(r) }, ""},
+		{"not a Resume", ManagedNew, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { managedValidateResumePolicies(r) }, invalid},
 		{"source directory differs", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
-			source, _ := managedResumePolicies(r)
+			source, _ := managedValidateResumePolicies(r)
 			source.CWD = "/tmp/other"
 		}, invalid},
 		{"target directory differs", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
-			_, target := managedResumePolicies(r)
+			_, target := managedValidateResumePolicies(r)
 			target.CWD = "/tmp/other"
 		}, invalid},
 		{"target policy differs from the request", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
-			_, target := managedResumePolicies(r)
+			_, target := managedValidateResumePolicies(r)
 			target.Model = "other-model"
 		}, invalid},
 		{"service tier at the byte limit", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
-			source, _ := managedResumePolicies(r)
+			source, _ := managedValidateResumePolicies(r)
 			source.ServiceTier = maxTier
 		}, ""},
 		{"service tier over the byte limit", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
-			source, _ := managedResumePolicies(r)
+			source, _ := managedValidateResumePolicies(r)
 			source.ServiceTier = maxTier + "a"
 		}, "service tier is invalid"},
 	})
@@ -179,7 +179,9 @@ func TestManagedCodexValidateResumeSourceArgvAndPlacement(t *testing.T) {
 	}
 	runManagedValidateRows(t, []managedValidateRow{
 		{"resume without captured argv", ManagedResume, nil, ""},
-		{"resume with captured argv", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { r.SourceArgv = []string{"codex", "-s", "read-only"} }, ""},
+		{"resume with captured argv", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) {
+			r.SourceArgv = []string{"codex", "-s", "read-only"}
+		}, ""},
 		{"resume with foreign argv", ManagedResume, func(_ *ManagedCodexLauncher, r *ManagedCodexRequest) { r.SourceArgv = []string{"other"} }, "source argv is invalid"},
 		label("label at the byte limit", maxLabel, ""),
 		label("label over the byte limit", maxLabel+"a", "tab label is invalid"),
