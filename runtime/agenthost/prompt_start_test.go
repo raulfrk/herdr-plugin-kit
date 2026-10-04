@@ -68,7 +68,7 @@ func TestPromptStarterOMPOrdersIdentityThenOneDelivery(t *testing.T) {
 	deliveries := 0
 	starter := NewPromptStarter(Host{Runner: runner, Session: "named"})
 	starter.launcher = topology
-	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.wait = newPromptWaitRecorder(t, 100).wait
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		deliveries++
 		return PromptResult{Target: clonePromptTarget(target), Agent: target.Agent, State: PromptAcknowledged}, nil
@@ -100,7 +100,7 @@ func TestPromptStarterOpenCodePrecreatesOwnedSessionAndInjectsOnlyItsID(t *testi
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}, Session: ""})
 	starter.launcher, starter.openCodeSessions = topology, sessions
 	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(4097)
-	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.wait = newPromptWaitRecorder(t, 100).wait
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
 	}
@@ -130,7 +130,7 @@ func TestPromptStarterOwnsShortLivedOpenCodeServerButPreservesStartedTarget(t *t
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
 	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
 	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(49153)
-	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.wait = newPromptWaitRecorder(t, 100).wait
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
 	}
@@ -175,7 +175,7 @@ func TestPromptStarterOwnedOpenCodeStopFailureKeepsAcknowledgedTarget(t *testing
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: wire}})
 	starter.launcher, starter.openCodeSessions, starter.openCodeServer = topology, sessions, server
 	starter.openCodeTUIReserve = fixedOpenCodeTUIReserve(49153)
-	starter.wait = func(context.Context, time.Duration) error { return nil }
+	starter.wait = newPromptWaitRecorder(t, 100).wait
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
 	}
@@ -223,7 +223,7 @@ func TestPromptStarterFailureOwnershipDistinguishesReadinessAndTransport(t *test
 			agent.TabID = created.TabID
 			starter := NewPromptStarter(Host{Runner: &promptRunner{agent: forkWire(agent)}, Session: "named"})
 			starter.launcher = topology
-			starter.wait = func(context.Context, time.Duration) error { return nil }
+			starter.wait = newPromptWaitRecorder(t, 100).wait
 			starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 				return PromptResult{Target: target, Agent: target.Agent, State: test.delivery}, errors.New("delivery failed")
 			}
@@ -465,6 +465,7 @@ func TestPromptStarterFocusFailureAfterAcknowledgementLeavesConversation(t *test
 	agent.TabID = created.TabID
 	starter := NewPromptStarter(Host{Runner: &promptRunner{agent: forkWire(agent)}, Session: "named"})
 	starter.launcher = topology
+	starter.wait = newPromptWaitRecorder(t, 100).wait
 	starter.deliver = func(_ context.Context, _ Prompt, target PromptTarget) (PromptResult, error) {
 		return PromptResult{Target: target, Agent: target.Agent, State: PromptAcknowledged}, nil
 	}
@@ -499,16 +500,21 @@ func TestPromptStarterWaitForAgentErrorsAreBoundedAndCleaned(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		runner    command.Runner
-		configure func(*PromptStarter)
+		configure func(*testing.T, *PromptStarter)
 	}{
 		{
 			name: "diagnostic failure", runner: &scriptedRunner{results: []command.Result{{}}, errs: []error{errors.New("diagnostic failed")}},
-			configure: func(*PromptStarter) {},
+			configure: func(t *testing.T, starter *PromptStarter) { starter.wait = newPromptWaitRecorder(t, 3).wait },
 		},
 		{
 			name: "pending identity", runner: &promptRunner{agent: wireAgent{Agent: "omp", AgentStatus: "idle", CWD: "/tmp/project", Focused: false, PaneID: "w1:p2", TabID: "w1:t2", WorkspaceID: "w1"}},
-			configure: func(starter *PromptStarter) {
+			configure: func(t *testing.T, starter *PromptStarter) {
+				waits := 0
 				starter.wait = func(_ context.Context, duration time.Duration) error {
+					waits++
+					if waits > 1 {
+						t.Fatalf("identity wait continued after reporting an error: wait %d", waits)
+					}
 					if duration != 50*time.Millisecond {
 						t.Fatalf("wait=%s", duration)
 					}
@@ -522,7 +528,7 @@ func TestPromptStarterWaitForAgentErrorsAreBoundedAndCleaned(t *testing.T) {
 			topology := &fakeTopology{created: created}
 			starter := NewPromptStarter(Host{Runner: test.runner})
 			starter.launcher = topology
-			test.configure(&starter)
+			test.configure(t, &starter)
 			prompt, _ := PreparePrompt("hello")
 			_, err := starter.Start(context.Background(), prompt, PromptStartRequest{
 				Origin: sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1"},
