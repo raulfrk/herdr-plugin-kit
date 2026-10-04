@@ -92,9 +92,9 @@ func TestNativeSameIdentityComparesEveryField(t *testing.T) {
 	}
 }
 
-// nativeMutationAgentList renders a Herdr agent-list response for target. The
+// nativeAgentListPayload renders a Herdr agent-list response for target. The
 // change callback may edit the envelope or its result before encoding.
-func nativeMutationAgentList(t *testing.T, target Agent, change func(envelope, result map[string]any)) []byte {
+func nativeAgentListPayload(t *testing.T, target Agent, change func(envelope, result map[string]any)) []byte {
 	t.Helper()
 	agent := map[string]any{
 		"agent": target.Kind, "workspace_id": target.WorkspaceID,
@@ -118,7 +118,7 @@ func nativeMutationAgentList(t *testing.T, target Agent, change func(envelope, r
 
 func TestNativeFindIdentityAcceptsExactJSONLimitAndRejectsMalformedEnvelopes(t *testing.T) {
 	target := nativeTarget("omp", "path", "/tmp/session.jsonl")
-	valid := nativeMutationAgentList(t, target, nil)
+	valid := nativeAgentListPayload(t, target, nil)
 	pad := func(size int) []byte {
 		return append(append([]byte(nil), valid...), bytes.Repeat([]byte(" "), size-len(valid))...)
 	}
@@ -130,9 +130,9 @@ func TestNativeFindIdentityAcceptsExactJSONLimitAndRejectsMalformedEnvelopes(t *
 		{"plain response", valid, true},
 		{"response of exactly the size limit", pad(herdrcmd.MaxJSONBytes), true},
 		{"response one byte over the size limit", pad(herdrcmd.MaxJSONBytes + 1), false},
-		{"result of another type", nativeMutationAgentList(t, target, func(_, result map[string]any) { result["type"] = "agent_info" }), false},
-		{"unknown envelope field", nativeMutationAgentList(t, target, func(envelope, _ map[string]any) { envelope["future"] = true }), false},
-		{"unknown result field", nativeMutationAgentList(t, target, func(_, result map[string]any) { result["future"] = true }), false},
+		{"result of another type", nativeAgentListPayload(t, target, func(_, result map[string]any) { result["type"] = "agent_info" }), false},
+		{"unknown envelope field", nativeAgentListPayload(t, target, func(envelope, _ map[string]any) { envelope["future"] = true }), false},
+		{"unknown result field", nativeAgentListPayload(t, target, func(_, result map[string]any) { result["future"] = true }), false},
 		{"second JSON value", append(append([]byte(nil), valid...), []byte(" {}")...), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
