@@ -126,6 +126,23 @@ func TestVerifyFocusedWorkingAutofocusChecksForegroundProcessAndFinalRead(t *tes
 			}
 		})
 	}
+	for _, read := range []string{"first", "second", "last"} {
+		t.Run("identity changed at the "+read+" read", func(t *testing.T) {
+			c := newSwitchGuardAutofocusCase()
+			switch read {
+			case "first":
+				c.before.TabID = "w:other"
+			case "second":
+				c.second.TabID = "w:other"
+			default:
+				c.final.TabID = "w:other"
+			}
+			_, runner, err := c.verify(t)
+			if !errors.Is(err, ErrUnsafeSessionChange) || !errors.Is(err, ErrStaleReport) || read == "first" && len(runner.calls) != 1 {
+				t.Fatalf("error=%v calls=%d", err, len(runner.calls))
+			}
+		})
+	}
 	t.Run("source changed after the last composer check", func(t *testing.T) {
 		c := newSwitchGuardAutofocusCase()
 		c.final.StateChangeSeq++
