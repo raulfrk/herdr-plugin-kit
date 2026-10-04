@@ -321,10 +321,11 @@ func TestForkRejectsInvalidReadyTimeoutBeforeLaunch(t *testing.T) {
 	source := forkAgent("codex", "w1:p1", "thread", "/tmp/project")
 	for _, timeout := range []time.Duration{-time.Nanosecond, MaxForkReadyTimeout + time.Nanosecond} {
 		topology := &fakeTopology{}
-		forker := NewForker(Host{Runner: &scriptedRunner{}, Session: "named"})
+		runner := &scriptedRunner{}
+		forker := NewForker(Host{Runner: runner, Session: "named"})
 		forker.launcher = topology
-		if _, err := forker.Fork(context.Background(), ForkRequest{Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab, ReadyTimeout: timeout}); err == nil || len(topology.requests) != 0 {
-			t.Fatalf("timeout %v accepted", timeout)
+		if _, err := forker.Fork(context.Background(), ForkRequest{Source: source, Profile: ForkProfile{Executable: "codex"}, Placement: sessionhost.NewTab, ReadyTimeout: timeout}); err == nil || !strings.Contains(err.Error(), "readiness timeout") || len(runner.calls) != 0 || len(topology.requests) != 0 {
+			t.Fatalf("timeout %v accepted: error=%v calls=%v", timeout, err, runner.calls)
 		}
 	}
 }
