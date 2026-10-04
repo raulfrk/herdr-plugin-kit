@@ -435,6 +435,9 @@ func TestCleanAbsoluteRejectsRelativePathsAndAcceptsExactLimit(t *testing.T) {
 	if len(exactLimit) != maxPathBytes || !cleanAbsolute(exactLimit) {
 		t.Fatalf("exact path limit accepted=%t length=%d", cleanAbsolute(exactLimit), len(exactLimit))
 	}
+	if overLimit := exactLimit + "a"; cleanAbsolute(overLimit) {
+		t.Fatalf("clean absolute path of %d bytes accepted, limit is %d", len(overLimit), maxPathBytes)
+	}
 }
 
 func TestCodexUserAgentRequiresExactPinnedVersionToken(t *testing.T) {

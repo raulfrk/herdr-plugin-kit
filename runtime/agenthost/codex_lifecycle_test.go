@@ -57,6 +57,20 @@ func lifecycleInitialize(t *testing.T, ctx context.Context, conn *websocket.Conn
 	}
 }
 
+// codexLifecycleAwaitHandshake blocks until the server side of a verifier connection
+// has consumed the initialized notification. A handler that only finishes the handshake
+// and then idles is otherwise concurrent with the end of the test, whose cleanup cancels
+// the handler context: a handler that is slow to read fails its handshake read with
+// "context canceled" or "use of closed network connection".
+func codexLifecycleAwaitHandshake(t *testing.T, handshakes <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-handshakes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the server did not consume the initialized notification")
+	}
+}
+
 func lifecycleConfig() string {
 	return `{"config":{"model":"gpt-5.6-sol","model_reasoning_effort":"medium","approval_policy":"never","sandbox_mode":"danger-full-access","approvals_reviewer":"user","default_permissions":null,"service_tier":null},"origins":{}}`
 }
@@ -709,11 +723,7 @@ func TestCodexLifecycleEffectiveReadSendsNoOverridesAndUnsubscribes(t *testing.T
 		t.Fatal(err)
 	}
 	defer verifier.Close()
-	select {
-	case <-initialized:
-	case <-time.After(time.Second):
-		t.Fatal("initial lifecycle did not consume initialized notification")
-	}
+	codexLifecycleAwaitHandshake(t, initialized)
 	effective, err := verifier.ReadEffective(context.Background(), "thread-original")
 	if err != nil || effective.ModelProvider != "openai" || effective.MultiAgentMode != "explicitRequestOnly" || effective.SandboxMode != "workspace-write" || !effective.SandboxNetworkAccess || !effective.SandboxExcludeSlashTmp || effective.SandboxExcludeTmpdirEnvVar || !reflect.DeepEqual(effective.SandboxWritableRoots, []string{"/tmp/write"}) || !reflect.DeepEqual(effective.RuntimeWorkspaceRoots, []string{"/tmp/project"}) || !reflect.DeepEqual(effective.InstructionSources, []string{"/tmp/AGENTS.md"}) {
 		t.Fatalf("effective=%+v error=%v", effective, err)
@@ -768,10 +778,12 @@ func TestCodexLifecycleLoadedThreadRequiresCurrentLiveState(t *testing.T) {
 
 func TestCodexLifecycleAppliesOnlyObservedReasoningOnStoppedThread(t *testing.T) {
 	var connections atomic.Int32
+	initialized := make(chan struct{})
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 		index := connections.Add(1)
 		lifecycleInitialize(t, ctx, conn)
 		if index == 1 {
+			close(initialized)
 			_, _, _ = conn.Read(ctx)
 			return
 		}
@@ -794,6 +806,7 @@ func TestCodexLifecycleAppliesOnlyObservedReasoningOnStoppedThread(t *testing.T)
 		t.Fatal(err)
 	}
 	defer verifier.Close()
+	codexLifecycleAwaitHandshake(t, initialized)
 	expected := codexThreadIdentity{ID: "thread-original", CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol"}
 	if safeNoDispatch, err := verifier.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: expected.Model, ReasoningEffort: "medium"}); err != nil || safeNoDispatch {
 		t.Fatalf("apply observed reasoning safeNoDispatch=%t error=%v", safeNoDispatch, err)
@@ -802,10 +815,12 @@ func TestCodexLifecycleAppliesOnlyObservedReasoningOnStoppedThread(t *testing.T)
 
 func TestCodexLifecycleRejectsContradictoryResumeBeforeSettingsUpdate(t *testing.T) {
 	var connections atomic.Int32
+	initialized := make(chan struct{})
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 		index := connections.Add(1)
 		lifecycleInitialize(t, ctx, conn)
 		if index == 1 {
+			close(initialized)
 			_, _, _ = conn.Read(ctx)
 			return
 		}
@@ -820,6 +835,7 @@ func TestCodexLifecycleRejectsContradictoryResumeBeforeSettingsUpdate(t *testing
 		t.Fatal(err)
 	}
 	defer verifier.Close()
+	codexLifecycleAwaitHandshake(t, initialized)
 	expected := codexThreadIdentity{ID: "thread-original", CWD: "/tmp/project", ModelProvider: "openai", Model: "gpt-5.6-sol"}
 	if safeNoDispatch, err := verifier.ApplyObservedReasoning(context.Background(), expected, ManagedCodexPolicy{Model: expected.Model, ReasoningEffort: "medium"}); !errors.Is(err, ErrManagedPolicyDrift) || safeNoDispatch {
 		t.Fatalf("contradictory resume safeNoDispatch=%t error=%v", safeNoDispatch, err)
@@ -851,10 +867,12 @@ func TestConversionConstraintsUseOnlyMatchingObservedDefaultReviewer(t *testing.
 
 func TestCodexLifecycleEffectiveReadRejectsWrongUnsubscribeStatus(t *testing.T) {
 	var connections atomic.Int32
+	initialized := make(chan struct{})
 	socket := unixServer(t, func(ctx context.Context, conn *websocket.Conn) {
 		index := connections.Add(1)
 		lifecycleInitialize(t, ctx, conn)
 		if index == 1 {
+			close(initialized)
 			_, _, _ = conn.Read(ctx)
 			return
 		}
@@ -869,6 +887,7 @@ func TestCodexLifecycleEffectiveReadRejectsWrongUnsubscribeStatus(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer verifier.Close()
+	codexLifecycleAwaitHandshake(t, initialized)
 	if _, err := verifier.ReadEffective(context.Background(), "thread-original"); !errors.Is(err, errCodexProtocol) {
 		t.Fatalf("error=%v", err)
 	}
