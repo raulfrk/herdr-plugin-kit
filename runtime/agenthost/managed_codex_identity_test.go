@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -766,7 +767,9 @@ func TestWaitForManagedProcessTimesOutAndRejectsAmbiguity(t *testing.T) {
 	target := sessionhost.Origin{WorkspaceID: "w1", TabID: "w1:t2", PaneID: "w1:p2"}
 	for _, processErr := range []error{sessionhost.ErrStaleTarget, sessionhost.ErrAmbiguousTarget} {
 		launcher := NewManagedCodexLauncher(Host{Runner: &scriptedRunner{}})
-		launcher.topology = &fakeManagedTopology{verifyErr: processErr}
+		// A finite run of failures, then success: a wait that keeps polling after its timeout ends in a
+		// process instead of spinning for ever, so the check below fails instead of hanging.
+		launcher.topology = &fakeManagedTopology{verifyErrs: slices.Repeat([]error{processErr}, 50)}
 		_, err := launcher.waitForProcess(context.Background(), target, "/tmp/project", []string{"codex"}, time.Millisecond)
 		if err == nil {
 			t.Fatalf("process error %v accepted", processErr)
