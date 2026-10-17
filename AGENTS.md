@@ -4,8 +4,16 @@ Apply these repository-specific rules alongside the general engineering
 instructions. Preserve the acceptance criteria and thresholds in
 `docs/test-strategy.md`; efficiency comes from sequencing and evidence reuse.
 
+Pushing: after local checks pass, commit and push without asking.
+
 ## Work in small observable increments
 
+- Separate fixture readiness, narrow assumption proofs, and complete public
+  acceptance; use the technical-investigation and review-gate workflows without
+  turning each setup detail into another full test or review cycle.
+- After a shared-tooling detour, return to the consumer's original requirements
+  and reconcile its outstanding journeys and release gates in the existing
+  Beads/traceability. Producer success alone is not whole-product acceptance.
 - Inspect the affected implementation and existing evidence before proposing
   work. State the next observable result and its smallest sufficient check.
 - Prove uncertain supported-version behavior with a disposable live experiment
